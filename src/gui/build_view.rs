@@ -4,12 +4,13 @@ use pob_egui::data::CalcOutput;
 use pob_egui::lua_bridge::LuaBridge;
 
 use super::config_tab::ConfigPanel;
+use super::tree_tab::TreePanel;
 
 /// Which tab is currently active in the build view.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BuildTab {
+    Tree,
     Config,
-    // Future tabs: Skills, Items, Tree, Calcs, Import, Notes
 }
 
 /// State for an open build.
@@ -17,6 +18,7 @@ pub struct BuildView {
     pub build_name: String,
     pub calc_output: Option<CalcOutput>,
     pub config_panel: Option<ConfigPanel>,
+    pub tree_panel: Option<TreePanel>,
     pub active_tab: BuildTab,
 }
 
@@ -27,12 +29,14 @@ impl BuildView {
             .ok();
 
         let config_panel = Some(ConfigPanel::new(bridge.lua()));
+        let tree_panel = Some(TreePanel::new(bridge.lua()));
 
         Self {
             build_name,
             calc_output,
             config_panel,
-            active_tab: BuildTab::Config,
+            tree_panel,
+            active_tab: BuildTab::Tree,
         }
     }
 
@@ -60,12 +64,19 @@ impl BuildView {
         // Tab bar + content
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.active_tab, BuildTab::Tree, "Tree");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Config, "Config");
-                // Future tabs will be added here
             });
             ui.separator();
 
             match self.active_tab {
+                BuildTab::Tree => {
+                    if let Some(ref mut tree) = self.tree_panel
+                        && tree.show(ui, bridge)
+                    {
+                        self.refresh_calc_output(bridge);
+                    }
+                }
                 BuildTab::Config => {
                     if let Some(ref mut config) = self.config_panel
                         && config.show(ui, bridge)

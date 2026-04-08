@@ -3,6 +3,8 @@
 mod build_list;
 mod build_view;
 mod config_tab;
+mod tree_renderer;
+mod tree_tab;
 
 use pob_egui::data::CalcOutput;
 use pob_egui::lua_bridge::LuaBridge;
@@ -13,7 +15,7 @@ use build_view::BuildView;
 /// What screen the app is showing.
 enum AppScreen {
     BuildList(BuildListPanel),
-    BuildView(BuildView),
+    BuildView(Box<BuildView>),
 }
 
 /// Main application state.
@@ -88,10 +90,10 @@ impl PobApp {
             return;
         }
 
-        self.screen = Some(AppScreen::BuildView(BuildView::new(
+        self.screen = Some(AppScreen::BuildView(Box::new(BuildView::new(
             build_info.build_name.clone(),
             &self.bridge,
-        )));
+        ))));
     }
 
     fn go_to_build_list(&mut self) {

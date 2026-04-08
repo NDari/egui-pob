@@ -310,13 +310,15 @@ This proves the full pipeline: Lua boot → build load → calc → Rust display
 - [x] Implemented `NewFileSearch` (glob-based file search with Lua userdata handle)
 - [x] Build view layout: stat sidebar (left) + tabbed content (right)
 
-### Phase C — Passive Tree View
+### Phase C — Passive Tree View (done)
 
-1. Custom egui painter for tree rendering
-2. Pan/zoom with mouse drag/scroll
-3. Node hover → tooltip with stat descriptions
-4. Click to allocate/deallocate → triggers recalc
-5. Load tree node images as egui textures
+- [x] Custom egui painter for tree rendering (colored circles by node type, connection lines)
+- [x] Pan/zoom with mouse drag/scroll (zoom toward cursor)
+- [x] Node hover → tooltip with name, type, stats, allocation status
+- [x] Click to allocate/deallocate → triggers recalc, stats update live
+- [x] Filtered cross-tree connections (ascendancy links) and mastery connections for clean display
+- [x] Visibility culling for performance
+- [ ] Load tree node images as egui textures (deferred — functional without sprites)
 
 ### Phase D — Items + Skills
 
@@ -416,8 +418,10 @@ CI builds with `cargo build --release` for each target. Cross-compilation via `c
 - [x] Config panel renders all option types without panic
 - [x] Config changes trigger recalc, stats update live
 
-### Phase C-E (GUI):
-- [ ] Each panel renders without panic
-- [ ] User interactions trigger recalc correctly
-- [ ] Numbers update after changes
+### Phase C (done — passive tree):
+- [x] Tree renders without panic, pan/zoom/click works
+- [x] Node allocation triggers recalc, stats update live
+
+### Phase D-E (GUI):
+- [ ] Items + skills panels render without panic
 - [ ] Build save/load round-trips correctly

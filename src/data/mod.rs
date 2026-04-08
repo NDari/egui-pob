@@ -2,6 +2,7 @@
 
 pub mod build_list;
 pub mod config;
+pub mod tree;
 
 use std::collections::HashMap;
 

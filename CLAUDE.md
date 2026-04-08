@@ -90,6 +90,6 @@ upstream/                # Git submodule — READ-ONLY
 
 ## Implementation Phases
 
-Current: **Phase B complete** (build list + config panel — folder navigation, build loading, config widgets with live recalc)
+Current: **Phase C complete** (passive tree view — pan/zoom, node tooltips, click to allocate/deallocate with live recalc)
 
-Next: **Phase C** — passive tree view. See `PLAN.md` for phases C through F.
+Next: **Phase D** — items + skills. See `PLAN.md` for phases D through F.
