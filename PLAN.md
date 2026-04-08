@@ -290,22 +290,25 @@ build = mainObject.main.modes["BUILD"]
 
 ## Next Steps: Build the GUI Incrementally
 
-### Phase A — Stat Display (next)
+### Phase A — Stat Display (done)
 
-1. Load a build XML (hard-coded path or file dialog)
-2. Call `mainObject.main:SetMode("BUILD", ...)` via mlua
-3. Extract calc output from `env.player.output` into `CalcOutput` struct
-4. Display stats in an egui table/grid
-5. Verify numbers match upstream's output exactly
+- [x] Load a build XML (from `test_builds/`)
+- [x] Call `mainObject.main:SetMode("BUILD", ...)` via mlua
+- [x] Extract calc output from `build.calcsTab.mainOutput` into `CalcOutput` struct
+- [x] Display stats in an egui table/grid (key stats + collapsible full list)
+- [x] Verify numbers match upstream's output exactly (95/95 stats, integration test)
+- [x] Fixes: `lua-utf8` shim, `arg` global, nested stat flattening (`MainHand.Accuracy`)
 
 This proves the full pipeline: Lua boot → build load → calc → Rust display.
 
-### Phase B — Build List + Config Panel
+### Phase B — Build List + Config Panel (done)
 
-1. Scan user build directory (`GetUserPath()`), list builds in egui
-2. Open/create builds via upstream's SetMode
-3. Config panel: read `ConfigOptions.lua` definitions, render as egui widgets (checkboxes, dropdowns, drag values)
-4. Changing config triggers recalc, stats update live
+- [x] Scan user build directory (`GetUserPath()`), list builds in egui with folder navigation
+- [x] Open builds via upstream's SetMode (double-click to open, back button to return)
+- [x] Config panel: read `ConfigOptions.lua` definitions, render as egui widgets (checkboxes, dropdowns, text inputs)
+- [x] Changing config triggers recalc, stats update live in sidebar
+- [x] Implemented `NewFileSearch` (glob-based file search with Lua userdata handle)
+- [x] Build view layout: stat sidebar (left) + tabbed content (right)
 
 ### Phase C — Passive Tree View
 
@@ -403,12 +406,17 @@ CI builds with `cargo build --release` for each target. Cross-compilation via `c
 - [x] `mainObject_ref` exists (boot verified)
 - [x] egui window opens
 
-### Phase A (stats — next):
-- [ ] Load a known build XML
-- [ ] Extract calc output to Rust
-- [ ] Compare DPS / life / ES numbers with upstream — **must match exactly**
+### Phase A (done — stat display):
+- [x] Load a known build XML
+- [x] Extract calc output to Rust
+- [x] Compare DPS / life / ES numbers with upstream — **95/95 stats match exactly**
 
-### Phase B-E (GUI):
+### Phase B (done — build list + config):
+- [x] Build list renders, folder navigation works
+- [x] Config panel renders all option types without panic
+- [x] Config changes trigger recalc, stats update live
+
+### Phase C-E (GUI):
 - [ ] Each panel renders without panic
 - [ ] User interactions trigger recalc correctly
 - [ ] Numbers update after changes

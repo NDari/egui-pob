@@ -62,14 +62,21 @@ test_builds/             # Known-good build XMLs for calc verification
 
 src/
 ├── main.rs              # Entry point, path detection, init
+├── lib.rs               # Library crate (exposes data + lua_bridge for tests)
 ├── lua_bridge/          # Lua ↔ Rust FFI interface
-│   ├── mod.rs           # LuaBridge: VM setup, bootstrap, run_frame
+│   ├── mod.rs           # LuaBridge: VM setup, bootstrap, build loading
+│   ├── filesearch.rs    # NewFileSearch: glob-based file search (Lua userdata)
 │   ├── stubs.rs         # Rendering/input no-ops (~50 SimpleGraphic API stubs)
 │   └── system.rs        # Working system functions (time, paths, clipboard, etc.)
 ├── gui/
-│   └── mod.rs           # PobApp: eframe::App impl
+│   ├── mod.rs           # PobApp: screen routing (build list ↔ build view)
+│   ├── build_list.rs    # Build list panel with folder navigation
+│   ├── build_view.rs    # Build view: stat sidebar + tabbed content
+│   └── config_tab.rs    # Config panel: checkboxes, dropdowns, text inputs
 └── data/
-    └── mod.rs           # Marshaled data types (placeholder)
+    ├── mod.rs           # CalcOutput: stat extraction from Lua
+    ├── build_list.rs    # BuildEntry/BuildInfo: build directory scanning
+    └── config.rs        # ConfigOption: config definitions + read/write
 
 upstream/                # Git submodule — READ-ONLY
 ├── src/                 # All upstream Lua source
@@ -83,6 +90,6 @@ upstream/                # Git submodule — READ-ONLY
 
 ## Implementation Phases
 
-Current: **Phase 0 complete** (headless bootstrap — Lua boots, mainObject exists, egui window opens)
+Current: **Phase B complete** (build list + config panel — folder navigation, build loading, config widgets with live recalc)
 
-Next: **Phase A** — stat display and calc verification. See `PLAN.md` for phases B through F.
+Next: **Phase C** — passive tree view. See `PLAN.md` for phases C through F.

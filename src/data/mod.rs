@@ -1,5 +1,8 @@
 //! Rust-side data structures for marshaled Lua data.
 
+pub mod build_list;
+pub mod config;
+
 use std::collections::HashMap;
 
 use mlua::prelude::*;

@@ -1,6 +1,7 @@
 //! Lua bridge: embeds LuaJIT, loads upstream PoB headless, and provides
 //! the interface between Rust/egui and the Lua calc engine + data model.
 
+mod filesearch;
 mod stubs;
 mod system;
 
@@ -47,6 +48,9 @@ impl LuaBridge {
         // Register working system functions (paths, time, clipboard, etc.)
         system::register(&lua, src_path, base_dir)
             .map_err(lua_err("Failed to register system functions"))?;
+
+        // Register NewFileSearch (overwrites the stub from stubs.rs)
+        filesearch::register(&lua).map_err(lua_err("Failed to register NewFileSearch"))?;
 
         // Change working directory to upstream/src/ so relative paths resolve
         std::env::set_current_dir(src_path)
@@ -101,6 +105,30 @@ impl LuaBridge {
         Self::run_callback_static(&self.lua, "OnFrame")?;
 
         log::info!("Build loaded: {name}");
+        Ok(())
+    }
+
+    /// Get the build directory path (where user saves builds).
+    pub fn build_path(&self) -> Result<String> {
+        self.lua
+            .load("return mainObject_ref.main.buildPath")
+            .eval()
+            .map_err(lua_err("Failed to get buildPath"))
+    }
+
+    /// Switch to the build list mode.
+    pub fn set_mode_list(&self) -> Result<()> {
+        let main_obj: LuaTable = self
+            .lua
+            .load("return mainObject_ref.main")
+            .eval()
+            .map_err(lua_err("Failed to get mainObject.main"))?;
+
+        main_obj
+            .call_method::<()>("SetMode", ("LIST",))
+            .map_err(lua_err("SetMode('LIST') failed"))?;
+
+        Self::run_callback_static(&self.lua, "OnFrame")?;
         Ok(())
     }
 

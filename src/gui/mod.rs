@@ -1,20 +1,30 @@
 //! egui GUI — top-level App and panel modules.
 
+mod build_list;
+mod build_view;
+mod config_tab;
+
 use pob_egui::data::CalcOutput;
 use pob_egui::lua_bridge::LuaBridge;
+
+use build_list::{BuildListAction, BuildListPanel};
+use build_view::BuildView;
+
+/// What screen the app is showing.
+enum AppScreen {
+    BuildList(BuildListPanel),
+    BuildView(BuildView),
+}
 
 /// Main application state.
 pub struct PobApp {
     bridge: LuaBridge,
     status: AppStatus,
-    calc_output: Option<CalcOutput>,
-    build_load_attempted: bool,
+    screen: Option<AppScreen>,
 }
 
 enum AppStatus {
-    /// Lua bridge loaded successfully, app is running.
     Running,
-    /// An error occurred during boot or build loading.
     Error(String),
 }
 
@@ -29,99 +39,75 @@ impl PobApp {
                     Self {
                         bridge: b,
                         status: AppStatus::Error(format!("Boot verification failed: {e}")),
-                        calc_output: None,
-                        build_load_attempted: false,
+                        screen: None,
                     }
                 } else {
+                    // Initialize build list
+                    let screen = match b.build_path() {
+                        Ok(path) => {
+                            log::info!("Build path: {path}");
+                            Some(AppScreen::BuildList(BuildListPanel::new(path)))
+                        }
+                        Err(e) => {
+                            log::error!("Failed to get build path: {e}");
+                            None
+                        }
+                    };
                     Self {
                         bridge: b,
                         status: AppStatus::Running,
-                        calc_output: None,
-                        build_load_attempted: false,
+                        screen,
                     }
                 }
             }
             Err(e) => Self {
                 bridge: LuaBridge::new_dummy(),
                 status: AppStatus::Error(format!("Failed to initialize Lua: {e}")),
-                calc_output: None,
-                build_load_attempted: false,
+                screen: None,
             },
         }
     }
 
-    /// Try to load the test build and extract calc output.
-    fn try_load_test_build(&mut self) {
-        self.build_load_attempted = true;
-
-        // Look for test build XML relative to the base directory
-        let test_build_path = find_test_build();
-        let xml_text = match test_build_path {
-            Some(path) => match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    log::info!("Found test build: {}", path.display());
-                    text
-                }
-                Err(e) => {
-                    self.status = AppStatus::Error(format!("Failed to read test build: {e}"));
-                    return;
-                }
-            },
-            None => {
-                log::info!("No test build found — showing empty state");
+    fn open_build(&mut self, build_info: &pob_egui::data::build_list::BuildInfo) {
+        let xml_text = match std::fs::read_to_string(&build_info.full_path) {
+            Ok(text) => text,
+            Err(e) => {
+                log::error!("Failed to read build file: {e}");
+                self.status =
+                    AppStatus::Error(format!("Failed to read {}: {e}", build_info.file_name));
                 return;
             }
         };
 
-        if let Err(e) = self.bridge.load_build_from_xml(&xml_text, "Test Build") {
+        if let Err(e) = self
+            .bridge
+            .load_build_from_xml(&xml_text, &build_info.build_name)
+        {
+            log::error!("Failed to load build: {e}");
             self.status = AppStatus::Error(format!("Failed to load build: {e}"));
             return;
         }
 
-        match CalcOutput::extract(self.bridge.lua()) {
-            Ok(output) => {
-                log::info!("Extracted {} stats from calc output", output.stats.len());
-                self.calc_output = Some(output);
+        self.screen = Some(AppScreen::BuildView(BuildView::new(
+            build_info.build_name.clone(),
+            &self.bridge,
+        )));
+    }
+
+    fn go_to_build_list(&mut self) {
+        match self.bridge.build_path() {
+            Ok(path) => {
+                self.screen = Some(AppScreen::BuildList(BuildListPanel::new(path)));
             }
             Err(e) => {
-                self.status = AppStatus::Error(format!("Failed to extract calc output: {e}"));
+                log::error!("Failed to get build path: {e}");
             }
         }
     }
-}
-
-/// Search for a test build XML file.
-fn find_test_build() -> Option<std::path::PathBuf> {
-    // Try relative to exe (dev mode: walk up to repo root)
-    let exe = std::env::current_exe().ok()?;
-    let mut candidate = exe.parent()?.to_path_buf();
-    for _ in 0..5 {
-        let test_dir = candidate.join("test_builds");
-        if test_dir.is_dir() {
-            // Find first XML file recursively
-            for entry in walkdir::WalkDir::new(&test_dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                if entry.path().extension().is_some_and(|ext| ext == "xml") {
-                    return Some(entry.path().to_path_buf());
-                }
-            }
-        }
-        if !candidate.pop() {
-            break;
-        }
-    }
-    None
 }
 
 impl eframe::App for PobApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Try to load test build on first frame
-        if !self.build_load_attempted && matches!(self.status, AppStatus::Running) {
-            self.try_load_test_build();
-        }
-
         egui::CentralPanel::default().show(ctx, |ui| match &self.status {
             AppStatus::Error(msg) => {
                 ui.heading("Path of Building — Error");
@@ -129,13 +115,42 @@ impl eframe::App for PobApp {
                 ui.colored_label(egui::Color32::RED, msg);
             }
             AppStatus::Running => {
-                ui.heading("Path of Building");
-                ui.separator();
+                // Take ownership of screen to avoid borrow conflicts
+                let mut screen = self.screen.take();
+                let mut transition = None;
 
-                if let Some(output) = &self.calc_output {
-                    show_stat_table(ui, output);
+                match &mut screen {
+                    Some(AppScreen::BuildList(panel)) => {
+                        if let Some(action) = panel.show(ui) {
+                            match action {
+                                BuildListAction::OpenBuild(build_info) => {
+                                    transition = Some(build_info);
+                                }
+                                BuildListAction::EnterFolder(_) => {
+                                    // Already handled inside panel.show()
+                                }
+                            }
+                        }
+                    }
+                    Some(AppScreen::BuildView(view)) => {
+                        if view.show(ui, &self.bridge) {
+                            // User wants to go back
+                            self.go_to_build_list();
+                            return;
+                        }
+                    }
+                    None => {
+                        ui.heading("Path of Building");
+                        ui.label("Initializing...");
+                    }
+                }
+
+                // Restore screen if no transition
+                if let Some(build_info) = transition {
+                    self.screen = screen; // temporarily restore
+                    self.open_build(&build_info);
                 } else {
-                    ui.label("No build loaded. Place a build XML in test_builds/.");
+                    self.screen = screen;
                 }
             }
         });
@@ -143,11 +158,7 @@ impl eframe::App for PobApp {
 }
 
 /// Display calc output stats in an egui table.
-fn show_stat_table(ui: &mut egui::Ui, output: &CalcOutput) {
-    ui.label(format!("{} stats extracted", output.stats.len()));
-    ui.separator();
-
-    // Show key stats at the top in a prominent way
+pub fn show_stat_table(ui: &mut egui::Ui, output: &CalcOutput) {
     let key_stats = [
         ("TotalDPS", "Hit DPS"),
         ("CombinedDPS", "Combined DPS"),
@@ -171,51 +182,25 @@ fn show_stat_table(ui: &mut egui::Ui, output: &CalcOutput) {
         ("ChaosResist", "Chaos Resistance"),
     ];
 
-    ui.heading("Key Stats");
     egui::Grid::new("key_stats")
         .num_columns(2)
         .striped(true)
-        .min_col_width(200.0)
+        .min_col_width(100.0)
         .show(ui, |ui| {
             for (stat, label) in &key_stats {
                 if let Some(value) = output.stats.get(*stat) {
                     ui.label(*label);
-                    ui.label(format_stat_value(stat, *value));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(format_stat_value(stat, *value));
+                    });
                     ui.end_row();
                 }
             }
         });
-
-    ui.separator();
-
-    // Collapsible section with all stats
-    egui::CollapsingHeader::new("All Stats")
-        .default_open(false)
-        .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(400.0)
-                .show(ui, |ui| {
-                    let mut stats: Vec<_> = output.stats.iter().collect();
-                    stats.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-                    egui::Grid::new("all_stats")
-                        .num_columns(2)
-                        .striped(true)
-                        .min_col_width(200.0)
-                        .show(ui, |ui| {
-                            for (stat, value) in &stats {
-                                ui.label(stat.as_str());
-                                ui.label(format_stat_value(stat, **value));
-                                ui.end_row();
-                            }
-                        });
-                });
-        });
 }
 
-/// Format a stat value for display. Uses appropriate precision based on stat type.
+/// Format a stat value for display.
 fn format_stat_value(stat: &str, value: f64) -> String {
-    // Percentage-like stats
     if stat.contains("Resist")
         || stat.contains("Chance")
         || stat.contains("Percent")
@@ -224,12 +209,10 @@ fn format_stat_value(stat: &str, value: f64) -> String {
         return format!("{value:.1}%");
     }
 
-    // Rate stats
     if stat == "Speed" || stat.contains("Rate") {
         return format!("{value:.2}");
     }
 
-    // Integer-like stats (life, mana, armour, etc.)
     if value.fract().abs() < 0.001
         || stat == "Life"
         || stat == "Mana"
@@ -243,7 +226,6 @@ fn format_stat_value(stat: &str, value: f64) -> String {
         return format_number(value as i64);
     }
 
-    // DPS and other large numbers
     if value.abs() >= 1000.0 {
         return format_number_f64(value);
     }
@@ -251,7 +233,6 @@ fn format_stat_value(stat: &str, value: f64) -> String {
     format!("{value:.1}")
 }
 
-/// Format an integer with thousands separators.
 fn format_number(n: i64) -> String {
     let s = n.abs().to_string();
     let mut result = String::new();
@@ -267,7 +248,6 @@ fn format_number(n: i64) -> String {
     result.chars().rev().collect()
 }
 
-/// Format a float with thousands separators and one decimal place.
 fn format_number_f64(n: f64) -> String {
     let integer = n.trunc() as i64;
     let frac = (n.fract().abs() * 10.0).round() as u8;
