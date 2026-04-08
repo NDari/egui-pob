@@ -1,4 +1,4 @@
-//! Import/Export tab: build code import, export, and saving.
+//! Import/Export tab: build code import, export, URL import, and saving.
 
 use pob_egui::lua_bridge::LuaBridge;
 
@@ -69,16 +69,24 @@ impl ImportPanel {
 
         // Import section
         ui.heading("Import");
-        ui.label("Paste a build code:");
+        ui.label(
+            "Paste a build code or URL (pobb.in, pastebin, poe.ninja, maxroll, rentry, poedb):",
+        );
         ui.add(
             egui::TextEdit::multiline(&mut self.import_code)
                 .desired_width(f32::INFINITY)
                 .desired_rows(3)
-                .hint_text("Paste build code here...")
+                .hint_text("Paste build code or URL here...")
                 .font(egui::TextStyle::Monospace),
         );
         if ui.button("Import").clicked() && !self.import_code.is_empty() {
-            match import_build_code(bridge, &self.import_code) {
+            let input = self.import_code.trim().to_string();
+            let result = if looks_like_url(&input) {
+                import_from_url(bridge, &input)
+            } else {
+                import_build_code(bridge, &input)
+            };
+            match result {
                 Ok(()) => {
                     self.status_message = Some(("Build imported.".to_string(), false));
                     self.import_code.clear();
@@ -136,9 +144,8 @@ fn generate_export_code(bridge: &LuaBridge) -> anyhow::Result<String> {
     Ok(code)
 }
 
-/// Import a build from a build code string.
+/// Import a build from a raw build code string.
 fn import_build_code(bridge: &LuaBridge, code: &str) -> anyhow::Result<()> {
-    // Decode: URL-safe base64 → standard base64 → decode → inflate → XML
     let lua = bridge.lua();
 
     let xml_text: String = lua
@@ -161,6 +168,123 @@ fn import_build_code(bridge: &LuaBridge, code: &str) -> anyhow::Result<()> {
 
     bridge.load_build_from_xml(&xml_text, "Imported Build")?;
     Ok(())
+}
+
+/// Import a build from a URL by fetching the build code from the site.
+fn import_from_url(bridge: &LuaBridge, url: &str) -> anyhow::Result<()> {
+    let download_url = resolve_download_url(url)?;
+
+    log::info!("Fetching build from: {download_url}");
+    let response = reqwest::blocking::Client::new()
+        .get(&download_url)
+        .header("User-Agent", "pob-egui")
+        .send()
+        .map_err(|e| anyhow::anyhow!("HTTP request failed: {e}"))?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP {} from {download_url}", response.status());
+    }
+
+    let body = response
+        .text()
+        .map_err(|e| anyhow::anyhow!("Failed to read response: {e}"))?;
+
+    let code = body.trim();
+    if code.is_empty() {
+        anyhow::bail!("Empty response from {download_url}");
+    }
+
+    import_build_code(bridge, code)
+}
+
+/// Supported build sites and their URL → download URL mappings.
+struct BuildSite {
+    pattern: &'static str,
+    download_prefix: &'static str,
+}
+
+const BUILD_SITES: &[BuildSite] = &[
+    BuildSite {
+        pattern: "pobb.in/",
+        download_prefix: "https://pobb.in/pob/",
+    },
+    BuildSite {
+        pattern: "poe.ninja/poe1/pob/",
+        download_prefix: "https://poe.ninja/poe1/pob/raw/",
+    },
+    BuildSite {
+        pattern: "poe.ninja/pob/",
+        download_prefix: "https://poe.ninja/poe1/pob/raw/",
+    },
+    BuildSite {
+        pattern: "pastebin.com/",
+        download_prefix: "https://pastebin.com/raw/",
+    },
+    BuildSite {
+        pattern: "pastebinp.com/",
+        download_prefix: "https://pastebinp.com/raw/",
+    },
+    BuildSite {
+        pattern: "rentry.co/",
+        download_prefix: "https://rentry.co/paste/",
+    },
+    BuildSite {
+        pattern: "maxroll.gg/poe/pob/",
+        download_prefix: "https://maxroll.gg/poe/api/pob/",
+    },
+    BuildSite {
+        pattern: "poedb.tw/pob/",
+        download_prefix: "https://poedb.tw/pob/",
+    },
+];
+
+/// Resolve a user-provided URL to the raw download URL for the build code.
+fn resolve_download_url(url: &str) -> anyhow::Result<String> {
+    // Strip protocol prefix
+    let path = url
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+
+    for site in BUILD_SITES {
+        if let Some(rest) = path.strip_prefix(site.pattern) {
+            // Extract the ID (first path segment, no trailing slashes or query params)
+            let id = rest
+                .split(&['/', '?', '#'][..])
+                .next()
+                .unwrap_or(rest)
+                .trim();
+            if id.is_empty() {
+                anyhow::bail!("No build ID found in URL");
+            }
+
+            let mut download_url = format!("{}{id}", site.download_prefix);
+
+            // rentry.co needs /raw suffix
+            if site.pattern == "rentry.co/" {
+                download_url.push_str("/raw");
+            }
+            // poedb.tw needs /raw suffix
+            if site.pattern == "poedb.tw/pob/" {
+                download_url.push_str("/raw");
+            }
+
+            return Ok(download_url);
+        }
+    }
+
+    anyhow::bail!(
+        "Unrecognized URL. Supported sites: pobb.in, pastebin.com, poe.ninja, maxroll.gg, rentry.co, poedb.tw"
+    )
+}
+
+/// Check if input looks like a URL rather than a raw build code.
+fn looks_like_url(input: &str) -> bool {
+    let trimmed = input.trim();
+    trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || BUILD_SITES.iter().any(|s| trimmed.starts_with(s.pattern))
 }
 
 /// Save the current build to disk.

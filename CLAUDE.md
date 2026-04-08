@@ -90,6 +90,6 @@ upstream/                # Git submodule — READ-ONLY
 
 ## Implementation Phases
 
-Current: **Phase E complete** (import/export — build code export/import, save to disk, clipboard support)
+Current: **All phases complete** (A through F). URL import, build code export/import, save to disk, all GUI panels functional.
 
-Next: **Phase F** — sub-scripts (background downloads). See `PLAN.md` for remaining work.
+See `PLAN.md` for deferred items (tree sprites, keyboard shortcuts, item comparison tooltips).

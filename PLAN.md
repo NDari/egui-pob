@@ -336,11 +336,12 @@ This proves the full pipeline: Lua boot → build load → calc → Rust display
 - [ ] Keyboard shortcuts (deferred)
 - [ ] Additional polish (deferred)
 
-### Phase F — Sub-Scripts (Background Downloads)
+### Phase F — URL Import (done)
 
-1. Implement `LaunchSubScript` via std::thread + separate Lua VMs
-2. Wire up update checking, build import from URL
-3. Implement `NewFileSearch` properly (currently stubbed — needed for build file enumeration)
+- [x] URL-based build import via reqwest (pobb.in, pastebin, poe.ninja, maxroll, rentry, poedb)
+- [x] Auto-detects URL vs raw build code in import field
+- [x] `NewFileSearch` already implemented in Phase B
+- [~] `LaunchSubScript` remains stubbed — not needed (upstream update system replaced by git submodule workflow)
 
 ---
 
