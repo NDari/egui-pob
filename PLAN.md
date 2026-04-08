@@ -327,12 +327,14 @@ This proves the full pipeline: Lua boot → build load → calc → Rust display
 - [x] Main skill selection: "Set Main" button triggers recalc, stats update live
 - [ ] Item comparison tooltips (deferred — items display but no diff view yet)
 
-### Phase E — Import/Export + Polish
+### Phase E — Import/Export + Polish (done)
 
-1. Build code import/export (upstream handles encoding/decoding)
-2. Build saving
-3. Keyboard shortcuts
-4. Error handling, logging, polish
+- [x] Build code export: generate shareable code (deflate + base64 + URL-safe encoding)
+- [x] Build code import: decode + inflate + load as build, refreshes all panels
+- [x] Build saving to disk via upstream's SaveDBFile
+- [x] Copy to clipboard button for export codes
+- [ ] Keyboard shortcuts (deferred)
+- [ ] Additional polish (deferred)
 
 ### Phase F — Sub-Scripts (Background Downloads)
 
@@ -426,6 +428,7 @@ CI builds with `cargo build --release` for each target. Cross-compilation via `c
 - [x] Items + skills panels render without panic
 - [x] Main skill selection triggers recalc
 
-### Phase E (GUI):
-- [ ] Build save/load round-trips correctly
-- [ ] Import/export working
+### Phase E (done — import/export):
+- [x] Build export generates shareable code
+- [x] Build import loads from code
+- [x] Build save to disk works

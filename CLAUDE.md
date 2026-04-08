@@ -90,6 +90,6 @@ upstream/                # Git submodule — READ-ONLY
 
 ## Implementation Phases
 
-Current: **Phase D complete** (items + skills — equipped items with mods, socket groups with gems, main skill selection with live recalc)
+Current: **Phase E complete** (import/export — build code export/import, save to disk, clipboard support)
 
-Next: **Phase E** — import/export + polish. See `PLAN.md` for phases E through F.
+Next: **Phase F** — sub-scripts (background downloads). See `PLAN.md` for remaining work.

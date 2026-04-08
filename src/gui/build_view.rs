@@ -4,6 +4,7 @@ use pob_egui::data::CalcOutput;
 use pob_egui::lua_bridge::LuaBridge;
 
 use super::config_tab::ConfigPanel;
+use super::import_tab::ImportPanel;
 use super::items_tab::ItemsPanel;
 use super::skills_tab::SkillsPanel;
 use super::tree_tab::TreePanel;
@@ -15,6 +16,7 @@ pub enum BuildTab {
     Skills,
     Items,
     Config,
+    Import,
 }
 
 /// State for an open build.
@@ -25,6 +27,7 @@ pub struct BuildView {
     pub tree_panel: Option<TreePanel>,
     pub items_panel: Option<ItemsPanel>,
     pub skills_panel: Option<SkillsPanel>,
+    pub import_panel: ImportPanel,
     pub active_tab: BuildTab,
 }
 
@@ -38,6 +41,7 @@ impl BuildView {
         let tree_panel = Some(TreePanel::new(bridge.lua()));
         let items_panel = Some(ItemsPanel::new(bridge.lua()));
         let skills_panel = Some(SkillsPanel::new(bridge.lua()));
+        let import_panel = ImportPanel::new();
 
         Self {
             build_name,
@@ -46,6 +50,7 @@ impl BuildView {
             tree_panel,
             items_panel,
             skills_panel,
+            import_panel,
             active_tab: BuildTab::Tree,
         }
     }
@@ -78,6 +83,7 @@ impl BuildView {
                 ui.selectable_value(&mut self.active_tab, BuildTab::Skills, "Skills");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Items, "Items");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Config, "Config");
+                ui.selectable_value(&mut self.active_tab, BuildTab::Import, "Import/Export");
             });
             ui.separator();
 
@@ -94,7 +100,6 @@ impl BuildView {
                         && skills.show(ui, bridge)
                     {
                         self.refresh_calc_output(bridge);
-                        // Refresh skills list too since main skill changed
                         self.skills_panel = Some(SkillsPanel::new(bridge.lua()));
                     }
                 }
@@ -108,6 +113,12 @@ impl BuildView {
                         && config.show(ui, bridge)
                     {
                         self.refresh_calc_output(bridge);
+                    }
+                }
+                BuildTab::Import => {
+                    if self.import_panel.show(ui, bridge) {
+                        // Build was imported — refresh everything
+                        self.refresh_all(bridge);
                     }
                 }
             }
@@ -125,6 +136,15 @@ impl BuildView {
                 log::error!("Failed to refresh calc output: {e}");
             }
         }
+    }
+
+    /// Refresh all panels after a major change (e.g., build import).
+    fn refresh_all(&mut self, bridge: &LuaBridge) {
+        self.refresh_calc_output(bridge);
+        self.config_panel = Some(ConfigPanel::new(bridge.lua()));
+        self.tree_panel = Some(TreePanel::new(bridge.lua()));
+        self.items_panel = Some(ItemsPanel::new(bridge.lua()));
+        self.skills_panel = Some(SkillsPanel::new(bridge.lua()));
     }
 
     fn show_stat_sidebar(&self, ui: &mut egui::Ui) {
