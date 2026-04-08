@@ -1,6 +1,9 @@
 //! Passive tree renderer: draws nodes and connections using egui's Painter API.
+//! When a sprite atlas is loaded, nodes are rendered with actual game textures.
+//! Falls back to colored circles when sprites are unavailable.
 
 use pob_egui::data::tree::{NodeType, TreeData, TreeNode};
+use pob_egui::data::tree_sprites::{SpriteRegion, TreeSpriteAtlas};
 
 /// Colors for different node states and types.
 struct Palette;
@@ -21,10 +24,8 @@ impl Palette {
 
 /// Camera state for pan/zoom.
 pub struct TreeCamera {
-    /// Center of view in tree coordinates.
     pub center_x: f32,
     pub center_y: f32,
-    /// Zoom level (pixels per tree unit).
     pub zoom: f32,
 }
 
@@ -32,7 +33,6 @@ impl TreeCamera {
     pub fn new(tree: &TreeData) -> Self {
         let (cx, cy) = tree.bounds.center();
         let size = tree.bounds.size();
-        // Start zoomed out to fit the whole tree
         Self {
             center_x: cx,
             center_y: cy,
@@ -40,7 +40,6 @@ impl TreeCamera {
         }
     }
 
-    /// Convert tree coordinates to screen position.
     fn tree_to_screen(&self, tree_x: f32, tree_y: f32, rect: &egui::Rect) -> egui::Pos2 {
         let screen_cx = rect.center().x;
         let screen_cy = rect.center().y;
@@ -50,7 +49,6 @@ impl TreeCamera {
         )
     }
 
-    /// Convert screen position to tree coordinates.
     fn screen_to_tree(&self, screen_pos: egui::Pos2, rect: &egui::Rect) -> (f32, f32) {
         let screen_cx = rect.center().x;
         let screen_cy = rect.center().y;
@@ -63,7 +61,12 @@ impl TreeCamera {
 
 /// Draw the passive tree and handle pan/zoom/hover interactions.
 /// Returns the ID of a clicked node, if any.
-pub fn draw_tree(ui: &mut egui::Ui, tree: &TreeData, camera: &mut TreeCamera) -> Option<u32> {
+pub fn draw_tree(
+    ui: &mut egui::Ui,
+    tree: &TreeData,
+    camera: &mut TreeCamera,
+    atlas: Option<&TreeSpriteAtlas>,
+) -> Option<u32> {
     let (response, painter) =
         ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
     let rect = response.rect;
@@ -82,7 +85,6 @@ pub fn draw_tree(ui: &mut egui::Ui, tree: &TreeData, camera: &mut TreeCamera) ->
         let old_zoom = camera.zoom;
         camera.zoom = (camera.zoom * zoom_factor).clamp(0.01, 2.0);
 
-        // Zoom toward mouse position
         if let Some(mouse_pos) = ui.input(|i| i.pointer.hover_pos())
             && rect.contains(mouse_pos)
         {
@@ -92,14 +94,14 @@ pub fn draw_tree(ui: &mut egui::Ui, tree: &TreeData, camera: &mut TreeCamera) ->
         }
     }
 
-    // Determine visible area for culling
+    // Visible area for culling
     let visible_margin = 50.0;
     let visible_rect = egui::Rect::from_min_max(
         egui::pos2(rect.min.x - visible_margin, rect.min.y - visible_margin),
         egui::pos2(rect.max.x + visible_margin, rect.max.y + visible_margin),
     );
 
-    // Draw connections first (behind nodes)
+    // Draw connections
     for &(from_id, to_id) in &tree.connections {
         let (Some(from_node), Some(to_node)) = (tree.nodes.get(&from_id), tree.nodes.get(&to_id))
         else {
@@ -109,7 +111,6 @@ pub fn draw_tree(ui: &mut egui::Ui, tree: &TreeData, camera: &mut TreeCamera) ->
         let from_screen = camera.tree_to_screen(from_node.x, from_node.y, &rect);
         let to_screen = camera.tree_to_screen(to_node.x, to_node.y, &rect);
 
-        // Cull connections entirely outside the visible area
         if !line_intersects_rect(from_screen, to_screen, &visible_rect) {
             continue;
         }
@@ -150,7 +151,6 @@ pub fn draw_tree(ui: &mut egui::Ui, tree: &TreeData, camera: &mut TreeCamera) ->
     for node in tree.nodes.values() {
         let screen_pos = camera.tree_to_screen(node.x, node.y, &rect);
 
-        // Cull nodes outside visible area
         if !visible_rect.contains(screen_pos) {
             continue;
         }
@@ -158,17 +158,25 @@ pub fn draw_tree(ui: &mut egui::Ui, tree: &TreeData, camera: &mut TreeCamera) ->
         let radius = (node.node_type.radius() * camera.zoom).max(1.5);
         let is_hovered = hovered_node.is_some_and(|h| h.id == node.id);
 
-        let color = if node.is_allocated {
-            Palette::ALLOCATED
-        } else if node.ascendancy_name.is_some() {
-            Palette::ASCENDANCY
+        let drew_sprite = if let Some(atlas) = atlas {
+            draw_node_sprite(&painter, node, screen_pos, radius, atlas)
         } else {
-            node_type_color(node.node_type)
+            false
         };
 
-        painter.circle_filled(screen_pos, radius, color);
+        if !drew_sprite {
+            // Fallback: colored circle
+            let color = if node.is_allocated {
+                Palette::ALLOCATED
+            } else if node.ascendancy_name.is_some() {
+                Palette::ASCENDANCY
+            } else {
+                node_type_color(node.node_type)
+            };
+            painter.circle_filled(screen_pos, radius, color);
+        }
 
-        // Outline for hovered or keystone/notable (when zoomed in enough)
+        // Hover outline
         if is_hovered {
             painter.circle_stroke(
                 screen_pos,
@@ -190,7 +198,7 @@ pub fn draw_tree(ui: &mut egui::Ui, tree: &TreeData, camera: &mut TreeCamera) ->
         }
     }
 
-    // Show tooltip for hovered node
+    // Tooltip
     if let Some(node) = hovered_node {
         response.clone().on_hover_ui_at_pointer(|ui| {
             ui.strong(&node.name);
@@ -215,6 +223,135 @@ pub fn draw_tree(ui: &mut egui::Ui, tree: &TreeData, camera: &mut TreeCamera) ->
     clicked_node_id
 }
 
+/// Try to draw a node using sprite textures. Returns true if successful.
+fn draw_node_sprite(
+    painter: &egui::Painter,
+    node: &TreeNode,
+    screen_pos: egui::Pos2,
+    radius: f32,
+    atlas: &TreeSpriteAtlas,
+) -> bool {
+    // Look up the icon sprite
+    // For masteries, use inactiveIcon/activeIcon paths instead of the generic icon
+    let icon_region = if node.node_type == NodeType::Mastery {
+        // Masteries have dedicated inactive/active icons in the mastery spritesheet
+        let mastery_icon = if node.is_allocated {
+            node.active_icon.as_deref()
+        } else {
+            node.inactive_icon.as_deref()
+        };
+        mastery_icon
+            .and_then(|icon| atlas.node_sprites.get(icon))
+            .and_then(|ns| {
+                ns.mastery
+                    .as_ref()
+                    .or(ns.normal_active.as_ref())
+                    .or(ns.normal_inactive.as_ref())
+            })
+            // Fall back to the generic icon's mastery sprite
+            .or_else(|| {
+                atlas
+                    .node_sprites
+                    .get(&node.icon)
+                    .and_then(|ns| ns.mastery.as_ref())
+            })
+    } else {
+        let node_sprites = atlas.node_sprites.get(&node.icon);
+        node_sprites.and_then(|ns| {
+            if node.is_allocated {
+                match node.node_type {
+                    NodeType::Normal => ns.normal_active.as_ref(),
+                    NodeType::Notable => ns.notable_active.as_ref(),
+                    NodeType::Keystone => ns.keystone_active.as_ref(),
+                    _ => ns.normal_active.as_ref(),
+                }
+            } else {
+                match node.node_type {
+                    NodeType::Normal => ns.normal_inactive.as_ref(),
+                    NodeType::Notable => ns.notable_inactive.as_ref(),
+                    NodeType::Keystone => ns.keystone_inactive.as_ref(),
+                    _ => ns.normal_inactive.as_ref(),
+                }
+            }
+        })
+    };
+
+    let Some(region) = icon_region else {
+        return false;
+    };
+
+    let Some(texture_id) = atlas.texture_id(region.sheet_index) else {
+        return false;
+    };
+
+    // Draw the icon sprite
+    let half = radius;
+    let icon_rect = egui::Rect::from_center_size(screen_pos, egui::vec2(half * 2.0, half * 2.0));
+    let uv = egui::Rect::from_min_max(
+        egui::pos2(region.u_min, region.v_min),
+        egui::pos2(region.u_max, region.v_max),
+    );
+    painter.image(texture_id, icon_rect, uv, egui::Color32::WHITE);
+
+    // Draw frame overlay
+    let frame_region = get_frame_region(&atlas.frames, node);
+    if let Some(frame) = frame_region
+        && let Some(frame_tex) = atlas.texture_id(frame.sheet_index)
+    {
+        // Frame is slightly larger than the icon
+        let frame_scale = 1.3;
+        let frame_half = half * frame_scale;
+        let frame_rect = egui::Rect::from_center_size(
+            screen_pos,
+            egui::vec2(frame_half * 2.0, frame_half * 2.0),
+        );
+        let frame_uv = egui::Rect::from_min_max(
+            egui::pos2(frame.u_min, frame.v_min),
+            egui::pos2(frame.u_max, frame.v_max),
+        );
+        painter.image(frame_tex, frame_rect, frame_uv, egui::Color32::WHITE);
+    }
+
+    true
+}
+
+fn get_frame_region<'a>(
+    frames: &'a pob_egui::data::tree_sprites::FrameSprites,
+    node: &TreeNode,
+) -> Option<&'a SpriteRegion> {
+    match node.node_type {
+        NodeType::Normal | NodeType::ClassStart | NodeType::AscendClassStart => {
+            if node.is_allocated {
+                frames.normal_allocated.as_ref()
+            } else {
+                frames.normal_unallocated.as_ref()
+            }
+        }
+        NodeType::Notable => {
+            if node.is_allocated {
+                frames.notable_allocated.as_ref()
+            } else {
+                frames.notable_unallocated.as_ref()
+            }
+        }
+        NodeType::Keystone => {
+            if node.is_allocated {
+                frames.keystone_allocated.as_ref()
+            } else {
+                frames.keystone_unallocated.as_ref()
+            }
+        }
+        NodeType::Socket => {
+            if node.is_allocated {
+                frames.jewel_allocated.as_ref()
+            } else {
+                frames.jewel_unallocated.as_ref()
+            }
+        }
+        NodeType::Mastery => None, // Masteries don't have standard frames
+    }
+}
+
 fn node_type_color(node_type: NodeType) -> egui::Color32 {
     match node_type {
         NodeType::Normal => Palette::NORMAL,
@@ -226,13 +363,10 @@ fn node_type_color(node_type: NodeType) -> egui::Color32 {
     }
 }
 
-/// Quick check if a line segment might intersect a rectangle.
 fn line_intersects_rect(a: egui::Pos2, b: egui::Pos2, rect: &egui::Rect) -> bool {
-    // If either endpoint is inside, it intersects
     if rect.contains(a) || rect.contains(b) {
         return true;
     }
-    // Quick bounding box check
     let line_min_x = a.x.min(b.x);
     let line_max_x = a.x.max(b.x);
     let line_min_y = a.y.min(b.y);

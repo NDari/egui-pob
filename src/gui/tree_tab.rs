@@ -1,6 +1,9 @@
 //! Tree tab: passive tree view with pan/zoom and node interaction.
 
+use std::path::PathBuf;
+
 use pob_egui::data::tree::TreeData;
+use pob_egui::data::tree_sprites::TreeSpriteAtlas;
 use pob_egui::lua_bridge::LuaBridge;
 
 use super::tree_renderer::{self, TreeCamera};
@@ -9,33 +12,52 @@ use super::tree_renderer::{self, TreeCamera};
 pub struct TreePanel {
     pub tree_data: Option<TreeData>,
     pub camera: Option<TreeCamera>,
+    pub atlas: Option<TreeSpriteAtlas>,
+    pub textures_uploaded: bool,
     pub error: Option<String>,
 }
 
 impl TreePanel {
     pub fn new(lua: &mlua::Lua) -> Self {
-        match TreeData::extract(lua) {
-            Ok(tree_data) => {
-                let camera = TreeCamera::new(&tree_data);
+        let tree_data = match TreeData::extract(lua) {
+            Ok(td) => {
                 log::info!(
                     "Tree loaded: {} nodes, {} connections",
-                    tree_data.nodes.len(),
-                    tree_data.connections.len()
+                    td.nodes.len(),
+                    td.connections.len()
                 );
-                Self {
-                    tree_data: Some(tree_data),
-                    camera: Some(camera),
-                    error: None,
-                }
+                Some(td)
             }
             Err(e) => {
                 log::error!("Failed to load tree data: {e}");
-                Self {
+                return Self {
                     tree_data: None,
                     camera: None,
+                    atlas: None,
+                    textures_uploaded: false,
                     error: Some(format!("Failed to load tree: {e}")),
-                }
+                };
             }
+        };
+
+        let camera = tree_data.as_ref().map(TreeCamera::new);
+
+        // Try to load sprite atlas — get tree version from spec
+        let atlas = get_tree_version(lua)
+            .and_then(|version| find_tree_data_dir(&version))
+            .and_then(|dir| {
+                log::info!("Loading tree sprites from: {}", dir.display());
+                TreeSpriteAtlas::load(lua, &dir)
+                    .map_err(|e| log::warn!("Failed to load tree sprites: {e}"))
+                    .ok()
+            });
+
+        Self {
+            tree_data,
+            camera,
+            atlas,
+            textures_uploaded: false,
+            error: None,
         }
     }
 
@@ -48,13 +70,22 @@ impl TreePanel {
             return false;
         }
 
+        // Upload textures on first frame (needs egui context)
+        if !self.textures_uploaded {
+            if let Some(ref mut atlas) = self.atlas {
+                atlas.upload_textures(ui.ctx());
+            }
+            self.textures_uploaded = true;
+        }
+
         let (Some(tree_data), Some(camera)) = (&mut self.tree_data, &mut self.camera) else {
             ui.label("No tree data loaded.");
             return false;
         };
 
-        // Draw the tree and check for node clicks
-        if let Some(clicked_id) = tree_renderer::draw_tree(ui, tree_data, camera) {
+        let atlas_ref = self.atlas.as_ref();
+
+        if let Some(clicked_id) = tree_renderer::draw_tree(ui, tree_data, camera, atlas_ref) {
             if let Err(e) = toggle_node(bridge.lua(), clicked_id) {
                 log::error!("Failed to toggle node {clicked_id}: {e}");
             } else if let Err(e) = tree_data.refresh_allocation(bridge.lua()) {
@@ -68,9 +99,37 @@ impl TreePanel {
     }
 }
 
+/// Get the current tree version from the loaded build's spec.
+fn get_tree_version(lua: &mlua::Lua) -> Option<String> {
+    lua.load("return mainObject_ref.main.modes['BUILD'].spec.treeVersion")
+        .eval::<String>()
+        .map_err(|e| log::warn!("Failed to get tree version: {e}"))
+        .ok()
+}
+
+/// Find the tree data directory for a specific tree version.
+fn find_tree_data_dir(version: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut candidate = exe.parent()?.to_path_buf();
+    for _ in 0..5 {
+        let tree_dir = candidate
+            .join("upstream")
+            .join("src")
+            .join("TreeData")
+            .join(version);
+        if tree_dir.is_dir() {
+            return Some(tree_dir);
+        }
+        if !candidate.pop() {
+            break;
+        }
+    }
+    log::warn!("Tree data directory not found for version {version}");
+    None
+}
+
 /// Toggle a node allocation in Lua and trigger recalc.
 fn toggle_node(lua: &mlua::Lua, node_id: u32) -> Result<(), mlua::Error> {
-    // Use upstream's allocation logic via spec methods
     lua.load(format!(
         r#"
         local build = mainObject_ref.main.modes['BUILD']

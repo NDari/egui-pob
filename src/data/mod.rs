@@ -5,6 +5,7 @@ pub mod config;
 pub mod items;
 pub mod skills;
 pub mod tree;
+pub mod tree_sprites;
 
 use std::collections::HashMap;
 

@@ -21,6 +21,9 @@ pub struct TreeNode {
     pub x: f32,
     pub y: f32,
     pub node_type: NodeType,
+    pub icon: String,
+    pub inactive_icon: Option<String>,
+    pub active_icon: Option<String>,
     pub stats: Vec<String>,
     pub ascendancy_name: Option<String>,
     pub is_allocated: bool,
@@ -128,6 +131,9 @@ impl TreeData {
                 continue;
             }
 
+            let icon: String = node_table.get("icon").unwrap_or_default();
+            let inactive_icon: Option<String> = node_table.get("inactiveIcon").ok();
+            let active_icon: Option<String> = node_table.get("activeIcon").ok();
             let ascendancy_name: Option<String> = node_table.get("ascendancyName").ok();
 
             // Read stats
@@ -161,6 +167,9 @@ impl TreeData {
                     x,
                     y,
                     node_type,
+                    icon,
+                    inactive_icon,
+                    active_icon,
                     stats,
                     ascendancy_name,
                     is_allocated,
