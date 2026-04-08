@@ -90,6 +90,6 @@ upstream/                # Git submodule — READ-ONLY
 
 ## Implementation Phases
 
-Current: **Phase C complete** (passive tree view — pan/zoom, node tooltips, click to allocate/deallocate with live recalc)
+Current: **Phase D complete** (items + skills — equipped items with mods, socket groups with gems, main skill selection with live recalc)
 
-Next: **Phase D** — items + skills. See `PLAN.md` for phases D through F.
+Next: **Phase E** — import/export + polish. See `PLAN.md` for phases E through F.

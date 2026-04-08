@@ -2,6 +2,8 @@
 
 pub mod build_list;
 pub mod config;
+pub mod items;
+pub mod skills;
 pub mod tree;
 
 use std::collections::HashMap;

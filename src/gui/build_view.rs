@@ -4,12 +4,16 @@ use pob_egui::data::CalcOutput;
 use pob_egui::lua_bridge::LuaBridge;
 
 use super::config_tab::ConfigPanel;
+use super::items_tab::ItemsPanel;
+use super::skills_tab::SkillsPanel;
 use super::tree_tab::TreePanel;
 
 /// Which tab is currently active in the build view.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BuildTab {
     Tree,
+    Skills,
+    Items,
     Config,
 }
 
@@ -19,6 +23,8 @@ pub struct BuildView {
     pub calc_output: Option<CalcOutput>,
     pub config_panel: Option<ConfigPanel>,
     pub tree_panel: Option<TreePanel>,
+    pub items_panel: Option<ItemsPanel>,
+    pub skills_panel: Option<SkillsPanel>,
     pub active_tab: BuildTab,
 }
 
@@ -30,12 +36,16 @@ impl BuildView {
 
         let config_panel = Some(ConfigPanel::new(bridge.lua()));
         let tree_panel = Some(TreePanel::new(bridge.lua()));
+        let items_panel = Some(ItemsPanel::new(bridge.lua()));
+        let skills_panel = Some(SkillsPanel::new(bridge.lua()));
 
         Self {
             build_name,
             calc_output,
             config_panel,
             tree_panel,
+            items_panel,
+            skills_panel,
             active_tab: BuildTab::Tree,
         }
     }
@@ -65,6 +75,8 @@ impl BuildView {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.active_tab, BuildTab::Tree, "Tree");
+                ui.selectable_value(&mut self.active_tab, BuildTab::Skills, "Skills");
+                ui.selectable_value(&mut self.active_tab, BuildTab::Items, "Items");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Config, "Config");
             });
             ui.separator();
@@ -75,6 +87,20 @@ impl BuildView {
                         && tree.show(ui, bridge)
                     {
                         self.refresh_calc_output(bridge);
+                    }
+                }
+                BuildTab::Skills => {
+                    if let Some(ref mut skills) = self.skills_panel
+                        && skills.show(ui, bridge)
+                    {
+                        self.refresh_calc_output(bridge);
+                        // Refresh skills list too since main skill changed
+                        self.skills_panel = Some(SkillsPanel::new(bridge.lua()));
+                    }
+                }
+                BuildTab::Items => {
+                    if let Some(ref items) = self.items_panel {
+                        items.show(ui, bridge);
                     }
                 }
                 BuildTab::Config => {

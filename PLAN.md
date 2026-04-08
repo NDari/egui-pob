@@ -320,12 +320,12 @@ This proves the full pipeline: Lua boot → build load → calc → Rust display
 - [x] Visibility culling for performance
 - [ ] Load tree node images as egui textures (deferred — functional without sprites)
 
-### Phase D — Items + Skills
+### Phase D — Items + Skills (done)
 
-1. Items panel: list equipped items from `build.itemsTab.items` with mod display
-2. Item comparison tooltips
-3. Skills panel: socket groups from `build.skillsTab.socketGroupList`, gem display
-4. Main skill selection
+- [x] Items panel: list equipped items by slot with rarity colors, mod display (implicit + explicit)
+- [x] Skills panel: socket groups with gem list (name, level, quality, support/active coloring)
+- [x] Main skill selection: "Set Main" button triggers recalc, stats update live
+- [ ] Item comparison tooltips (deferred — items display but no diff view yet)
 
 ### Phase E — Import/Export + Polish
 
@@ -422,6 +422,10 @@ CI builds with `cargo build --release` for each target. Cross-compilation via `c
 - [x] Tree renders without panic, pan/zoom/click works
 - [x] Node allocation triggers recalc, stats update live
 
-### Phase D-E (GUI):
-- [ ] Items + skills panels render without panic
+### Phase D (done — items + skills):
+- [x] Items + skills panels render without panic
+- [x] Main skill selection triggers recalc
+
+### Phase E (GUI):
 - [ ] Build save/load round-trips correctly
+- [ ] Import/export working

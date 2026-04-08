@@ -3,6 +3,8 @@
 mod build_list;
 mod build_view;
 mod config_tab;
+mod items_tab;
+mod skills_tab;
 mod tree_renderer;
 mod tree_tab;
 
