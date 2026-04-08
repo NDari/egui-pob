@@ -1,0 +1,21 @@
+[package]
+name = "pob-egui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+egui_extras = { version = "0.31", features = ["image"] }
+mlua = { version = "0.10", features = ["luajit", "vendored", "serialize", "send"] }
+reqwest = { version = "0.12", features = ["blocking"] }
+flate2 = "1"
+arboard = "3"
+image = "0.25"
+directories = "6"
+walkdir = "2"
+glob = "0.3"
+anyhow = "1"
+open = "5"
+log = "0.4"
+env_logger = "0.11"
