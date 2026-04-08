@@ -2,7 +2,7 @@
 //! When a sprite atlas is loaded, nodes are rendered with actual game textures.
 //! Falls back to colored circles when sprites are unavailable.
 
-use pob_egui::data::tree::{NodeType, TreeData, TreeNode};
+use pob_egui::data::tree::{ArcInfo, NodeType, TreeData, TreeNode};
 use pob_egui::data::tree_sprites::{SpriteRegion, TreeSpriteAtlas};
 
 /// Colors for different node states and types.
@@ -102,8 +102,9 @@ pub fn draw_tree(
     );
 
     // Draw connections
-    for &(from_id, to_id) in &tree.connections {
-        let (Some(from_node), Some(to_node)) = (tree.nodes.get(&from_id), tree.nodes.get(&to_id))
+    for conn in &tree.connections {
+        let (Some(from_node), Some(to_node)) =
+            (tree.nodes.get(&conn.from_id), tree.nodes.get(&conn.to_id))
         else {
             continue;
         };
@@ -122,8 +123,13 @@ pub fn draw_tree(
             Palette::CONNECTION
         };
         let width = if both_allocated { 2.0 } else { 1.0 };
+        let stroke = egui::Stroke::new(width, color);
 
-        painter.line_segment([from_screen, to_screen], egui::Stroke::new(width, color));
+        if let Some(arc) = &conn.arc {
+            draw_arc(&painter, arc, from_node, to_node, camera, &rect, stroke);
+        } else {
+            painter.line_segment([from_screen, to_screen], stroke);
+        }
     }
 
     // Find hovered node
@@ -360,6 +366,52 @@ fn node_type_color(node_type: NodeType) -> egui::Color32 {
         NodeType::Socket => Palette::SOCKET,
         NodeType::Mastery => Palette::MASTERY,
         NodeType::ClassStart | NodeType::AscendClassStart => Palette::CLASS_START,
+    }
+}
+
+/// Draw an arc connection between two nodes on the same orbit.
+fn draw_arc(
+    painter: &egui::Painter,
+    arc: &ArcInfo,
+    from_node: &TreeNode,
+    to_node: &TreeNode,
+    camera: &TreeCamera,
+    viewport: &egui::Rect,
+    stroke: egui::Stroke,
+) {
+    // Calculate angles of both nodes relative to the arc center
+    let angle1 = (from_node.y - arc.center_y).atan2(from_node.x - arc.center_x);
+    let angle2 = (to_node.y - arc.center_y).atan2(to_node.x - arc.center_x);
+
+    // Determine the shorter arc direction
+    let mut start = angle1;
+    let mut end = angle2;
+    let mut diff = end - start;
+    if diff > std::f32::consts::PI {
+        diff -= 2.0 * std::f32::consts::PI;
+    } else if diff < -std::f32::consts::PI {
+        diff += 2.0 * std::f32::consts::PI;
+    }
+    if diff < 0.0 {
+        std::mem::swap(&mut start, &mut end);
+        diff = -diff;
+    }
+
+    // Number of line segments to approximate the arc
+    let segments = ((diff * arc.radius * camera.zoom / 10.0).ceil() as usize).clamp(4, 32);
+
+    let mut points = Vec::with_capacity(segments + 1);
+    for i in 0..=segments {
+        let t = i as f32 / segments as f32;
+        let angle = start + diff * t;
+        let tree_x = arc.center_x + arc.radius * angle.cos();
+        let tree_y = arc.center_y + arc.radius * angle.sin();
+        points.push(camera.tree_to_screen(tree_x, tree_y, viewport));
+    }
+
+    // Draw the arc as connected line segments
+    for window in points.windows(2) {
+        painter.line_segment([window[0], window[1]], stroke);
     }
 }
 

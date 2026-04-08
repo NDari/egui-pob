@@ -8,7 +8,7 @@ use mlua::prelude::*;
 #[derive(Debug, Clone)]
 pub struct TreeData {
     pub nodes: HashMap<u32, TreeNode>,
-    pub connections: Vec<(u32, u32)>,
+    pub connections: Vec<TreeConnection>,
     pub allocated: HashSet<u32>,
     pub bounds: TreeBounds,
 }
@@ -24,12 +24,34 @@ pub struct TreeNode {
     pub icon: String,
     pub inactive_icon: Option<String>,
     pub active_icon: Option<String>,
+    /// Group center coordinates (for arc connections between same-orbit nodes).
+    pub group_x: f32,
+    pub group_y: f32,
+    /// Orbit index (0 = center, 1-6 = rings).
+    pub orbit: u32,
     pub stats: Vec<String>,
     pub ascendancy_name: Option<String>,
     pub is_allocated: bool,
 }
 
 /// Node type determines rendering size and color.
+/// A connection between two nodes — either straight or arc.
+#[derive(Debug, Clone)]
+pub struct TreeConnection {
+    pub from_id: u32,
+    pub to_id: u32,
+    /// If both nodes share the same group and orbit, this holds arc info.
+    pub arc: Option<ArcInfo>,
+}
+
+/// Arc connection info — both nodes sit on a circle.
+#[derive(Debug, Clone, Copy)]
+pub struct ArcInfo {
+    pub center_x: f32,
+    pub center_y: f32,
+    pub radius: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeType {
     Normal,
@@ -100,7 +122,7 @@ impl TreeData {
 
         // Extract all nodes
         let mut nodes = HashMap::new();
-        let mut connections = Vec::new();
+        let mut raw_connections = Vec::new();
         let mut min_x = f32::MAX;
         let mut max_x = f32::MIN;
         let mut min_y = f32::MAX;
@@ -135,6 +157,17 @@ impl TreeData {
             let inactive_icon: Option<String> = node_table.get("inactiveIcon").ok();
             let active_icon: Option<String> = node_table.get("activeIcon").ok();
             let ascendancy_name: Option<String> = node_table.get("ascendancyName").ok();
+            let orbit: u32 = node_table.get("o").unwrap_or(0);
+
+            // Get group center coordinates
+            let (group_x, group_y) = match node_table.get::<LuaTable>("group") {
+                Ok(group) => {
+                    let gx: f32 = group.get("x").unwrap_or(x);
+                    let gy: f32 = group.get("y").unwrap_or(y);
+                    (gx, gy)
+                }
+                Err(_) => (x, y),
+            };
 
             // Read stats
             let stats = read_string_list(&node_table, "sd");
@@ -153,7 +186,7 @@ impl TreeData {
                     if let Ok(linked_id) = linked_node.get::<u32>("id") {
                         // Only add each connection once (from lower to higher ID)
                         if id < linked_id {
-                            connections.push((id, linked_id));
+                            raw_connections.push((id, linked_id));
                         }
                     }
                 }
@@ -170,6 +203,9 @@ impl TreeData {
                     icon,
                     inactive_icon,
                     active_icon,
+                    group_x,
+                    group_y,
+                    orbit,
                     stats,
                     ascendancy_name,
                     is_allocated,
@@ -177,23 +213,44 @@ impl TreeData {
             );
         }
 
-        // Filter out connections that clutter the view:
-        // - Cross-tree connections (class start → ascendancy start)
-        // - Notable → Mastery connections (masteries sit visually inside clusters)
-        connections.retain(|&(from_id, to_id)| {
-            let (Some(from), Some(to)) = (nodes.get(&from_id), nodes.get(&to_id)) else {
-                return false;
-            };
-            // Skip connections between main tree and ascendancy nodes
-            if from.ascendancy_name.is_some() != to.ascendancy_name.is_some() {
-                return false;
-            }
-            // Skip connections to/from mastery nodes
-            if from.node_type == NodeType::Mastery || to.node_type == NodeType::Mastery {
-                return false;
-            }
-            true
-        });
+        // Build connections with arc detection, filtering out clutter
+        let connections: Vec<TreeConnection> = raw_connections
+            .into_iter()
+            .filter_map(|(from_id, to_id)| {
+                let from = nodes.get(&from_id)?;
+                let to = nodes.get(&to_id)?;
+                // Skip connections between main tree and ascendancy nodes
+                if from.ascendancy_name.is_some() != to.ascendancy_name.is_some() {
+                    return None;
+                }
+                // Skip connections to/from mastery nodes
+                if from.node_type == NodeType::Mastery || to.node_type == NodeType::Mastery {
+                    return None;
+                }
+                // Detect arc: same group center and same orbit (non-zero)
+                let arc = if from.orbit == to.orbit
+                    && from.orbit > 0
+                    && (from.group_x - to.group_x).abs() < 0.1
+                    && (from.group_y - to.group_y).abs() < 0.1
+                {
+                    let dx = from.x - from.group_x;
+                    let dy = from.y - from.group_y;
+                    let radius = (dx * dx + dy * dy).sqrt();
+                    Some(ArcInfo {
+                        center_x: from.group_x,
+                        center_y: from.group_y,
+                        radius,
+                    })
+                } else {
+                    None
+                };
+                Some(TreeConnection {
+                    from_id,
+                    to_id,
+                    arc,
+                })
+            })
+            .collect();
 
         // Add padding to bounds
         let padding = 100.0;
