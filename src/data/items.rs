@@ -51,6 +51,37 @@ pub fn extract_equipped_items(lua: &Lua) -> Result<Vec<EquippedItem>, mlua::Erro
                 if slot.nodeId and not spec.allocNodes[slot.nodeId] then
                     goto continue
                 end
+                -- Skip weapon swap slots unless they have an item equipped
+                if slot.slotName:find("Swap") then
+                    local swapItemId = 0
+                    if itemsTab.activeItemSet and itemsTab.activeItemSet[slot.slotName] then
+                        swapItemId = itemsTab.activeItemSet[slot.slotName].selItemId or 0
+                    elseif slot.selItemId then
+                        swapItemId = slot.selItemId
+                    end
+                    if swapItemId <= 0 then
+                        goto continue
+                    end
+                end
+                -- Skip abyssal sockets whose parent item doesn't have enough abyssal sockets
+                if slot.parentSlot and slot.slotName:find("Abyssal Socket") then
+                    local parentSlotName = slot.parentSlot.slotName
+                    local parentItemId = 0
+                    if itemsTab.activeItemSet and itemsTab.activeItemSet[parentSlotName] then
+                        parentItemId = itemsTab.activeItemSet[parentSlotName].selItemId or 0
+                    elseif slot.parentSlot.selItemId then
+                        parentItemId = slot.parentSlot.selItemId
+                    end
+                    local abyssalCount = 0
+                    if parentItemId > 0 and itemsTab.items[parentItemId] then
+                        abyssalCount = itemsTab.items[parentItemId].abyssalSocketCount or 0
+                    end
+                    -- Extract the socket number from the slot name (e.g. "Helmet Abyssal Socket 2" -> 2)
+                    local socketNum = tonumber(slot.slotName:match("Abyssal Socket (%d+)")) or 0
+                    if socketNum > abyssalCount then
+                        goto continue
+                    end
+                end
                 -- Skip Ring 3 unless AdditionalRingSlot flag is set
                 if slot.slotName == "Ring 3" then
                     local calcsTab = build.calcsTab
