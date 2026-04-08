@@ -72,10 +72,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|_, text: String| Ok(strip_escapes(&text)))?,
     )?;
 
-    g.set(
-        "GetAsyncCount",
-        lua.create_function(|_, ()| Ok(0i32))?,
-    )?;
+    g.set("GetAsyncCount", lua.create_function(|_, ()| Ok(0i32))?)?;
 
     // -- Input stubs --
     g.set(
@@ -108,10 +105,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         "GetVirtualScreenSize",
         lua.create_function(|_, ()| Ok((1920i32, 1080i32)))?,
     )?;
-    g.set(
-        "GetScreenScale",
-        lua.create_function(|_, ()| Ok(1.0f64))?,
-    )?;
+    g.set("GetScreenScale", lua.create_function(|_, ()| Ok(1.0f64))?)?;
     g.set(
         "GetDPIScaleOverridePercent",
         lua.create_function(|_, ()| Ok(1.0f64))?,
@@ -163,22 +157,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     )?;
 
     // -- Misc stubs --
-    g.set(
-        "Restart",
-        lua.create_function(|_, ()| Ok(()))?,
-    )?;
-    g.set(
-        "Exit",
-        lua.create_function(|_, ()| Ok(()))?,
-    )?;
-    g.set(
-        "ConExecute",
-        lua.create_function(|_, _cmd: String| Ok(()))?,
-    )?;
-    g.set(
-        "ConClear",
-        lua.create_function(|_, ()| Ok(()))?,
-    )?;
+    g.set("Restart", lua.create_function(|_, ()| Ok(()))?)?;
+    g.set("Exit", lua.create_function(|_, ()| Ok(()))?)?;
+    g.set("ConExecute", lua.create_function(|_, _cmd: String| Ok(()))?)?;
+    g.set("ConClear", lua.create_function(|_, ()| Ok(()))?)?;
     g.set(
         "SpawnProcess",
         lua.create_function(|_, _args: LuaMultiValue| Ok(()))?,
@@ -192,7 +174,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     )?;
     g.set(
         "GetCloudProvider",
-        lua.create_function(|_, _path: LuaValue| Ok((LuaValue::Nil, LuaValue::Nil, LuaValue::Nil)))?,
+        lua.create_function(|_, _path: LuaValue| {
+            Ok((LuaValue::Nil, LuaValue::Nil, LuaValue::Nil))
+        })?,
     )?;
 
     Ok(())

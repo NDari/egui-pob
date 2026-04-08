@@ -1,6 +1,4 @@
-mod data;
 mod gui;
-mod lua_bridge;
 
 use std::path::PathBuf;
 
@@ -13,7 +11,7 @@ fn main() -> Result<()> {
     log::info!("upstream/src: {}", src_path.display());
     log::info!("base dir: {}", base_dir.display());
 
-    let bridge = lua_bridge::LuaBridge::new(&src_path, &base_dir);
+    let bridge = pob_egui::lua_bridge::LuaBridge::new(&src_path, &base_dir);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

@@ -3,6 +3,14 @@ name = "pob-egui"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "pob_egui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pob-egui"
+path = "src/main.rs"
+
 [dependencies]
 eframe = "0.31"
 egui = "0.31"

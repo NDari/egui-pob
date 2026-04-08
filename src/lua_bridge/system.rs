@@ -87,14 +87,12 @@ pub fn register(lua: &Lua, src_path: &Path, base_dir: &Path) -> LuaResult<()> {
     g.set(
         "Deflate",
         lua.create_function(|lua, data: LuaString| {
-            use flate2::write::ZlibEncoder;
             use flate2::Compression;
+            use flate2::write::ZlibEncoder;
             use std::io::Write;
             let bytes: Vec<u8> = data.as_bytes().to_vec();
             let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-            encoder
-                .write_all(&bytes)
-                .map_err(LuaError::external)?;
+            encoder.write_all(&bytes).map_err(LuaError::external)?;
             let compressed = encoder.finish().map_err(LuaError::external)?;
             lua.create_string(&compressed)
         })?,
@@ -163,7 +161,11 @@ pub fn register(lua: &Lua, src_path: &Path, base_dir: &Path) -> LuaResult<()> {
             };
 
             let extra_args: LuaMultiValue = args_vec[1..].to_vec().into();
-            match lua.load(&code).set_name(&path).call::<LuaMultiValue>(extra_args) {
+            match lua
+                .load(&code)
+                .set_name(&path)
+                .call::<LuaMultiValue>(extra_args)
+            {
                 Ok(results) => {
                     // PLoadModule returns (nil, results...) on success
                     let mut ret: Vec<LuaValue> = vec![LuaValue::Nil];
@@ -235,9 +237,34 @@ pub fn register(lua: &Lua, src_path: &Path, base_dir: &Path) -> LuaResult<()> {
         lua.create_function(|_, ()| Ok(std::env::consts::OS.to_string()))?,
     )?;
 
-    // Stub require("lcurl.safe") to return nil (same as HeadlessWrapper)
+    // Provide a pure-Lua utf8 shim and stub lcurl.safe
     lua.load(
         r#"
+        -- Minimal lua-utf8 shim: delegates to string library for ASCII-safe operations.
+        -- Upstream uses utf8.reverse, utf8.gsub, utf8.sub, utf8.find, utf8.match, utf8.next.
+        -- For headless calc, ASCII-range behavior is sufficient.
+        local utf8_shim = {}
+        utf8_shim.reverse = string.reverse
+        utf8_shim.gsub = string.gsub
+        utf8_shim.sub = string.sub
+        utf8_shim.find = string.find
+        utf8_shim.match = string.match
+        utf8_shim.len = string.len
+        utf8_shim.byte = string.byte
+        utf8_shim.char = string.char
+        utf8_shim.gmatch = string.gmatch
+        utf8_shim.rep = string.rep
+        utf8_shim.lower = string.lower
+        utf8_shim.upper = string.upper
+        utf8_shim.format = string.format
+        function utf8_shim.next(s, idx, offset)
+            if not offset then offset = 1 end
+            local new_idx = idx + offset
+            if new_idx < 0 or new_idx > #s + 1 then return nil end
+            return new_idx
+        end
+        package.preload['lua-utf8'] = function() return utf8_shim end
+
         local orig_require = require
         function require(name)
             if name == "lcurl.safe" then
@@ -248,6 +275,9 @@ pub fn register(lua: &Lua, src_path: &Path, base_dir: &Path) -> LuaResult<()> {
     "#,
     )
     .exec()?;
+
+    // -- Globals expected by upstream --
+    g.set("arg", lua.create_table()?)?;
 
     // -- Callbacks --
     lua.load(

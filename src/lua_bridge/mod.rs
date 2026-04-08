@@ -84,6 +84,26 @@ impl LuaBridge {
         &self.lua
     }
 
+    /// Load a build from XML text. This calls upstream's SetMode("BUILD", ...)
+    /// and runs a frame to trigger the initial calculation.
+    pub fn load_build_from_xml(&self, xml_text: &str, name: &str) -> Result<()> {
+        let main_obj: LuaTable = self
+            .lua
+            .load("return mainObject_ref.main")
+            .eval()
+            .map_err(lua_err("Failed to get mainObject.main"))?;
+
+        main_obj
+            .call_method::<()>("SetMode", ("BUILD", false, name, xml_text))
+            .map_err(lua_err("SetMode('BUILD') failed"))?;
+
+        Self::run_callback_static(&self.lua, "OnFrame")?;
+        Self::run_callback_static(&self.lua, "OnFrame")?;
+
+        log::info!("Build loaded: {name}");
+        Ok(())
+    }
+
     /// Create a dummy bridge (for error display when real init fails).
     pub fn new_dummy() -> Self {
         Self {
