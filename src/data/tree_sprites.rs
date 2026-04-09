@@ -27,6 +27,10 @@ pub struct NodeSprites {
     pub keystone_active: Option<SpriteRegion>,
     pub keystone_inactive: Option<SpriteRegion>,
     pub mastery: Option<SpriteRegion>,
+    pub mastery_inactive: Option<SpriteRegion>,
+    pub mastery_active: Option<SpriteRegion>,
+    pub mastery_connected: Option<SpriteRegion>,
+    pub mastery_effect: Option<SpriteRegion>,
 }
 
 /// Frame overlay sprite for each node type/state.
@@ -44,6 +48,12 @@ pub struct FrameSprites {
     pub jewel_unallocated: Option<SpriteRegion>,
     pub jewel_allocated: Option<SpriteRegion>,
     pub jewel_can_allocate: Option<SpriteRegion>,
+    pub mastery_unallocated: Option<SpriteRegion>,
+    pub mastery_allocated: Option<SpriteRegion>,
+    pub mastery_can_allocate: Option<SpriteRegion>,
+    pub group_background_small: Option<SpriteRegion>,
+    pub group_background_medium: Option<SpriteRegion>,
+    pub group_background_large: Option<SpriteRegion>,
 }
 
 /// All loaded sprite atlas data.
@@ -72,10 +82,22 @@ impl TreeSpriteAtlas {
         let skills_path = tree_data_dir.join("skills-3.jpg");
         let frame_path = tree_data_dir.join("frame-3.png");
         let mastery_path = tree_data_dir.join("mastery-3.png");
+        let mastery_connected_path = tree_data_dir.join("mastery-connected-3.png");
+        let mastery_disabled_path = tree_data_dir.join("mastery-disabled-3.png");
+        let mastery_active_path = tree_data_dir.join("mastery-active-selected-3.png");
+        let mastery_effect_path = tree_data_dir.join("mastery-active-effect-3.png");
+        let ascendancy_path = tree_data_dir.join("ascendancy-3.webp");
+        let group_bg_path = tree_data_dir.join("group-background-3.png");
 
         let skills_index = load_sheet(&mut sheets, &skills_path);
         let frame_index = load_sheet(&mut sheets, &frame_path);
         let mastery_index = load_sheet(&mut sheets, &mastery_path);
+        let mastery_connected_index = load_sheet(&mut sheets, &mastery_connected_path);
+        let mastery_disabled_index = load_sheet(&mut sheets, &mastery_disabled_path);
+        let mastery_active_index = load_sheet(&mut sheets, &mastery_active_path);
+        let mastery_effect_index = load_sheet(&mut sheets, &mastery_effect_path);
+        let ascendancy_index = load_sheet(&mut sheets, &ascendancy_path);
+        let group_bg_index = load_sheet(&mut sheets, &group_bg_path);
 
         // Map filenames to sheet indices
         if let Some(idx) = skills_index {
@@ -86,6 +108,24 @@ impl TreeSpriteAtlas {
         }
         if let Some(idx) = mastery_index {
             sheet_map.insert("mastery-3.png".to_string(), idx);
+        }
+        if let Some(idx) = mastery_connected_index {
+            sheet_map.insert("mastery-connected-3.png".to_string(), idx);
+        }
+        if let Some(idx) = mastery_disabled_index {
+            sheet_map.insert("mastery-disabled-3.png".to_string(), idx);
+        }
+        if let Some(idx) = mastery_active_index {
+            sheet_map.insert("mastery-active-selected-3.png".to_string(), idx);
+        }
+        if let Some(idx) = mastery_effect_index {
+            sheet_map.insert("mastery-active-effect-3.png".to_string(), idx);
+        }
+        if let Some(idx) = ascendancy_index {
+            sheet_map.insert("ascendancy-3.webp".to_string(), idx);
+        }
+        if let Some(idx) = group_bg_index {
+            sheet_map.insert("group-background-3.png".to_string(), idx);
         }
 
         // Parse sprite coordinates from the processed spriteMap in Lua
@@ -181,14 +221,16 @@ fn extract_node_sprites(
     // (Lua's ImageSize() stub returns 1,1 so spriteMap coords are in pixels)
     let skills_idx = sheet_map.get("skills-3.jpg").copied();
     let mastery_idx = sheet_map.get("mastery-3.png").copied();
+    let mastery_connected_idx = sheet_map.get("mastery-connected-3.png").copied();
+    let mastery_disabled_idx = sheet_map.get("mastery-disabled-3.png").copied();
+    let mastery_active_idx = sheet_map.get("mastery-active-selected-3.png").copied();
+    let mastery_effect_idx = sheet_map.get("mastery-active-effect-3.png").copied();
 
     let sheet_dims = |idx: Option<usize>| -> (f32, f32) {
         idx.and_then(|i| sheets.get(i))
             .map(|s| (s.image.width() as f32, s.image.height() as f32))
             .unwrap_or((1.0, 1.0))
     };
-    let (skills_w, skills_h) = sheet_dims(skills_idx);
-    let (mastery_w, mastery_h) = sheet_dims(mastery_idx);
 
     let mut node_sprites = HashMap::new();
     for pair in sprites_data.pairs::<String, LuaTable>() {
@@ -198,14 +240,17 @@ fn extract_node_sprites(
         for entry in sprite_set.pairs::<String, LuaTable>() {
             let (sprite_type, coords) = entry?;
 
-            // Mastery sprites use the mastery sheet; everything else uses skills sheet
-            let is_mastery = sprite_type.starts_with("mastery");
-            let (sheet_index, sw, sh) = if is_mastery {
-                let Some(idx) = mastery_idx else { continue };
-                (idx, mastery_w, mastery_h)
-            } else {
-                let Some(idx) = skills_idx else { continue };
-                (idx, skills_w, skills_h)
+            // Each sprite type uses its own spritesheet
+            let sheet_info = match sprite_type.as_str() {
+                "mastery" => mastery_idx.map(|i| (i, sheet_dims(Some(i)))),
+                "masteryConnected" => mastery_connected_idx.map(|i| (i, sheet_dims(Some(i)))),
+                "masteryInactive" => mastery_disabled_idx.map(|i| (i, sheet_dims(Some(i)))),
+                "masteryActiveSelected" => mastery_active_idx.map(|i| (i, sheet_dims(Some(i)))),
+                "masteryActiveEffect" => mastery_effect_idx.map(|i| (i, sheet_dims(Some(i)))),
+                _ => skills_idx.map(|i| (i, sheet_dims(Some(i)))),
+            };
+            let Some((sheet_index, (sw, sh))) = sheet_info else {
+                continue;
             };
 
             let mut region = parse_sprite_region(&coords, sheet_index)?;
@@ -221,9 +266,11 @@ fn extract_node_sprites(
                 "notableInactive" => ns.notable_inactive = Some(region),
                 "keystoneActive" => ns.keystone_active = Some(region),
                 "keystoneInactive" => ns.keystone_inactive = Some(region),
-                "mastery" | "masteryConnected" | "masteryInactive" | "masteryActiveSelected" => {
-                    ns.mastery = ns.mastery.or(Some(region));
-                }
+                "mastery" => ns.mastery = ns.mastery.or(Some(region)),
+                "masteryInactive" => ns.mastery_inactive = Some(region),
+                "masteryActiveSelected" => ns.mastery_active = Some(region),
+                "masteryConnected" => ns.mastery_connected = Some(region),
+                "masteryActiveEffect" => ns.mastery_effect = Some(region),
                 _ => {}
             }
         }
@@ -271,6 +318,31 @@ fn extract_frame_sprites(
         frames.jewel_unallocated = Some(region_from_px(174, 237, 58, 58, sw, sh, idx));
         frames.jewel_allocated = Some(region_from_px(325, 0, 58, 58, sw, sh, idx));
         frames.jewel_can_allocate = Some(region_from_px(232, 237, 58, 58, sw, sh, idx));
+    }
+
+    // Mastery frames are in the ascendancy spritesheet
+    if let Some(idx) = sheet_map.get("ascendancy-3.webp").copied()
+        && let Some(sheet) = sheets.get(idx)
+    {
+        let sw = sheet.image.width() as f32;
+        let sh = sheet.image.height() as f32;
+
+        // AscendancyFrameLarge* coords from sprites.lua
+        frames.mastery_unallocated = Some(region_from_px(1672, 1494, 58, 58, sw, sh, idx));
+        frames.mastery_can_allocate = Some(region_from_px(1730, 1494, 58, 58, sw, sh, idx));
+        frames.mastery_allocated = Some(region_from_px(1788, 1494, 58, 58, sw, sh, idx));
+    }
+
+    // Group backgrounds from group-background-3.png
+    if let Some(idx) = sheet_map.get("group-background-3.png").copied()
+        && let Some(sheet) = sheets.get(idx)
+    {
+        let sw = sheet.image.width() as f32;
+        let sh = sheet.image.height() as f32;
+
+        frames.group_background_small = Some(region_from_px(443, 444, 138, 138, sw, sh, idx));
+        frames.group_background_medium = Some(region_from_px(723, 286, 178, 178, sw, sh, idx));
+        frames.group_background_large = Some(region_from_px(723, 0, 283, 143, sw, sh, idx));
     }
 
     Ok(frames)

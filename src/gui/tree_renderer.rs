@@ -101,6 +101,11 @@ pub fn draw_tree(
         egui::pos2(rect.max.x + visible_margin, rect.max.y + visible_margin),
     );
 
+    // Draw group backgrounds (behind everything else)
+    if let Some(atlas) = atlas {
+        draw_group_backgrounds(&painter, tree, camera, &rect, &visible_rect, atlas);
+    }
+
     // Draw connections
     for conn in &tree.connections {
         let (Some(from_node), Some(to_node)) =
@@ -240,27 +245,38 @@ fn draw_node_sprite(
     // Look up the icon sprite
     // For masteries, use inactiveIcon/activeIcon paths instead of the generic icon
     let icon_region = if node.node_type == NodeType::Mastery {
-        // Masteries have dedicated inactive/active icons in the mastery spritesheet
-        let mastery_icon = if node.is_allocated {
-            node.active_icon.as_deref()
+        // Masteries have dedicated icons per state, each on different spritesheets
+        if node.is_allocated {
+            // Try activeIcon path with masteryActiveSelected sprite
+            node.active_icon
+                .as_deref()
+                .and_then(|icon| atlas.node_sprites.get(icon))
+                .and_then(|ns| ns.mastery_active.as_ref())
+                // Fall back to generic icon's mastery sprite
+                .or_else(|| {
+                    atlas
+                        .node_sprites
+                        .get(&node.icon)
+                        .and_then(|ns| ns.mastery.as_ref())
+                })
         } else {
-            node.inactive_icon.as_deref()
-        };
-        mastery_icon
-            .and_then(|icon| atlas.node_sprites.get(icon))
-            .and_then(|ns| {
-                ns.mastery
-                    .as_ref()
-                    .or(ns.normal_active.as_ref())
-                    .or(ns.normal_inactive.as_ref())
-            })
-            // Fall back to the generic icon's mastery sprite
-            .or_else(|| {
-                atlas
-                    .node_sprites
-                    .get(&node.icon)
-                    .and_then(|ns| ns.mastery.as_ref())
-            })
+            // Try inactiveIcon path with masteryInactive sprite
+            node.inactive_icon
+                .as_deref()
+                .and_then(|icon| atlas.node_sprites.get(icon))
+                .and_then(|ns| {
+                    ns.mastery_inactive
+                        .as_ref()
+                        .or(ns.mastery_connected.as_ref())
+                })
+                // Fall back to generic icon's mastery sprite
+                .or_else(|| {
+                    atlas
+                        .node_sprites
+                        .get(&node.icon)
+                        .and_then(|ns| ns.mastery.as_ref())
+                })
+        }
     } else {
         let node_sprites = atlas.node_sprites.get(&node.icon);
         node_sprites.and_then(|ns| {
@@ -290,8 +306,33 @@ fn draw_node_sprite(
         return false;
     };
 
-    // Draw the icon sprite
     let half = radius;
+
+    // Draw mastery active effect behind the icon (decorative background pattern)
+    if node.is_allocated
+        && node.node_type == NodeType::Mastery
+        && let Some(effect_region) = node
+            .active_effect_image
+            .as_deref()
+            .and_then(|img| atlas.node_sprites.get(img))
+            .and_then(|ns| ns.mastery_effect.as_ref())
+        && let Some(effect_tex) = atlas.texture_id(effect_region.sheet_index)
+    {
+        // Effect is larger than the icon — scale relative to the icon
+        let effect_scale = 3.5;
+        let effect_half = half * effect_scale;
+        let effect_rect = egui::Rect::from_center_size(
+            screen_pos,
+            egui::vec2(effect_half * 2.0, effect_half * 2.0),
+        );
+        let effect_uv = egui::Rect::from_min_max(
+            egui::pos2(effect_region.u_min, effect_region.v_min),
+            egui::pos2(effect_region.u_max, effect_region.v_max),
+        );
+        painter.image(effect_tex, effect_rect, effect_uv, egui::Color32::WHITE);
+    }
+
+    // Draw the icon sprite
     let icon_rect = egui::Rect::from_center_size(screen_pos, egui::vec2(half * 2.0, half * 2.0));
     let uv = egui::Rect::from_min_max(
         egui::pos2(region.u_min, region.v_min),
@@ -304,8 +345,12 @@ fn draw_node_sprite(
     if let Some(frame) = frame_region
         && let Some(frame_tex) = atlas.texture_id(frame.sheet_index)
     {
-        // Frame is slightly larger than the icon
-        let frame_scale = 1.3;
+        // Frame is slightly larger than the icon; masteries get a larger ring
+        let frame_scale = if node.node_type == NodeType::Mastery {
+            1.5
+        } else {
+            1.3
+        };
         let frame_half = half * frame_scale;
         let frame_rect = egui::Rect::from_center_size(
             screen_pos,
@@ -354,7 +399,13 @@ fn get_frame_region<'a>(
                 frames.jewel_unallocated.as_ref()
             }
         }
-        NodeType::Mastery => None, // Masteries don't have standard frames
+        NodeType::Mastery => {
+            if node.is_allocated {
+                frames.mastery_allocated.as_ref()
+            } else {
+                frames.mastery_unallocated.as_ref()
+            }
+        }
     }
 }
 
@@ -370,6 +421,83 @@ fn node_type_color(node_type: NodeType) -> egui::Color32 {
 }
 
 /// Draw an arc connection between two nodes on the same orbit.
+/// Draw group backgrounds behind all nodes.
+fn draw_group_backgrounds(
+    painter: &egui::Painter,
+    tree: &TreeData,
+    camera: &TreeCamera,
+    viewport: &egui::Rect,
+    visible_rect: &egui::Rect,
+    atlas: &TreeSpriteAtlas,
+) {
+    for group in &tree.groups {
+        // Skip ascendancy groups (they have their own background art)
+        if group.is_ascendancy || group.max_orbit == 0 {
+            continue;
+        }
+
+        let screen_pos = camera.tree_to_screen(group.x, group.y, viewport);
+
+        // Quick visibility cull
+        let max_size = 400.0 * camera.zoom;
+        let group_visible =
+            egui::Rect::from_center_size(screen_pos, egui::vec2(max_size, max_size));
+        if !group_visible.intersects(*visible_rect) {
+            continue;
+        }
+
+        let (bg_region, is_half) = match group.max_orbit {
+            3.. => (atlas.frames.group_background_large.as_ref(), true),
+            2 => (atlas.frames.group_background_medium.as_ref(), false),
+            _ => (atlas.frames.group_background_small.as_ref(), false),
+        };
+
+        let Some(bg_region) = bg_region else {
+            continue;
+        };
+        let Some(bg_tex) = atlas.texture_id(bg_region.sheet_index) else {
+            continue;
+        };
+
+        // Scale: sprite dimensions * 1.33 (same as upstream DrawAsset)
+        let bg_w = bg_region.width * 1.33 * camera.zoom;
+        let bg_h = bg_region.height * 1.33 * camera.zoom;
+
+        if is_half {
+            // Large background is a half-circle — draw it twice (normal + vertically flipped)
+            // Top half
+            let top_rect = egui::Rect::from_min_size(
+                egui::pos2(screen_pos.x - bg_w, screen_pos.y - bg_h * 2.0),
+                egui::vec2(bg_w * 2.0, bg_h * 2.0),
+            );
+            let top_uv = egui::Rect::from_min_max(
+                egui::pos2(bg_region.u_min, bg_region.v_min),
+                egui::pos2(bg_region.u_max, bg_region.v_max),
+            );
+            painter.image(bg_tex, top_rect, top_uv, egui::Color32::WHITE);
+
+            // Bottom half (vertically flipped)
+            let bottom_rect = egui::Rect::from_min_size(
+                egui::pos2(screen_pos.x - bg_w, screen_pos.y),
+                egui::vec2(bg_w * 2.0, bg_h * 2.0),
+            );
+            let bottom_uv = egui::Rect::from_min_max(
+                egui::pos2(bg_region.u_min, bg_region.v_max),
+                egui::pos2(bg_region.u_max, bg_region.v_min),
+            );
+            painter.image(bg_tex, bottom_rect, bottom_uv, egui::Color32::WHITE);
+        } else {
+            let bg_rect =
+                egui::Rect::from_center_size(screen_pos, egui::vec2(bg_w * 2.0, bg_h * 2.0));
+            let bg_uv = egui::Rect::from_min_max(
+                egui::pos2(bg_region.u_min, bg_region.v_min),
+                egui::pos2(bg_region.u_max, bg_region.v_max),
+            );
+            painter.image(bg_tex, bg_rect, bg_uv, egui::Color32::WHITE);
+        }
+    }
+}
+
 fn draw_arc(
     painter: &egui::Painter,
     arc: &ArcInfo,

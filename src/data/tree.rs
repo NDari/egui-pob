@@ -9,6 +9,7 @@ use mlua::prelude::*;
 pub struct TreeData {
     pub nodes: HashMap<u32, TreeNode>,
     pub connections: Vec<TreeConnection>,
+    pub groups: Vec<TreeGroup>,
     pub allocated: HashSet<u32>,
     pub bounds: TreeBounds,
 }
@@ -24,17 +25,29 @@ pub struct TreeNode {
     pub icon: String,
     pub inactive_icon: Option<String>,
     pub active_icon: Option<String>,
+    pub active_effect_image: Option<String>,
     /// Group center coordinates (for arc connections between same-orbit nodes).
     pub group_x: f32,
     pub group_y: f32,
     /// Orbit index (0 = center, 1-6 = rings).
     pub orbit: u32,
+    /// Maximum orbit in this node's group (determines group background size).
+    pub group_max_orbit: u32,
     pub stats: Vec<String>,
     pub ascendancy_name: Option<String>,
     pub is_allocated: bool,
 }
 
 /// Node type determines rendering size and color.
+/// A node group with a center position and orbit info (for background rendering).
+#[derive(Debug, Clone)]
+pub struct TreeGroup {
+    pub x: f32,
+    pub y: f32,
+    pub max_orbit: u32,
+    pub is_ascendancy: bool,
+}
+
 /// A connection between two nodes — either straight or arc.
 #[derive(Debug, Clone)]
 pub struct TreeConnection {
@@ -71,7 +84,7 @@ impl NodeType {
             NodeType::Notable => 29.0,
             NodeType::Keystone => 42.0,
             NodeType::Socket => 29.0,
-            NodeType::Mastery => 32.0,
+            NodeType::Mastery => 55.0,
             NodeType::ClassStart => 42.0,
             NodeType::AscendClassStart => 29.0,
         }
@@ -120,6 +133,47 @@ impl TreeData {
             }
         }
 
+        // Extract group data for background rendering
+        let groups: Vec<TreeGroup> = lua
+            .load(
+                r#"
+                local tree = mainObject_ref.main.modes['BUILD'].spec.tree
+                local result = {}
+                for _, group in pairs(tree.groups) do
+                    if not group.isProxy then
+                        local maxOrbit = 0
+                        if group.oo then
+                            for k, _ in pairs(group.oo) do
+                                if k > maxOrbit then maxOrbit = k end
+                            end
+                        end
+                        table.insert(result, {
+                            x = group.x,
+                            y = group.y,
+                            maxOrbit = maxOrbit,
+                            isAscendancy = group.ascendancyName ~= nil
+                        })
+                    end
+                end
+                return result
+            "#,
+            )
+            .eval::<LuaTable>()
+            .and_then(|table| {
+                let mut groups = Vec::new();
+                for entry in table.sequence_values::<LuaTable>() {
+                    let t = entry?;
+                    groups.push(TreeGroup {
+                        x: t.get("x")?,
+                        y: t.get("y")?,
+                        max_orbit: t.get("maxOrbit").unwrap_or(0),
+                        is_ascendancy: t.get("isAscendancy").unwrap_or(false),
+                    });
+                }
+                Ok(groups)
+            })
+            .unwrap_or_default();
+
         // Extract all nodes
         let mut nodes = HashMap::new();
         let mut raw_connections = Vec::new();
@@ -156,17 +210,29 @@ impl TreeData {
             let icon: String = node_table.get("icon").unwrap_or_default();
             let inactive_icon: Option<String> = node_table.get("inactiveIcon").ok();
             let active_icon: Option<String> = node_table.get("activeIcon").ok();
+            let active_effect_image: Option<String> = node_table.get("activeEffectImage").ok();
             let ascendancy_name: Option<String> = node_table.get("ascendancyName").ok();
             let orbit: u32 = node_table.get("o").unwrap_or(0);
 
-            // Get group center coordinates
-            let (group_x, group_y) = match node_table.get::<LuaTable>("group") {
+            // Get group center coordinates and max orbit
+            let (group_x, group_y, group_max_orbit) = match node_table.get::<LuaTable>("group") {
                 Ok(group) => {
                     let gx: f32 = group.get("x").unwrap_or(x);
                     let gy: f32 = group.get("y").unwrap_or(y);
-                    (gx, gy)
+                    // Get max orbit from group.oo table (keys are orbit indices)
+                    let max_orbit = group
+                        .get::<LuaTable>("oo")
+                        .map(|oo| {
+                            let mut max = 0u32;
+                            for (k, _) in oo.pairs::<u32, LuaValue>().flatten() {
+                                max = max.max(k);
+                            }
+                            max
+                        })
+                        .unwrap_or(0);
+                    (gx, gy, max_orbit)
                 }
-                Err(_) => (x, y),
+                Err(_) => (x, y, 0),
             };
 
             // Read stats
@@ -203,9 +269,11 @@ impl TreeData {
                     icon,
                     inactive_icon,
                     active_icon,
+                    active_effect_image,
                     group_x,
                     group_y,
                     orbit,
+                    group_max_orbit,
                     stats,
                     ascendancy_name,
                     is_allocated,
@@ -271,6 +339,7 @@ impl TreeData {
         Ok(TreeData {
             nodes,
             connections,
+            groups,
             allocated,
             bounds,
         })
