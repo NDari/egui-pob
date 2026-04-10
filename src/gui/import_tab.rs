@@ -25,9 +25,9 @@ impl ImportPanel {
         // Status message
         if let Some((ref msg, is_error)) = self.status_message {
             let color = if is_error {
-                egui::Color32::RED
+                super::theme::Theme::ERROR
             } else {
-                egui::Color32::from_rgb(100, 200, 100)
+                super::theme::Theme::SUCCESS
             };
             ui.colored_label(color, msg.as_str());
             ui.separator();

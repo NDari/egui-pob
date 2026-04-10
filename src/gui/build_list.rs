@@ -117,14 +117,14 @@ fn show_folder_row(ui: &mut egui::Ui, folder: &FolderInfo) -> bool {
         egui::Button::new(format!("📁 {}", folder.folder_name))
             .min_size(egui::vec2(ui.available_width(), 24.0)),
     );
-    response.double_clicked()
+    response.clicked()
 }
 
 fn show_build_row(ui: &mut egui::Ui, build: &BuildInfo) -> bool {
     let summary = build_summary(build);
     let response =
         ui.add(egui::Button::new(&summary).min_size(egui::vec2(ui.available_width(), 24.0)));
-    response.double_clicked()
+    response.clicked()
 }
 
 fn build_summary(build: &BuildInfo) -> String {

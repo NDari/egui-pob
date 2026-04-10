@@ -6,6 +6,7 @@ mod config_tab;
 mod import_tab;
 mod items_tab;
 mod skills_tab;
+pub mod theme;
 mod tree_renderer;
 mod tree_tab;
 
@@ -117,7 +118,7 @@ impl eframe::App for PobApp {
             AppStatus::Error(msg) => {
                 ui.heading("Path of Building — Error");
                 ui.separator();
-                ui.colored_label(egui::Color32::RED, msg);
+                ui.colored_label(theme::Theme::ERROR, msg);
             }
             AppStatus::Running => {
                 // Take ownership of screen to avoid borrow conflicts
@@ -195,8 +196,10 @@ pub fn show_stat_table(ui: &mut egui::Ui, output: &CalcOutput) {
             for (stat, label) in &key_stats {
                 if let Some(value) = output.stats.get(*stat) {
                     ui.label(*label);
+                    let text = format_stat_value(stat, *value);
+                    let color = stat_value_color(stat);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(format_stat_value(stat, *value));
+                        ui.label(egui::RichText::new(text).color(color));
                     });
                     ui.end_row();
                 }
@@ -236,6 +239,21 @@ fn format_stat_value(stat: &str, value: f64) -> String {
     }
 
     format!("{value:.1}")
+}
+
+fn stat_value_color(stat: &str) -> egui::Color32 {
+    match stat {
+        "TotalDPS" | "CombinedDPS" | "TotalDot" | "Speed" | "HitChance" | "CritChance"
+        | "CritMultiplier" => theme::Theme::STAT_DPS,
+        "Life" => theme::Theme::STAT_LIFE,
+        "EnergyShield" => theme::Theme::STAT_ES,
+        "Mana" => theme::Theme::STAT_MANA,
+        "FireResist" => theme::Theme::STAT_FIRE,
+        "ColdResist" => theme::Theme::STAT_COLD,
+        "LightningResist" => theme::Theme::STAT_LIGHTNING,
+        "ChaosResist" => theme::Theme::STAT_CHAOS,
+        _ => theme::Theme::TEXT_DEFAULT,
+    }
 }
 
 fn format_number(n: i64) -> String {

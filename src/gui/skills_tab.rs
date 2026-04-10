@@ -34,7 +34,7 @@ impl SkillsPanel {
         let mut changed = false;
 
         if let Some(ref err) = self.error {
-            ui.colored_label(egui::Color32::RED, err);
+            ui.colored_label(super::theme::Theme::ERROR, err);
             return false;
         }
 
@@ -53,9 +53,9 @@ fn show_socket_group(ui: &mut egui::Ui, group: &mut SocketGroup, bridge: &LuaBri
 
     let title = socket_group_title(group);
     let header_text = if group.is_main {
-        egui::RichText::new(format!("* {title}")).color(egui::Color32::from_rgb(255, 200, 50))
+        egui::RichText::new(format!("* {title}")).color(super::theme::Theme::MAIN_SKILL)
     } else if !group.enabled {
-        egui::RichText::new(title).color(egui::Color32::from_rgb(100, 100, 100))
+        egui::RichText::new(title).color(super::theme::Theme::TEXT_DIM)
     } else {
         egui::RichText::new(title)
     };
@@ -73,13 +73,13 @@ fn show_socket_group(ui: &mut egui::Ui, group: &mut SocketGroup, bridge: &LuaBri
                     }
                 }
                 if group.is_main {
-                    ui.colored_label(egui::Color32::from_rgb(255, 200, 50), "Main Skill");
+                    ui.colored_label(super::theme::Theme::MAIN_SKILL, "Main Skill");
                 }
                 if let Some(ref slot) = group.slot {
                     ui.label(
                         egui::RichText::new(format!("({slot})"))
                             .small()
-                            .color(egui::Color32::from_rgb(150, 150, 150)),
+                            .color(super::theme::Theme::TEXT_MUTED),
                     );
                 }
             });
@@ -94,11 +94,11 @@ fn show_socket_group(ui: &mut egui::Ui, group: &mut SocketGroup, bridge: &LuaBri
 
 fn show_gem(ui: &mut egui::Ui, gem: &GemInfo) {
     let color = if !gem.enabled {
-        egui::Color32::from_rgb(100, 100, 100)
+        super::theme::Theme::TEXT_DIM
     } else if gem.is_support {
-        egui::Color32::from_rgb(120, 160, 255)
+        super::theme::Theme::GEM_SUPPORT
     } else {
-        egui::Color32::from_rgb(200, 50, 50)
+        super::theme::Theme::GEM_ACTIVE
     };
 
     let text = if gem.quality > 0 {

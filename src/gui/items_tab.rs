@@ -31,7 +31,7 @@ impl ItemsPanel {
 
     pub fn show(&self, ui: &mut egui::Ui, _bridge: &LuaBridge) {
         if let Some(ref err) = self.error {
-            ui.colored_label(egui::Color32::RED, err);
+            ui.colored_label(super::theme::Theme::ERROR, err);
             return;
         }
 
@@ -47,7 +47,7 @@ fn show_slot(ui: &mut egui::Ui, slot: &EquippedItem) {
     let Some(ref item) = slot.item else {
         ui.horizontal(|ui| {
             ui.label(&slot.slot_name);
-            ui.colored_label(egui::Color32::from_rgb(100, 100, 100), "(empty)");
+            ui.colored_label(super::theme::Theme::TEXT_DIM, "(empty)");
         });
         return;
     };
@@ -60,7 +60,7 @@ fn show_slot(ui: &mut egui::Ui, slot: &EquippedItem) {
             ui.label(
                 egui::RichText::new(format!("{} — {}", slot.slot_name, item.base_name))
                     .small()
-                    .color(egui::Color32::from_rgb(150, 150, 150)),
+                    .color(super::theme::Theme::TEXT_MUTED),
             );
 
             if item.quality > 0 {
@@ -73,14 +73,14 @@ fn show_slot(ui: &mut egui::Ui, slot: &EquippedItem) {
             if !item.implicit_mods.is_empty() {
                 ui.separator();
                 for m in &item.implicit_mods {
-                    ui.colored_label(egui::Color32::from_rgb(136, 136, 255), m);
+                    ui.colored_label(super::theme::Theme::MOD_TEXT, m);
                 }
             }
 
             if !item.explicit_mods.is_empty() {
                 ui.separator();
                 for m in &item.explicit_mods {
-                    ui.colored_label(egui::Color32::from_rgb(136, 136, 255), m);
+                    ui.colored_label(super::theme::Theme::MOD_TEXT, m);
                 }
             }
         });

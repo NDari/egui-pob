@@ -2,7 +2,7 @@
 //! When a sprite atlas is loaded, nodes are rendered with actual game textures.
 //! Falls back to colored circles when sprites are unavailable.
 
-use pob_egui::data::tree::{ArcInfo, NodeType, TreeData, TreeNode};
+use pob_egui::data::tree::{ArcInfo, GroupBackground, NodeType, TreeData, TreeNode};
 use pob_egui::data::tree_sprites::{SpriteRegion, TreeSpriteAtlas};
 
 /// Colors for different node states and types.
@@ -67,6 +67,10 @@ pub fn draw_tree(
     camera: &mut TreeCamera,
     atlas: Option<&TreeSpriteAtlas>,
 ) -> Option<u32> {
+    ui.ctx().style_mut(|s| {
+        s.interaction.tooltip_delay = 0.05;
+        s.interaction.tooltip_grace_time = 0.05;
+    });
     let (response, painter) =
         ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
     let rect = response.rect;
@@ -101,8 +105,12 @@ pub fn draw_tree(
         egui::pos2(rect.max.x + visible_margin, rect.max.y + visible_margin),
     );
 
-    // Draw group backgrounds (behind everything else)
+    // Fill background to match upstream PoB's dark blue-gray tree background
+    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(8, 12, 17));
+
+    // Draw backgrounds (behind everything else)
     if let Some(atlas) = atlas {
+        draw_class_start_background(&painter, tree, camera, &rect, &visible_rect, atlas);
         draw_group_backgrounds(&painter, tree, camera, &rect, &visible_rect, atlas);
     }
 
@@ -196,30 +204,12 @@ pub fn draw_tree(
             );
         }
 
-        // Draw name for notable/keystone when zoomed in
-        if camera.zoom > 0.08 && matches!(node.node_type, NodeType::Keystone | NodeType::Notable) {
-            let font = egui::FontId::proportional(10.0);
-            painter.text(
-                egui::pos2(screen_pos.x, screen_pos.y + radius + 4.0),
-                egui::Align2::CENTER_TOP,
-                &node.name,
-                font,
-                egui::Color32::from_rgb(200, 200, 200),
-            );
-        }
     }
 
     // Tooltip
     if let Some(node) = hovered_node {
         response.clone().on_hover_ui_at_pointer(|ui| {
-            ui.strong(&node.name);
-            ui.label(format!("{:?}", node.node_type));
-            for stat in &node.stats {
-                ui.label(stat);
-            }
-            if node.is_allocated {
-                ui.colored_label(Palette::ALLOCATED, "Allocated");
-            }
+            show_node_tooltip(ui, node);
         });
     }
 
@@ -242,6 +232,28 @@ fn draw_node_sprite(
     radius: f32,
     atlas: &TreeSpriteAtlas,
 ) -> bool {
+    // ClassStart nodes use dedicated art instead of normal icon+frame
+    if node.node_type == NodeType::ClassStart {
+        let art_name = if node.is_allocated {
+            node.start_art.as_deref()
+        } else {
+            Some("PSStartNodeBackgroundInactive")
+        };
+        if let Some(name) = art_name
+            && let Some(bg) = atlas.class_start_art.get(name)
+            && let Some(tex) = atlas.texture_id(bg.sheet_index)
+        {
+            let w = bg.width * 1.33 * radius / node.node_type.radius();
+            let h = bg.height * 1.33 * radius / node.node_type.radius();
+            let img_rect =
+                egui::Rect::from_center_size(screen_pos, egui::vec2(w * 2.0, h * 2.0));
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(tex, img_rect, uv, egui::Color32::WHITE);
+            return true;
+        }
+        return false;
+    }
+
     // Look up the icon sprite
     // For masteries, use inactiveIcon/activeIcon paths instead of the generic icon
     let icon_region = if node.node_type == NodeType::Mastery {
@@ -332,8 +344,10 @@ fn draw_node_sprite(
         painter.image(effect_tex, effect_rect, effect_uv, egui::Color32::WHITE);
     }
 
-    // Draw the icon sprite
-    let icon_rect = egui::Rect::from_center_size(screen_pos, egui::vec2(half * 2.0, half * 2.0));
+    // Draw the icon sprite — scale down slightly so square JPEG corners
+    // are hidden behind the circular frame overlay
+    let icon_half = half * 0.85;
+    let icon_rect = egui::Rect::from_center_size(screen_pos, egui::vec2(icon_half * 2.0, icon_half * 2.0));
     let uv = egui::Rect::from_min_max(
         egui::pos2(region.u_min, region.v_min),
         egui::pos2(region.u_max, region.v_max),
@@ -420,7 +434,135 @@ fn node_type_color(node_type: NodeType) -> egui::Color32 {
     }
 }
 
-/// Draw an arc connection between two nodes on the same orbit.
+/// Rich tooltip for a passive tree node, styled to match upstream PoB.
+fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode) {
+    ui.set_max_width(400.0);
+
+    // Header: node type label + name
+    let type_label = match node.node_type {
+        NodeType::Notable => "Notable",
+        NodeType::Keystone => "Keystone",
+        NodeType::Mastery => "Mastery",
+        NodeType::Socket => "Jewel Socket",
+        NodeType::ClassStart | NodeType::AscendClassStart => "Class Start",
+        NodeType::Normal => {
+            if node.ascendancy_name.is_some() {
+                "Ascendancy"
+            } else {
+                "Passive"
+            }
+        }
+    };
+    let type_color = match node.node_type {
+        NodeType::Notable => egui::Color32::from_rgb(210, 180, 100),
+        NodeType::Keystone => egui::Color32::from_rgb(220, 160, 60),
+        NodeType::Mastery => egui::Color32::from_rgb(180, 140, 200),
+        NodeType::Socket => egui::Color32::from_rgb(120, 200, 120),
+        _ => egui::Color32::from_rgb(170, 170, 170),
+    };
+    ui.label(egui::RichText::new(type_label).small().color(type_color));
+    ui.label(egui::RichText::new(&node.name).strong().size(16.0));
+
+    // Oil recipe (for notables)
+    if !node.recipe.is_empty() {
+        ui.horizontal(|ui| {
+            let oils: Vec<&str> = node
+                .recipe
+                .iter()
+                .map(|r| r.strip_suffix("Oil").unwrap_or(r))
+                .collect();
+            ui.label(
+                egui::RichText::new(format!("Anoint: {}", oils.join(" + ")))
+                    .small()
+                    .color(egui::Color32::from_rgb(200, 180, 100)),
+            );
+        });
+    }
+
+    // Stats
+    if !node.stats.is_empty() {
+        ui.separator();
+        for stat in &node.stats {
+            ui.label(
+                egui::RichText::new(stat).color(egui::Color32::from_rgb(136, 136, 255)),
+            );
+        }
+    }
+
+    // Reminder text
+    if !node.reminder_text.is_empty() {
+        ui.separator();
+        for line in &node.reminder_text {
+            ui.label(
+                egui::RichText::new(line)
+                    .small()
+                    .italics()
+                    .color(egui::Color32::from_rgb(160, 160, 128)),
+            );
+        }
+    }
+
+    // Flavour text
+    if !node.flavour_text.is_empty() {
+        ui.separator();
+        for line in &node.flavour_text {
+            ui.label(
+                egui::RichText::new(line)
+                    .italics()
+                    .color(egui::Color32::from_rgb(175, 96, 37)),
+            );
+        }
+    }
+
+    // Allocation status
+    if node.is_allocated {
+        ui.separator();
+        ui.label(
+            egui::RichText::new("Allocated")
+                .small()
+                .color(Palette::ALLOCATED),
+        );
+    }
+}
+
+/// Draw the class start background art for the current class.
+/// Positions are hardcoded to match upstream PoB (the tree data doesn't include them).
+fn draw_class_start_background(
+    painter: &egui::Painter,
+    tree: &TreeData,
+    camera: &TreeCamera,
+    viewport: &egui::Rect,
+    visible_rect: &egui::Rect,
+    atlas: &TreeSpriteAtlas,
+) {
+    // class_id -> (asset suffix, tree x, tree y)
+    let (suffix, tx, ty) = match tree.class_id {
+        1 => ("Str", -2750.0_f32, 1600.0_f32),      // Marauder
+        2 => ("Dex", 2550.0, 1600.0),                // Ranger
+        3 => ("Int", -250.0, -2200.0),                // Witch
+        4 => ("StrDex", -150.0, 2350.0),              // Duelist
+        5 => ("StrInt", -2100.0, -1500.0),            // Templar
+        6 => ("DexInt", 2350.0, -1950.0),             // Shadow
+        _ => return, // Scion (0) or unknown — no background
+    };
+
+    let Some(bg) = atlas.class_backgrounds.get(suffix) else {
+        return;
+    };
+    let screen_pos = camera.tree_to_screen(tx, ty, viewport);
+    let w = bg.width * 1.33 * camera.zoom;
+    let h = bg.height * 1.33 * camera.zoom;
+    let img_rect = egui::Rect::from_center_size(screen_pos, egui::vec2(w * 2.0, h * 2.0));
+    if !img_rect.intersects(*visible_rect) {
+        return;
+    }
+    let Some(tex) = atlas.texture_id(bg.sheet_index) else {
+        return;
+    };
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    painter.image(tex, img_rect, uv, egui::Color32::WHITE);
+}
+
 /// Draw group backgrounds behind all nodes.
 fn draw_group_backgrounds(
     painter: &egui::Painter,
@@ -431,10 +573,36 @@ fn draw_group_backgrounds(
     atlas: &TreeSpriteAtlas,
 ) {
     for group in &tree.groups {
-        // Skip ascendancy groups (they have their own background art)
-        if group.is_ascendancy || group.max_orbit == 0 {
+        // Draw ascendancy class background art
+        if group.is_ascendancy_start {
+            if let Some(name) = &group.ascendancy_name {
+                if let Some(bg) = atlas.ascendancy_backgrounds.get(name.as_str()) {
+                    let screen_pos = camera.tree_to_screen(group.x, group.y, viewport);
+                    let w = bg.width * 1.33 * camera.zoom;
+                    let h = bg.height * 1.33 * camera.zoom;
+                    let img_rect =
+                        egui::Rect::from_center_size(screen_pos, egui::vec2(w * 2.0, h * 2.0));
+                    if img_rect.intersects(*visible_rect) {
+                        if let Some(tex) = atlas.texture_id(bg.sheet_index) {
+                            let uv =
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            painter.image(tex, img_rect, uv, egui::Color32::WHITE);
+                        }
+                    }
+                }
+            }
             continue;
         }
+
+        // Skip all ascendancy groups from regular group background rendering
+        if group.is_ascendancy {
+            continue;
+        }
+
+        // Only draw backgrounds for groups that have them in the tree data
+        let Some(bg_type) = group.background else {
+            continue;
+        };
 
         let screen_pos = camera.tree_to_screen(group.x, group.y, viewport);
 
@@ -446,10 +614,10 @@ fn draw_group_backgrounds(
             continue;
         }
 
-        let (bg_region, is_half) = match group.max_orbit {
-            3.. => (atlas.frames.group_background_large.as_ref(), true),
-            2 => (atlas.frames.group_background_medium.as_ref(), false),
-            _ => (atlas.frames.group_background_small.as_ref(), false),
+        let (bg_region, is_half) = match bg_type {
+            GroupBackground::Large => (atlas.frames.group_background_large.as_ref(), true),
+            GroupBackground::Medium => (atlas.frames.group_background_medium.as_ref(), false),
+            GroupBackground::Small => (atlas.frames.group_background_small.as_ref(), false),
         };
 
         let Some(bg_region) = bg_region else {

@@ -34,6 +34,11 @@ Rust + egui (GUI) ↔ mlua FFI bridge ↔ Embedded LuaJIT (calc engine)
 | `just check` | Type-check without building |
 | `just sync` | Update upstream submodule |
 
+## Tooling
+
+- **rust-analyzer LSP** plugin is available — use it for go-to-definition, type lookups, and diagnostics when needed
+- **lua-lsp** plugin is available — use it when working with upstream Lua code for navigation and understanding
+
 ## Code Style
 
 - Standard `rustfmt` and `clippy` defaults, no overrides

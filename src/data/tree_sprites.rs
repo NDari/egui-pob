@@ -56,6 +56,13 @@ pub struct FrameSprites {
     pub group_background_large: Option<SpriteRegion>,
 }
 
+/// A standalone background image (ascendancy class art or class start art).
+pub struct BackgroundImage {
+    pub sheet_index: usize,
+    pub width: f32,
+    pub height: f32,
+}
+
 /// All loaded sprite atlas data.
 pub struct TreeSpriteAtlas {
     /// Loaded spritesheet images as raw RGBA data, ready to upload to egui.
@@ -64,6 +71,12 @@ pub struct TreeSpriteAtlas {
     pub node_sprites: HashMap<String, NodeSprites>,
     /// Frame overlay sprites.
     pub frames: FrameSprites,
+    /// Ascendancy class background images, keyed by ascendancy name (e.g. "Berserker").
+    pub ascendancy_backgrounds: HashMap<String, BackgroundImage>,
+    /// Class start background images, keyed by asset name (e.g. "Str" for BackgroundStr).
+    pub class_backgrounds: HashMap<String, BackgroundImage>,
+    /// Class start node art, keyed by asset name (e.g. "centertemplar", "PSStartNodeBackgroundInactive").
+    pub class_start_art: HashMap<String, BackgroundImage>,
 }
 
 pub struct SpriteSheet {
@@ -132,16 +145,59 @@ impl TreeSpriteAtlas {
         let node_sprites = extract_node_sprites(lua, &sheets, &sheet_map)?;
         let frames = extract_frame_sprites(lua, &sheets, &sheet_map)?;
 
+        // Load standalone background images from the parent TreeData/ directory
+        let tree_data_root = tree_data_dir.parent();
+        let ascendancy_backgrounds =
+            load_prefixed_backgrounds(&mut sheets, tree_data_root, "Classes");
+        let class_backgrounds =
+            load_prefixed_backgrounds(&mut sheets, tree_data_root, "Background");
+
+        // Load class start node art — keyed by full asset name to match node.startArt
+        let mut class_start_art = HashMap::new();
+        if let Some(root) = tree_data_root {
+            let class_start_files = [
+                "centerscion",
+                "centermarauder",
+                "centerranger",
+                "centerwitch",
+                "centerduelist",
+                "centertemplar",
+                "centershadow",
+                "PSStartNodeBackgroundInactive",
+            ];
+            for name in class_start_files {
+                let path = root.join(format!("{name}.png"));
+                if let Some(idx) = load_sheet(&mut sheets, &path) {
+                    let w = sheets[idx].image.width() as f32;
+                    let h = sheets[idx].image.height() as f32;
+                    class_start_art.insert(
+                        name.to_string(),
+                        BackgroundImage {
+                            sheet_index: idx,
+                            width: w,
+                            height: h,
+                        },
+                    );
+                }
+            }
+        }
+
         log::info!(
-            "Loaded {} spritesheets, {} node sprite entries",
+            "Loaded {} spritesheets, {} node sprite entries, {} ascendancy backgrounds, {} class backgrounds, {} class start art",
             sheets.len(),
-            node_sprites.len()
+            node_sprites.len(),
+            ascendancy_backgrounds.len(),
+            class_backgrounds.len(),
+            class_start_art.len(),
         );
 
         Ok(Self {
             sheets,
             node_sprites,
             frames,
+            ascendancy_backgrounds,
+            class_backgrounds,
+            class_start_art,
         })
     }
 
@@ -180,6 +236,58 @@ fn load_sheet(sheets: &mut Vec<SpriteSheet>, path: &Path) -> Option<usize> {
         texture: None,
     });
     Some(index)
+}
+
+/// Load PNG images with a given filename prefix from the TreeData/ directory.
+/// Returns a map from the suffix (prefix stripped) to the background info.
+/// E.g., prefix "Classes" loads "ClassesBerserker.png" keyed as "Berserker".
+fn load_prefixed_backgrounds(
+    sheets: &mut Vec<SpriteSheet>,
+    tree_data_root: Option<&Path>,
+    prefix: &str,
+) -> HashMap<String, BackgroundImage> {
+    let mut backgrounds = HashMap::new();
+
+    let Some(root) = tree_data_root else {
+        return backgrounds;
+    };
+
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("Failed to read TreeData directory: {e}");
+            return backgrounds;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(filename) = path.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        if !filename.starts_with(prefix) || !filename.ends_with(".png") {
+            continue;
+        }
+        let name = &filename[prefix.len()..filename.len() - ".png".len()];
+        if name.is_empty() {
+            continue;
+        }
+
+        if let Some(idx) = load_sheet(sheets, &path) {
+            let w = sheets[idx].image.width() as f32;
+            let h = sheets[idx].image.height() as f32;
+            backgrounds.insert(
+                name.to_string(),
+                BackgroundImage {
+                    sheet_index: idx,
+                    width: w,
+                    height: h,
+                },
+            );
+        }
+    }
+
+    backgrounds
 }
 
 /// Extract node icon sprites from Lua's processed spriteMap.

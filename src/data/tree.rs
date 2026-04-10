@@ -12,6 +12,8 @@ pub struct TreeData {
     pub groups: Vec<TreeGroup>,
     pub allocated: HashSet<u32>,
     pub bounds: TreeBounds,
+    /// Current class ID (0=Scion, 1=Marauder, 2=Ranger, 3=Witch, 4=Duelist, 5=Templar, 6=Shadow).
+    pub class_id: u32,
 }
 
 /// A single passive tree node.
@@ -36,16 +38,36 @@ pub struct TreeNode {
     pub stats: Vec<String>,
     pub ascendancy_name: Option<String>,
     pub is_allocated: bool,
+    /// For ClassStart nodes: the art asset name when allocated (e.g. "centertemplar").
+    pub start_art: Option<String>,
+    /// Gray reminder text (e.g. "Modifiers to Claw Damage also apply to...").
+    pub reminder_text: Vec<String>,
+    /// Oil recipe for anointing (notable nodes only, e.g. ["CrimsonOil", "CrimsonOil", "OpalescentOil"]).
+    pub recipe: Vec<String>,
+    /// Flavour text (italic lore text).
+    pub flavour_text: Vec<String>,
 }
 
-/// Node type determines rendering size and color.
-/// A node group with a center position and orbit info (for background rendering).
+/// A node group with a center position and background info (for background rendering).
 #[derive(Debug, Clone)]
 pub struct TreeGroup {
     pub x: f32,
     pub y: f32,
-    pub max_orbit: u32,
     pub is_ascendancy: bool,
+    /// True if this is the starting group for an ascendancy class (draws class background art).
+    pub is_ascendancy_start: bool,
+    /// The ascendancy name (e.g. "Berserker") — used to look up class background sprite.
+    pub ascendancy_name: Option<String>,
+    /// Background type from tree data — None means no background art for this group.
+    pub background: Option<GroupBackground>,
+}
+
+/// Which background sprite to use for a group.
+#[derive(Debug, Clone, Copy)]
+pub enum GroupBackground {
+    Small,
+    Medium,
+    Large,
 }
 
 /// A connection between two nodes — either straight or arc.
@@ -79,14 +101,15 @@ pub enum NodeType {
 impl NodeType {
     /// Radius for rendering (in tree coordinates).
     pub fn radius(self) -> f32 {
+        // Half of artWidth * 1.33, matching upstream PoB's nodeOverlay sizes
         match self {
-            NodeType::Normal => 20.0,
-            NodeType::Notable => 29.0,
-            NodeType::Keystone => 42.0,
-            NodeType::Socket => 29.0,
-            NodeType::Mastery => 55.0,
-            NodeType::ClassStart => 42.0,
-            NodeType::AscendClassStart => 29.0,
+            NodeType::Normal => 26.6,        // 40 * 1.33 / 2
+            NodeType::Notable => 38.6,       // 58 * 1.33 / 2
+            NodeType::Keystone => 55.9,      // 84 * 1.33 / 2
+            NodeType::Socket => 38.6,        // 58 * 1.33 / 2
+            NodeType::Mastery => 43.2,       // 65 * 1.33 / 2
+            NodeType::ClassStart => 55.9,    // same as Keystone
+            NodeType::AscendClassStart => 38.6, // same as Notable
         }
     }
 }
@@ -123,6 +146,7 @@ impl TreeData {
 
         let nodes_table: LuaTable = spec.get("nodes")?;
         let alloc_nodes: LuaTable = spec.get("allocNodes")?;
+        let class_id: u32 = spec.get("curClassId").unwrap_or(0);
 
         // Collect allocated node IDs
         let mut allocated = HashSet::new();
@@ -141,17 +165,17 @@ impl TreeData {
                 local result = {}
                 for _, group in pairs(tree.groups) do
                     if not group.isProxy then
-                        local maxOrbit = 0
-                        if group.oo then
-                            for k, _ in pairs(group.oo) do
-                                if k > maxOrbit then maxOrbit = k end
-                            end
+                        local bgImage = nil
+                        if group.background then
+                            bgImage = group.background.image
                         end
                         table.insert(result, {
                             x = group.x,
                             y = group.y,
-                            maxOrbit = maxOrbit,
-                            isAscendancy = group.ascendancyName ~= nil
+                            isAscendancy = group.ascendancyName ~= nil,
+                            isAscendancyStart = group.isAscendancyStart or false,
+                            ascendancyName = group.ascendancyName,
+                            bgImage = bgImage,
                         })
                     end
                 end
@@ -163,11 +187,23 @@ impl TreeData {
                 let mut groups = Vec::new();
                 for entry in table.sequence_values::<LuaTable>() {
                     let t = entry?;
+                    let background = t
+                        .get::<Option<String>>("bgImage")
+                        .ok()
+                        .flatten()
+                        .and_then(|img| match img.as_str() {
+                            "PSGroupBackground3" => Some(GroupBackground::Large),
+                            "PSGroupBackground2" => Some(GroupBackground::Medium),
+                            "PSGroupBackground1" => Some(GroupBackground::Small),
+                            _ => None,
+                        });
                     groups.push(TreeGroup {
                         x: t.get("x")?,
                         y: t.get("y")?,
-                        max_orbit: t.get("maxOrbit").unwrap_or(0),
                         is_ascendancy: t.get("isAscendancy").unwrap_or(false),
+                        is_ascendancy_start: t.get("isAscendancyStart").unwrap_or(false),
+                        ascendancy_name: t.get("ascendancyName").ok(),
+                        background,
                     });
                 }
                 Ok(groups)
@@ -239,6 +275,10 @@ impl TreeData {
             let stats = read_string_list(&node_table, "sd");
 
             let is_allocated = allocated.contains(&id);
+            let start_art: Option<String> = node_table.get("startArt").ok();
+            let reminder_text = read_string_list(&node_table, "reminderText");
+            let recipe = read_string_list(&node_table, "recipe");
+            let flavour_text = read_string_list(&node_table, "flavourText");
 
             // Update bounds
             min_x = min_x.min(x);
@@ -277,6 +317,10 @@ impl TreeData {
                     stats,
                     ascendancy_name,
                     is_allocated,
+                    start_art,
+                    reminder_text,
+                    recipe,
+                    flavour_text,
                 },
             );
         }
@@ -342,6 +386,7 @@ impl TreeData {
             groups,
             allocated,
             bounds,
+            class_id,
         })
     }
 

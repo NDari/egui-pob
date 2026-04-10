@@ -32,7 +32,7 @@ impl ConfigPanel {
         let mut changed = false;
 
         if let Some(ref err) = self.error {
-            ui.colored_label(egui::Color32::RED, err);
+            ui.colored_label(super::theme::Theme::ERROR, err);
             return false;
         }
 

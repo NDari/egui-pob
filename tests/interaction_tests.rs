@@ -4,6 +4,8 @@
 mod common;
 
 use mlua::prelude::*;
+use pob_egui::data::tree::TreeData;
+use pob_egui::data::tree_sprites::TreeSpriteAtlas;
 
 // ---------------------------------------------------------------------------
 // Config change triggers recalc
@@ -216,4 +218,157 @@ fn test_skills_extraction() {
             assert!(gem.level >= 1, "gem level should be at least 1");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tree group backgrounds match tree data
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_group_backgrounds_only_where_tree_data_defines_them() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+
+    let tree = TreeData::extract(bridge.lua()).expect("failed to extract tree data");
+
+    // Ask Lua directly how many groups have a background field
+    let (lua_with_bg, lua_total): (u32, u32) = bridge
+        .lua()
+        .load(
+            r#"
+            local tree = mainObject_ref.main.modes['BUILD'].spec.tree
+            local with_bg = 0
+            local total = 0
+            for _, group in pairs(tree.groups) do
+                if not group.isProxy then
+                    total = total + 1
+                    if group.background then
+                        with_bg = with_bg + 1
+                    end
+                end
+            end
+            return with_bg, total
+        "#,
+        )
+        .eval()
+        .expect("failed to count Lua groups");
+
+    let rust_with_bg = tree.groups.iter().filter(|g| g.background.is_some()).count() as u32;
+    let rust_total = tree.groups.len() as u32;
+
+    println!("Lua:  {lua_with_bg}/{lua_total} groups have backgrounds");
+    println!("Rust: {rust_with_bg}/{rust_total} groups have backgrounds");
+
+    assert_eq!(
+        rust_total, lua_total,
+        "Rust should extract the same number of groups as Lua"
+    );
+    assert_eq!(
+        rust_with_bg, lua_with_bg,
+        "Rust should assign backgrounds to the same groups as Lua tree data"
+    );
+
+    // Sanity: not all groups should have backgrounds (the original bug)
+    assert!(
+        rust_with_bg < rust_total,
+        "not every group should have a background — got {rust_with_bg}/{rust_total}"
+    );
+    // Sanity: at least some groups should have backgrounds
+    assert!(
+        rust_with_bg > 0,
+        "at least some groups should have backgrounds"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ascendancy start groups are extracted
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_ascendancy_start_groups_extracted() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+
+    let tree = TreeData::extract(bridge.lua()).expect("failed to extract tree data");
+
+    let ascendancy_groups: Vec<_> = tree
+        .groups
+        .iter()
+        .filter(|g| g.is_ascendancy)
+        .collect();
+    let start_groups: Vec<_> = tree
+        .groups
+        .iter()
+        .filter(|g| g.is_ascendancy_start)
+        .collect();
+
+    println!("Class ID: {}", tree.class_id);
+    println!("Ascendancy groups: {}", ascendancy_groups.len());
+    println!("Ascendancy start groups: {}", start_groups.len());
+    for g in &start_groups {
+        println!(
+            "  Start group: {:?} at ({}, {})",
+            g.ascendancy_name, g.x, g.y
+        );
+    }
+
+    assert!(
+        !ascendancy_groups.is_empty(),
+        "should have ascendancy groups"
+    );
+    assert!(
+        !start_groups.is_empty(),
+        "should have ascendancy start groups"
+    );
+    assert!(
+        start_groups.iter().all(|g| g.ascendancy_name.is_some()),
+        "all start groups should have ascendancy names"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sprite atlas loads ascendancy and class backgrounds
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sprite_atlas_loads_backgrounds() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+
+    let repo_root = common::find_repo_root();
+    let version: String = bridge
+        .lua()
+        .load("return mainObject_ref.main.modes['BUILD'].spec.treeVersion")
+        .eval()
+        .expect("failed to get tree version");
+
+    let tree_data_dir = repo_root
+        .join("upstream")
+        .join("src")
+        .join("TreeData")
+        .join(&version);
+    assert!(tree_data_dir.is_dir(), "tree data dir should exist: {}", tree_data_dir.display());
+
+    let atlas = TreeSpriteAtlas::load(bridge.lua(), &tree_data_dir)
+        .expect("failed to load sprite atlas");
+
+    println!("Ascendancy backgrounds: {:?}", atlas.ascendancy_backgrounds.keys().collect::<Vec<_>>());
+    println!("Class backgrounds: {:?}", atlas.class_backgrounds.keys().collect::<Vec<_>>());
+
+    assert!(
+        !atlas.ascendancy_backgrounds.is_empty(),
+        "should have ascendancy backgrounds"
+    );
+    assert!(
+        atlas.ascendancy_backgrounds.contains_key("Berserker"),
+        "should have Berserker background"
+    );
+    assert!(
+        !atlas.class_backgrounds.is_empty(),
+        "should have class backgrounds"
+    );
+    assert!(
+        atlas.class_backgrounds.contains_key("Str"),
+        "should have Str (Marauder) class background"
+    );
 }
