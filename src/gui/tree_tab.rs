@@ -6,13 +6,15 @@ use pob_egui::data::tree::TreeData;
 use pob_egui::data::tree_sprites::TreeSpriteAtlas;
 use pob_egui::lua_bridge::LuaBridge;
 
-use super::tree_renderer::{self, TreeCamera};
+use super::tree_renderer::{self, TooltipHeaders, TreeCamera};
 
 /// State for the passive tree tab.
 pub struct TreePanel {
     pub tree_data: Option<TreeData>,
     pub camera: Option<TreeCamera>,
     pub atlas: Option<TreeSpriteAtlas>,
+    pub tooltip_headers: Option<TooltipHeaders>,
+    pub tree_data_dir: Option<PathBuf>,
     pub textures_uploaded: bool,
     pub error: Option<String>,
 }
@@ -34,6 +36,8 @@ impl TreePanel {
                     tree_data: None,
                     camera: None,
                     atlas: None,
+                    tooltip_headers: None,
+                    tree_data_dir: None,
                     textures_uploaded: false,
                     error: Some(format!("Failed to load tree: {e}")),
                 };
@@ -43,19 +47,20 @@ impl TreePanel {
         let camera = tree_data.as_ref().map(TreeCamera::new);
 
         // Try to load sprite atlas — get tree version from spec
-        let atlas = get_tree_version(lua)
-            .and_then(|version| find_tree_data_dir(&version))
-            .and_then(|dir| {
-                log::info!("Loading tree sprites from: {}", dir.display());
-                TreeSpriteAtlas::load(lua, &dir)
-                    .map_err(|e| log::warn!("Failed to load tree sprites: {e}"))
-                    .ok()
-            });
+        let tree_data_dir = get_tree_version(lua).and_then(|version| find_tree_data_dir(&version));
+        let atlas = tree_data_dir.as_ref().and_then(|dir| {
+            log::info!("Loading tree sprites from: {}", dir.display());
+            TreeSpriteAtlas::load(lua, dir)
+                .map_err(|e| log::warn!("Failed to load tree sprites: {e}"))
+                .ok()
+        });
 
         Self {
             tree_data,
             camera,
             atlas,
+            tooltip_headers: None,
+            tree_data_dir,
             textures_uploaded: false,
             error: None,
         }
@@ -75,6 +80,17 @@ impl TreePanel {
             if let Some(ref mut atlas) = self.atlas {
                 atlas.upload_textures(ui.ctx());
             }
+            // Load tooltip header images and oil icons
+            if self.tooltip_headers.is_none() {
+                if let Some(dir) = find_assets_dir() {
+                    log::info!("Loading tooltip headers from: {}", dir.display());
+                    self.tooltip_headers = Some(TooltipHeaders::load(
+                        ui.ctx(),
+                        &dir,
+                        self.tree_data_dir.as_deref(),
+                    ));
+                }
+            }
             self.textures_uploaded = true;
         }
 
@@ -84,8 +100,9 @@ impl TreePanel {
         };
 
         let atlas_ref = self.atlas.as_ref();
+        let headers_ref = self.tooltip_headers.as_ref();
 
-        if let Some(clicked_id) = tree_renderer::draw_tree(ui, tree_data, camera, atlas_ref) {
+        if let Some(clicked_id) = tree_renderer::draw_tree(ui, tree_data, camera, atlas_ref, headers_ref) {
             if let Err(e) = toggle_node(bridge.lua(), clicked_id) {
                 log::error!("Failed to toggle node {clicked_id}: {e}");
             } else if let Err(e) = tree_data.refresh_allocation(bridge.lua()) {
@@ -128,6 +145,23 @@ fn find_tree_data_dir(version: &str) -> Option<PathBuf> {
     None
 }
 
+/// Find the upstream Assets directory (contains tooltip header images).
+fn find_assets_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut candidate = exe.parent()?.to_path_buf();
+    for _ in 0..5 {
+        let assets = candidate.join("upstream").join("src").join("Assets");
+        if assets.is_dir() {
+            return Some(assets);
+        }
+        if !candidate.pop() {
+            break;
+        }
+    }
+    log::warn!("Assets directory not found for tooltip headers");
+    None
+}
+
 /// Toggle a node allocation in Lua and trigger recalc.
 fn toggle_node(lua: &mlua::Lua, node_id: u32) -> Result<(), mlua::Error> {
     lua.load(format!(
@@ -137,9 +171,9 @@ fn toggle_node(lua: &mlua::Lua, node_id: u32) -> Result<(), mlua::Error> {
         local node = spec.nodes[{node_id}]
         if node then
             if spec.allocNodes[{node_id}] then
-                spec:DeallocNode({node_id})
+                spec:DeallocNode(node)
             else
-                spec:AllocNode({node_id})
+                spec:AllocNode(node)
             end
             spec:AddUndoState()
             build.buildFlag = true

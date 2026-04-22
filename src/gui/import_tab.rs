@@ -288,7 +288,7 @@ fn looks_like_url(input: &str) -> bool {
 }
 
 /// Save the current build to disk.
-fn save_build(bridge: &LuaBridge) -> anyhow::Result<()> {
+pub fn save_build(bridge: &LuaBridge) -> anyhow::Result<()> {
     bridge
         .lua()
         .load(

@@ -2,6 +2,9 @@
 //! When a sprite atlas is loaded, nodes are rendered with actual game textures.
 //! Falls back to colored circles when sprites are unavailable.
 
+use std::collections::HashMap;
+use std::path::Path;
+
 use pob_egui::data::tree::{ArcInfo, GroupBackground, NodeType, TreeData, TreeNode};
 use pob_egui::data::tree_sprites::{SpriteRegion, TreeSpriteAtlas};
 
@@ -20,6 +23,125 @@ impl Palette {
     const CONNECTION_ALLOCATED: egui::Color32 = egui::Color32::from_rgb(200, 170, 50);
     const ASCENDANCY: egui::Color32 = egui::Color32::from_rgb(140, 100, 160);
     const HOVER_OUTLINE: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
+}
+
+/// Border color for passive tooltips (upstream default: rgb(128, 77, 0)).
+const TOOLTIP_BORDER_COLOR: egui::Color32 = egui::Color32::from_rgb(128, 77, 0);
+const TOOLTIP_BORDER_WIDTH: f32 = 3.0;
+const TOOLTIP_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 217);
+
+/// A 3-part header image (left cap, tiled middle, right cap) for tooltip decoration.
+struct HeaderStrip {
+    left: egui::TextureHandle,
+    middle: egui::TextureHandle,
+    right: egui::TextureHandle,
+    height: f32,
+    side_width: f32,
+    middle_width: f32,
+}
+
+/// Loaded tooltip header textures for each passive node type.
+pub struct TooltipHeaders {
+    passive: Option<HeaderStrip>,
+    notable: Option<HeaderStrip>,
+    keystone: Option<HeaderStrip>,
+    jewel: Option<HeaderStrip>,
+    ascendancy: Option<HeaderStrip>,
+    mastery: Option<HeaderStrip>,
+    mastery_alloc: Option<HeaderStrip>,
+    /// Oil icon textures keyed by full name (e.g. "GoldenOil").
+    oil_icons: HashMap<String, egui::TextureHandle>,
+}
+
+impl TooltipHeaders {
+    /// Load tooltip header images from the upstream Assets directory
+    /// and oil icons from the TreeData directory.
+    pub fn load(ctx: &egui::Context, assets_dir: &Path, tree_data_dir: Option<&Path>) -> Self {
+        let load_png = |path: &Path, name: &str| -> Option<egui::TextureHandle> {
+            let img = image::open(path)
+                .map_err(|e| log::warn!("Failed to load {}: {e}", path.display()))
+                .ok()?;
+            let rgba = img.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+            Some(ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR))
+        };
+
+        let load_header = |prefix: &str, label: &str| -> Option<HeaderStrip> {
+            let left = load_png(
+                &assets_dir.join(format!("{prefix}left.png")),
+                &format!("tooltip_{label}_left"),
+            )?;
+            let middle = load_png(
+                &assets_dir.join(format!("{prefix}middle.png")),
+                &format!("tooltip_{label}_middle"),
+            )?;
+            let right = load_png(
+                &assets_dir.join(format!("{prefix}right.png")),
+                &format!("tooltip_{label}_right"),
+            )?;
+
+            Some(HeaderStrip {
+                height: left.size()[1] as f32,
+                side_width: left.size()[0] as f32,
+                middle_width: middle.size()[0] as f32,
+                left,
+                middle,
+                right,
+            })
+        };
+
+        // Load oil icons from TreeData/
+        let oil_names = [
+            "AmberOil", "AzureOil", "BlackOil", "ClearOil", "CrimsonOil",
+            "GoldenOil", "IndigoOil", "OpalescentOil", "PrismaticOil",
+            "SepiaOil", "SilverOil", "TealOil", "VerdantOil", "VioletOil",
+        ];
+        let mut oil_icons = HashMap::new();
+        if let Some(td) = tree_data_dir {
+            // Oil icons live in the TreeData root, not the versioned subdirectory
+            let oil_dir = td.parent().unwrap_or(td);
+            for name in &oil_names {
+                if let Some(tex) = load_png(&oil_dir.join(format!("{name}.png")), &format!("oil_{name}")) {
+                    oil_icons.insert((*name).to_string(), tex);
+                }
+            }
+        }
+
+        Self {
+            passive: load_header("normalpassiveheader", "passive"),
+            notable: load_header("notablepassiveheader", "notable"),
+            keystone: load_header("keystonepassiveheader", "keystone"),
+            jewel: load_header("jewelpassiveheader", "jewel"),
+            ascendancy: load_header("ascendancypassiveheader", "ascendancy"),
+            mastery: load_header("masteryheaderunallocated", "mastery"),
+            mastery_alloc: load_header("masteryheaderallocated", "mastery_alloc"),
+            oil_icons,
+        }
+    }
+
+    fn get(&self, node: &TreeNode) -> Option<&HeaderStrip> {
+        match node.node_type {
+            NodeType::Normal => {
+                if node.ascendancy_name.is_some() {
+                    self.ascendancy.as_ref()
+                } else {
+                    self.passive.as_ref()
+                }
+            }
+            NodeType::Notable => self.notable.as_ref(),
+            NodeType::Keystone => self.keystone.as_ref(),
+            NodeType::Socket => self.jewel.as_ref(),
+            NodeType::Mastery => {
+                if node.is_allocated {
+                    self.mastery_alloc.as_ref()
+                } else {
+                    self.mastery.as_ref()
+                }
+            }
+            NodeType::ClassStart | NodeType::AscendClassStart => self.passive.as_ref(),
+        }
+    }
 }
 
 /// Camera state for pan/zoom.
@@ -66,6 +188,7 @@ pub fn draw_tree(
     tree: &TreeData,
     camera: &mut TreeCamera,
     atlas: Option<&TreeSpriteAtlas>,
+    tooltip_headers: Option<&TooltipHeaders>,
 ) -> Option<u32> {
     ui.ctx().style_mut(|s| {
         s.interaction.tooltip_delay = 0.05;
@@ -206,11 +329,20 @@ pub fn draw_tree(
 
     }
 
-    // Tooltip
+    // Tooltip — temporarily override popup frame to be transparent
     if let Some(node) = hovered_node {
-        response.clone().on_hover_ui_at_pointer(|ui| {
-            show_node_tooltip(ui, node);
+        let saved = ui.ctx().style().visuals.clone();
+        ui.ctx().style_mut(|s| {
+            s.visuals.window_fill = egui::Color32::TRANSPARENT;
+            s.visuals.window_stroke = egui::Stroke::NONE;
+            s.visuals.window_shadow = egui::epaint::Shadow::NONE;
+            s.visuals.popup_shadow = egui::epaint::Shadow::NONE;
+            s.visuals.window_corner_radius = egui::CornerRadius::ZERO;
         });
+        response.clone().on_hover_ui_at_pointer(|ui| {
+            show_node_tooltip(ui, node, tooltip_headers);
+        });
+        ui.ctx().style_mut(|s| s.visuals = saved);
     }
 
     // Handle click
@@ -435,94 +567,168 @@ fn node_type_color(node_type: NodeType) -> egui::Color32 {
 }
 
 /// Rich tooltip for a passive tree node, styled to match upstream PoB.
-fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode) {
-    ui.set_max_width(400.0);
+fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&TooltipHeaders>) {
+    let frame = egui::Frame::NONE
+        .fill(TOOLTIP_BG)
+        .stroke(egui::Stroke::new(TOOLTIP_BORDER_WIDTH, TOOLTIP_BORDER_COLOR))
+        .inner_margin(egui::Margin::same(8));
 
-    // Header: node type label + name
-    let type_label = match node.node_type {
-        NodeType::Notable => "Notable",
-        NodeType::Keystone => "Keystone",
-        NodeType::Mastery => "Mastery",
-        NodeType::Socket => "Jewel Socket",
-        NodeType::ClassStart | NodeType::AscendClassStart => "Class Start",
-        NodeType::Normal => {
-            if node.ascendancy_name.is_some() {
-                "Ascendancy"
-            } else {
-                "Passive"
+    frame.show(ui, |ui| {
+        ui.set_max_width(400.0);
+
+        // Draw the header image strip behind the title text
+        let header_strip = headers.and_then(|h| h.get(node));
+        if let Some(strip) = header_strip {
+            // Scale the header down so it doesn't dominate the tooltip
+            let scale = 0.7;
+            let h = strip.height * scale;
+            let side_w = strip.side_width * scale;
+            let mid_w = strip.middle_width * scale;
+
+            let available_w = ui.available_width();
+            let (header_rect, _) =
+                ui.allocate_exact_size(egui::vec2(available_w, h), egui::Sense::hover());
+
+            let painter = ui.painter();
+            let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+
+            // Left cap
+            let left_rect = egui::Rect::from_min_size(
+                header_rect.min,
+                egui::vec2(side_w, h),
+            );
+            painter.image(strip.left.id(), left_rect, full_uv, egui::Color32::WHITE);
+
+            // Tiled middle
+            let middle_start = header_rect.min.x + side_w;
+            let middle_end = header_rect.max.x - side_w;
+            let mut x = middle_start;
+            while x < middle_end {
+                let w = (middle_end - x).min(mid_w);
+                let u_max = w / mid_w;
+                let tile_rect =
+                    egui::Rect::from_min_size(egui::pos2(x, header_rect.min.y), egui::vec2(w, h));
+                painter.image(
+                    strip.middle.id(),
+                    tile_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(u_max, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                x += mid_w;
+            }
+
+            // Right cap
+            let right_rect = egui::Rect::from_min_size(
+                egui::pos2(header_rect.max.x - side_w, header_rect.min.y),
+                egui::vec2(side_w, h),
+            );
+            painter.image(strip.right.id(), right_rect, full_uv, egui::Color32::WHITE);
+
+            // Draw the node name centered over the header (upstream uses size 24)
+            // Paint twice with 1px offset to simulate bold
+            let name_galley = ui.painter().layout_no_wrap(
+                node.name.clone(),
+                egui::FontId::proportional(22.0),
+                egui::Color32::WHITE,
+            );
+            let text_pos = egui::pos2(
+                header_rect.center().x - name_galley.size().x / 2.0,
+                header_rect.center().y - name_galley.size().y / 2.0,
+            );
+            painter.galley(text_pos, name_galley.clone(), egui::Color32::WHITE);
+            painter.galley(text_pos + egui::vec2(1.0, 0.0), name_galley, egui::Color32::WHITE);
+        } else {
+            // Fallback: plain text header
+            let type_label = match node.node_type {
+                NodeType::Notable => "Notable",
+                NodeType::Keystone => "Keystone",
+                NodeType::Mastery => "Mastery",
+                NodeType::Socket => "Jewel Socket",
+                NodeType::ClassStart | NodeType::AscendClassStart => "Class Start",
+                NodeType::Normal => {
+                    if node.ascendancy_name.is_some() {
+                        "Ascendancy"
+                    } else {
+                        "Passive"
+                    }
+                }
+            };
+            let type_color = match node.node_type {
+                NodeType::Notable => egui::Color32::from_rgb(210, 180, 100),
+                NodeType::Keystone => egui::Color32::from_rgb(220, 160, 60),
+                NodeType::Mastery => egui::Color32::from_rgb(180, 140, 200),
+                NodeType::Socket => egui::Color32::from_rgb(120, 200, 120),
+                _ => egui::Color32::from_rgb(170, 170, 170),
+            };
+            ui.label(egui::RichText::new(type_label).small().color(type_color));
+            ui.label(egui::RichText::new(&node.name).strong().size(22.0));
+        }
+
+        // Oil recipe (for notables) — show oil name + icon for each
+        if !node.recipe.is_empty() {
+            let oil_color = egui::Color32::from_rgb(248, 230, 202);
+            let icon_size = 20.0;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (i, oil_name) in node.recipe.iter().enumerate() {
+                    if i > 0 {
+                        ui.label(egui::RichText::new("+").size(14.0).color(oil_color));
+                    }
+                    let short = oil_name.strip_suffix("Oil").unwrap_or(oil_name);
+                    ui.label(egui::RichText::new(short).size(14.0).color(oil_color));
+                    if let Some(tex) = headers.and_then(|h| h.oil_icons.get(oil_name.as_str())) {
+                        ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(icon_size, icon_size)));
+                    }
+                }
+            });
+        }
+
+        // Stats
+        if !node.stats.is_empty() {
+            ui.separator();
+            for stat in &node.stats {
+                ui.label(
+                    egui::RichText::new(stat).size(16.0).color(egui::Color32::from_rgb(136, 136, 255)),
+                );
             }
         }
-    };
-    let type_color = match node.node_type {
-        NodeType::Notable => egui::Color32::from_rgb(210, 180, 100),
-        NodeType::Keystone => egui::Color32::from_rgb(220, 160, 60),
-        NodeType::Mastery => egui::Color32::from_rgb(180, 140, 200),
-        NodeType::Socket => egui::Color32::from_rgb(120, 200, 120),
-        _ => egui::Color32::from_rgb(170, 170, 170),
-    };
-    ui.label(egui::RichText::new(type_label).small().color(type_color));
-    ui.label(egui::RichText::new(&node.name).strong().size(16.0));
 
-    // Oil recipe (for notables)
-    if !node.recipe.is_empty() {
-        ui.horizontal(|ui| {
-            let oils: Vec<&str> = node
-                .recipe
-                .iter()
-                .map(|r| r.strip_suffix("Oil").unwrap_or(r))
-                .collect();
+        // Reminder text
+        if !node.reminder_text.is_empty() {
+            ui.separator();
+            for line in &node.reminder_text {
+                ui.label(
+                    egui::RichText::new(line)
+                        .size(14.0)
+                        .italics()
+                        .color(egui::Color32::from_rgb(160, 160, 128)),
+                );
+            }
+        }
+
+        // Flavour text
+        if !node.flavour_text.is_empty() {
+            ui.separator();
+            for line in &node.flavour_text {
+                ui.label(
+                    egui::RichText::new(line)
+                        .size(16.0)
+                        .italics()
+                        .color(egui::Color32::from_rgb(175, 96, 37)),
+                );
+            }
+        }
+
+        // Allocation status
+        if node.is_allocated {
+            ui.separator();
             ui.label(
-                egui::RichText::new(format!("Anoint: {}", oils.join(" + ")))
+                egui::RichText::new("Allocated")
                     .small()
-                    .color(egui::Color32::from_rgb(200, 180, 100)),
-            );
-        });
-    }
-
-    // Stats
-    if !node.stats.is_empty() {
-        ui.separator();
-        for stat in &node.stats {
-            ui.label(
-                egui::RichText::new(stat).color(egui::Color32::from_rgb(136, 136, 255)),
+                    .color(Palette::ALLOCATED),
             );
         }
-    }
-
-    // Reminder text
-    if !node.reminder_text.is_empty() {
-        ui.separator();
-        for line in &node.reminder_text {
-            ui.label(
-                egui::RichText::new(line)
-                    .small()
-                    .italics()
-                    .color(egui::Color32::from_rgb(160, 160, 128)),
-            );
-        }
-    }
-
-    // Flavour text
-    if !node.flavour_text.is_empty() {
-        ui.separator();
-        for line in &node.flavour_text {
-            ui.label(
-                egui::RichText::new(line)
-                    .italics()
-                    .color(egui::Color32::from_rgb(175, 96, 37)),
-            );
-        }
-    }
-
-    // Allocation status
-    if node.is_allocated {
-        ui.separator();
-        ui.label(
-            egui::RichText::new("Allocated")
-                .small()
-                .color(Palette::ALLOCATED),
-        );
-    }
+    });
 }
 
 /// Draw the class start background art for the current class.
@@ -576,7 +782,11 @@ fn draw_group_backgrounds(
         // Draw ascendancy class background art
         if group.is_ascendancy_start {
             if let Some(name) = &group.ascendancy_name {
-                if let Some(bg) = atlas.ascendancy_backgrounds.get(name.as_str()) {
+                // Fall back to Ascendant art for regular ascendancies without their own image;
+                // bloodlines have no background art.
+                let bg = atlas.ascendancy_backgrounds.get(name.as_str())
+                    .or_else(|| if group.is_bloodline { None } else { atlas.ascendancy_backgrounds.get("Ascendant") });
+                if let Some(bg) = bg {
                     let screen_pos = camera.tree_to_screen(group.x, group.y, viewport);
                     let w = bg.width * 1.33 * camera.zoom;
                     let h = bg.height * 1.33 * camera.zoom;
@@ -586,7 +796,14 @@ fn draw_group_backgrounds(
                         if let Some(tex) = atlas.texture_id(bg.sheet_index) {
                             let uv =
                                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                            painter.image(tex, img_rect, uv, egui::Color32::WHITE);
+                            // Dim non-selected ascendancies (upstream uses alpha 0.25)
+                            let is_selected = tree.ascendancy_name.as_deref() == Some(name.as_str());
+                            let tint = if is_selected {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 64)
+                            };
+                            painter.image(tex, img_rect, uv, tint);
                         }
                     }
                 }

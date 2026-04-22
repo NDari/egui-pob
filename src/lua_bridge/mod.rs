@@ -108,6 +108,25 @@ impl LuaBridge {
         Ok(())
     }
 
+    /// Create a new empty build (default Scion, level 1, nothing allocated).
+    pub fn create_new_build(&self) -> Result<()> {
+        let main_obj: LuaTable = self
+            .lua
+            .load("return mainObject_ref.main")
+            .eval()
+            .map_err(lua_err("Failed to get mainObject.main"))?;
+
+        main_obj
+            .call_method::<()>("SetMode", ("BUILD", false, "New Build"))
+            .map_err(lua_err("SetMode('BUILD') for new build failed"))?;
+
+        Self::run_callback_static(&self.lua, "OnFrame")?;
+        Self::run_callback_static(&self.lua, "OnFrame")?;
+
+        log::info!("New build created");
+        Ok(())
+    }
+
     /// Get the build directory path (where user saves builds).
     pub fn build_path(&self) -> Result<String> {
         self.lua

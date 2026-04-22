@@ -58,6 +58,10 @@ impl BuildListPanel {
         ui.separator();
 
         ui.horizontal(|ui| {
+            if ui.button("+ New Build").clicked() {
+                action = Some(BuildListAction::NewBuild);
+            }
+            ui.separator();
             if !self.sub_path.is_empty() {
                 if ui.button("⬆ Up").clicked() {
                     self.go_up();
@@ -110,6 +114,7 @@ impl BuildListPanel {
 pub enum BuildListAction {
     EnterFolder(String),
     OpenBuild(BuildInfo),
+    NewBuild,
 }
 
 fn show_folder_row(ui: &mut egui::Ui, folder: &FolderInfo) -> bool {

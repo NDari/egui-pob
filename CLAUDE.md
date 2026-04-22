@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Rust + egui frontend for Path of Building (PoB) with an embedded LuaJIT backend. Upstream PoB is a read-only git submodule. The Rust app loads upstream Lua code headless (rendering stubbed), then renders everything with egui. See `PLAN.md` for the full implementation roadmap.
+Rust + egui frontend for Path of Building (PoB) with an embedded LuaJIT backend. Upstream PoB is a read-only git submodule. The Rust app loads upstream Lua code headless (rendering stubbed), then renders everything with egui.
 
 ## Architecture
 
@@ -93,8 +93,15 @@ upstream/                # Git submodule — READ-ONLY
 └── runtime/
 ```
 
-## Implementation Phases
+## Plans
 
-Current: **All phases complete** (A through F). URL import, build code export/import, save to disk, all GUI panels functional.
+`plans/` contains all planning documents for the project:
 
-See `PLAN.md` for deferred items (tree sprites, keyboard shortcuts, item comparison tooltips).
+- **`initial-plan.md`** — Original implementation plan covering architecture, data interface design, phased build-out (A through F, all complete), and distribution strategy.
+- **`parity-plan.md`** — Comprehensive feature parity tracker (~200+ items) comparing current state against upstream PoB. Organized by area: build management, tree, skills, items, calcs, config, import/export, UI polish, and infrastructure.
+
+## Documentation
+
+`docs/` contains reference documentation for longer-term research and future work:
+
+- **`asset-extraction.md`** — How PoE game assets (ascendancy art, tree sprites, icons) are stored in compressed bundles, how the upstream PoB project extracts them using the ooz/GGPK toolchain, and a roadmap for building our own standalone extraction pipeline in Rust.

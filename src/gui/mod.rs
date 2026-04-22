@@ -74,6 +74,18 @@ impl PobApp {
         }
     }
 
+    fn create_new_build(&mut self) {
+        if let Err(e) = self.bridge.create_new_build() {
+            log::error!("Failed to create new build: {e}");
+            self.status = AppStatus::Error(format!("Failed to create new build: {e}"));
+            return;
+        }
+
+        let mut view = BuildView::new("New Build".to_string(), &self.bridge);
+        view.is_unsaved_new = true;
+        self.screen = Some(AppScreen::BuildView(Box::new(view)));
+    }
+
     fn open_build(&mut self, build_info: &pob_egui::data::build_list::BuildInfo) {
         let xml_text = match std::fs::read_to_string(&build_info.full_path) {
             Ok(text) => text,
@@ -134,6 +146,11 @@ impl eframe::App for PobApp {
                                 }
                                 BuildListAction::EnterFolder(_) => {
                                     // Already handled inside panel.show()
+                                }
+                                BuildListAction::NewBuild => {
+                                    drop(screen);
+                                    self.create_new_build();
+                                    return;
                                 }
                             }
                         }

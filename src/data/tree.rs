@@ -14,6 +14,8 @@ pub struct TreeData {
     pub bounds: TreeBounds,
     /// Current class ID (0=Scion, 1=Marauder, 2=Ranger, 3=Witch, 4=Duelist, 5=Templar, 6=Shadow).
     pub class_id: u32,
+    /// Current ascendancy name (e.g. "Berserker"), or None if no ascendancy selected.
+    pub ascendancy_name: Option<String>,
 }
 
 /// A single passive tree node.
@@ -58,6 +60,8 @@ pub struct TreeGroup {
     pub is_ascendancy_start: bool,
     /// The ascendancy name (e.g. "Berserker") — used to look up class background sprite.
     pub ascendancy_name: Option<String>,
+    /// True if this group belongs to a bloodline (alternate ascendancy), not a regular ascendancy.
+    pub is_bloodline: bool,
     /// Background type from tree data — None means no background art for this group.
     pub background: Option<GroupBackground>,
 }
@@ -147,6 +151,7 @@ impl TreeData {
         let nodes_table: LuaTable = spec.get("nodes")?;
         let alloc_nodes: LuaTable = spec.get("allocNodes")?;
         let class_id: u32 = spec.get("curClassId").unwrap_or(0);
+        let ascendancy_name: Option<String> = spec.get("curAscendClassBaseName").ok();
 
         // Collect allocated node IDs
         let mut allocated = HashSet::new();
@@ -162,6 +167,11 @@ impl TreeData {
             .load(
                 r#"
                 local tree = mainObject_ref.main.modes['BUILD'].spec.tree
+                local altAsc = tree.alternate_ascendancies or {}
+                local bloodlineNames = {}
+                for _, asc in pairs(altAsc) do
+                    bloodlineNames[asc.id] = true
+                end
                 local result = {}
                 for _, group in pairs(tree.groups) do
                     if not group.isProxy then
@@ -175,6 +185,7 @@ impl TreeData {
                             isAscendancy = group.ascendancyName ~= nil,
                             isAscendancyStart = group.isAscendancyStart or false,
                             ascendancyName = group.ascendancyName,
+                            isBloodline = group.ascendancyName and bloodlineNames[group.ascendancyName] or false,
                             bgImage = bgImage,
                         })
                     end
@@ -203,6 +214,7 @@ impl TreeData {
                         is_ascendancy: t.get("isAscendancy").unwrap_or(false),
                         is_ascendancy_start: t.get("isAscendancyStart").unwrap_or(false),
                         ascendancy_name: t.get("ascendancyName").ok(),
+                        is_bloodline: t.get("isBloodline").unwrap_or(false),
                         background,
                     });
                 }
@@ -387,6 +399,7 @@ impl TreeData {
             allocated,
             bounds,
             class_id,
+            ascendancy_name,
         })
     }
 

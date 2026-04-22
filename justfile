@@ -6,6 +6,10 @@ default:
 run:
     RUST_LOG=info cargo run --release
 
+# Watch for changes and re-run (release)
+watch:
+    RUST_LOG=info cargo watch -x 'run --release'
+
 # Debug build + run
 debug:
     RUST_LOG=debug cargo run
