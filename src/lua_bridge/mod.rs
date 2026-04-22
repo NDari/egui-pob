@@ -65,6 +65,14 @@ impl LuaBridge {
         Self::run_callback_static(&lua, "OnInit")?;
         Self::run_callback_static(&lua, "OnFrame")?;
 
+        // Disable upstream's dev-mode auto-save on Shutdown. When running from
+        // source, upstream detects devMode=true and writes `~~temp~~.xml` on
+        // every BUILD mode transition — we manage saves explicitly via Save /
+        // Save As, so this would resurrect discarded new builds.
+        lua.load("mainObject_ref.main.disableDevAutoSave = true")
+            .exec()
+            .map_err(lua_err("Failed to set disableDevAutoSave"))?;
+
         log::info!("Lua bridge initialized successfully");
 
         Ok(Self { lua })

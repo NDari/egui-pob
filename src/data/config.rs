@@ -11,22 +11,30 @@ pub enum ConfigOption {
         var: String,
         label: String,
         value: bool,
+        tooltip: Option<String>,
+        visible: bool,
     },
     Count {
         var: String,
         label: String,
         value: String,
+        tooltip: Option<String>,
+        visible: bool,
     },
     List {
         var: String,
         label: String,
         options: Vec<ListEntry>,
         selected_index: usize,
+        tooltip: Option<String>,
+        visible: bool,
     },
     Text {
         var: String,
         label: String,
         value: String,
+        tooltip: Option<String>,
+        visible: bool,
     },
 }
 
@@ -66,9 +74,32 @@ impl ConfigOption {
             | ConfigOption::Text { label, .. } => label,
         }
     }
+
+    pub fn is_visible(&self) -> bool {
+        match self {
+            ConfigOption::Section { .. } => true,
+            ConfigOption::Check { visible, .. }
+            | ConfigOption::Count { visible, .. }
+            | ConfigOption::List { visible, .. }
+            | ConfigOption::Text { visible, .. } => *visible,
+        }
+    }
+
+    pub fn tooltip(&self) -> Option<&str> {
+        match self {
+            ConfigOption::Section { .. } => None,
+            ConfigOption::Check { tooltip, .. }
+            | ConfigOption::Count { tooltip, .. }
+            | ConfigOption::List { tooltip, .. }
+            | ConfigOption::Text { tooltip, .. } => tooltip.as_deref(),
+        }
+    }
 }
 
 /// Extract config option definitions and current values from the Lua VM.
+///
+/// Returns tooltip text and per-option visibility computed from the current build state
+/// (nodes allocated, conditions used, etc.).
 pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Error> {
     let build: LuaTable = lua
         .load("return mainObject_ref.main.modes['BUILD']")
@@ -76,10 +107,121 @@ pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Erro
     let config_tab: LuaTable = build.get("configTab")?;
     let input: LuaTable = config_tab.get("input")?;
 
-    // ConfigOptions.lua is loaded as a local in ConfigTab.lua.
-    // We load it directly to get the option definitions.
     let option_list: LuaTable = lua
         .load("return LoadModule('Modules/ConfigOptions')")
+        .eval()?;
+
+    // Helper: evaluate visibility and tooltip for one entry in Lua.
+    let visibility_fn: LuaFunction = lua
+        .load(
+            r#"
+            local build = mainObject_ref.main.modes['BUILD']
+            local env = build.calcsTab and build.calcsTab.mainEnv
+            local spec = build.spec
+            local input = build.configTab.input
+
+            local function anyMatch(v, check)
+                if type(v) == "table" then
+                    for _, entry in ipairs(v) do
+                        if check(entry) then return true end
+                    end
+                    return false
+                end
+                return check(v) and true or false
+            end
+
+            return function(varData)
+                local shown = true
+                local function fail(check)
+                    return not anyMatch(check, function() return true end) or false
+                end
+
+                if varData.ifNode then
+                    shown = shown and anyMatch(varData.ifNode, function(nodeId)
+                        if spec.allocNodes[nodeId] then return true end
+                        local node = spec.nodes[nodeId]
+                        if node and node.type == "Keystone" and env
+                           and env.keystonesAdded and env.keystonesAdded[node.dn] then
+                            return true
+                        end
+                        return false
+                    end)
+                end
+                if shown and varData.ifOption then
+                    shown = shown and anyMatch(varData.ifOption, function(opt)
+                        return input[opt] and true or false
+                    end)
+                end
+                if shown and varData.ifCond then
+                    shown = shown and anyMatch(varData.ifCond, function(cond)
+                        return env and env.conditionsUsed and env.conditionsUsed[cond] and true or false
+                    end)
+                end
+                if shown and varData.ifMinionCond then
+                    shown = shown and anyMatch(varData.ifMinionCond, function(cond)
+                        return env and env.minionConditionsUsed and env.minionConditionsUsed[cond] and true or false
+                    end)
+                end
+                if shown and varData.ifEnemyCond then
+                    shown = shown and anyMatch(varData.ifEnemyCond, function(cond)
+                        return env and env.enemyConditionsUsed and env.enemyConditionsUsed[cond] and true or false
+                    end)
+                end
+                if shown and varData.ifCondTrue then
+                    shown = shown and anyMatch(varData.ifCondTrue, function(cond)
+                        return env and env.player and env.player.modDB
+                               and env.player.modDB.conditions[cond] and true or false
+                    end)
+                end
+                if shown and varData.ifMult then
+                    shown = shown and anyMatch(varData.ifMult, function(m)
+                        return env and env.multipliersUsed and env.multipliersUsed[m] and true or false
+                    end)
+                end
+                if shown and varData.ifEnemyMult then
+                    shown = shown and anyMatch(varData.ifEnemyMult, function(m)
+                        return env and env.enemyMultipliersUsed and env.enemyMultipliersUsed[m] and true or false
+                    end)
+                end
+                if shown and varData.ifStat then
+                    shown = shown and anyMatch(varData.ifStat, function(s)
+                        return env and ((env.perStatsUsed and env.perStatsUsed[s])
+                               or (env.enemyMultipliersUsed and env.enemyMultipliersUsed[s])) and true or false
+                    end)
+                end
+                if shown and varData.ifSkill then
+                    shown = shown and anyMatch(varData.ifSkill, function(name)
+                        if not env or not env.player or not env.player.activeSkillList then return false end
+                        for _, sk in ipairs(env.player.activeSkillList) do
+                            if sk.activeEffect and sk.activeEffect.grantedEffect
+                               and sk.activeEffect.grantedEffect.name == name then
+                                return true
+                            end
+                        end
+                        return false
+                    end)
+                end
+                if shown and varData.ifSkillFlag then
+                    shown = shown and anyMatch(varData.ifSkillFlag, function(flag)
+                        if not env or not env.player or not env.player.mainSkill then return false end
+                        local sk = env.player.mainSkill
+                        return sk.skillFlags and sk.skillFlags[flag] or false
+                    end)
+                end
+                if shown and varData.ifSkillData then
+                    shown = shown and anyMatch(varData.ifSkillData, function(key)
+                        if not env or not env.player or not env.player.mainSkill then return false end
+                        local sk = env.player.mainSkill
+                        return sk.skillData and sk.skillData[key] and true or false
+                    end)
+                end
+
+                -- tooltip: only the static string form (ignore tooltipFunc)
+                local tooltip = type(varData.tooltip) == "string" and varData.tooltip or nil
+                return shown, tooltip
+            end
+            "#,
+        )
         .eval()?;
 
     let mut options = Vec::new();
@@ -87,13 +229,14 @@ pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Erro
     for pair in option_list.pairs::<i64, LuaTable>() {
         let (_, entry) = pair?;
 
-        // Check if this is a section header (has section, no var)
+        // Section header
         if let Ok(section) = entry.get::<String>("section") {
-            options.push(ConfigOption::Section { label: section });
+            options.push(ConfigOption::Section {
+                label: strip_color_codes(&section),
+            });
             continue;
         }
 
-        // Skip entries without a var (spacers)
         let var: String = match entry.get("var") {
             Ok(v) => v,
             Err(_) => continue,
@@ -101,14 +244,23 @@ pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Erro
 
         let label: String = entry.get("label").unwrap_or_default();
         let opt_type: String = entry.get("type").unwrap_or_default();
-
-        // Strip PoB color codes from label for display
         let label = strip_color_codes(&label);
+
+        let (visible, tooltip_raw) = visibility_fn
+            .call::<(bool, Option<String>)>(entry.clone())
+            .unwrap_or((true, None));
+        let tooltip = tooltip_raw.map(|s| strip_color_codes(&s));
 
         match opt_type.as_str() {
             "check" => {
                 let value: bool = input.get(var.as_str()).unwrap_or(false);
-                options.push(ConfigOption::Check { var, label, value });
+                options.push(ConfigOption::Check {
+                    var,
+                    label,
+                    value,
+                    tooltip,
+                    visible,
+                });
             }
             "count" | "countAllowZero" | "integer" | "float" => {
                 let value: String = match input.get::<LuaValue>(var.as_str()) {
@@ -119,7 +271,13 @@ pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Erro
                     }
                     _ => String::new(),
                 };
-                options.push(ConfigOption::Count { var, label, value });
+                options.push(ConfigOption::Count {
+                    var,
+                    label,
+                    value,
+                    tooltip,
+                    visible,
+                });
             }
             "list" => {
                 let list_entries = parse_list_options(&entry)?;
@@ -130,14 +288,21 @@ pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Erro
                     label,
                     options: list_entries,
                     selected_index,
+                    tooltip,
+                    visible,
                 });
             }
             "text" => {
                 let value: String = input.get(var.as_str()).unwrap_or_default();
-                options.push(ConfigOption::Text { var, label, value });
+                options.push(ConfigOption::Text {
+                    var,
+                    label,
+                    value,
+                    tooltip,
+                    visible,
+                });
             }
             _ => {
-                // Unknown type — skip
                 log::debug!("Skipping unknown config type '{opt_type}' for var '{var}'");
             }
         }
@@ -205,7 +370,7 @@ fn find_selected_index(entries: &[ListEntry], current_val: &Option<LuaValue>) ->
 }
 
 /// Strip PoB color escape codes (^0-^9 and ^xRRGGBB) from text.
-fn strip_color_codes(text: &str) -> String {
+pub fn strip_color_codes(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut i = 0;

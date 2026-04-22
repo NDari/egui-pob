@@ -5,6 +5,7 @@ mod build_view;
 mod config_tab;
 mod import_tab;
 mod items_tab;
+mod notes_tab;
 mod skills_tab;
 pub mod theme;
 mod tree_renderer;

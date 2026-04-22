@@ -6,6 +6,7 @@ use pob_egui::lua_bridge::LuaBridge;
 use super::config_tab::ConfigPanel;
 use super::import_tab::ImportPanel;
 use super::items_tab::ItemsPanel;
+use super::notes_tab::NotesPanel;
 use super::skills_tab::SkillsPanel;
 use super::tree_tab::TreePanel;
 
@@ -16,6 +17,7 @@ pub enum BuildTab {
     Skills,
     Items,
     Config,
+    Notes,
     Import,
 }
 
@@ -31,6 +33,12 @@ struct AscendEntry {
     name: String,
 }
 
+/// A secondary (alternate) ascendancy. id 0 is the synthetic "None" entry.
+struct SecondaryAscendEntry {
+    id: u32,
+    name: String,
+}
+
 /// State for an open build.
 pub struct BuildView {
     pub build_name: String,
@@ -39,6 +47,7 @@ pub struct BuildView {
     pub tree_panel: Option<TreePanel>,
     pub items_panel: Option<ItemsPanel>,
     pub skills_panel: Option<SkillsPanel>,
+    pub notes_panel: Option<NotesPanel>,
     pub import_panel: ImportPanel,
     pub active_tab: BuildTab,
     /// True if this build has never been saved to disk (new build).
@@ -51,6 +60,10 @@ pub struct BuildView {
     selected_class: usize,
     /// Currently selected ascendancy index (into the selected class's `ascendancies`).
     selected_ascend: usize,
+    /// Available secondary ascendancies for this tree version (empty if unsupported).
+    secondary_ascendancies: Vec<SecondaryAscendEntry>,
+    /// Currently selected secondary ascendancy index (into `secondary_ascendancies`).
+    selected_secondary: usize,
     // Character header state
     char_level: String,
     level_auto_mode: bool,
@@ -71,10 +84,13 @@ impl BuildView {
         let tree_panel = Some(TreePanel::new(bridge.lua()));
         let items_panel = Some(ItemsPanel::new(bridge.lua()));
         let skills_panel = Some(SkillsPanel::new(bridge.lua()));
+        let notes_panel = Some(NotesPanel::new(bridge.lua()));
         let import_panel = ImportPanel::new();
 
         let classes = load_class_list(bridge.lua());
         let (selected_class, selected_ascend) = find_current_selection(bridge.lua(), &classes);
+        let secondary_ascendancies = load_secondary_ascendancies(bridge.lua());
+        let selected_secondary = find_secondary_selection(bridge.lua(), &secondary_ascendancies);
         let header = load_char_header(bridge.lua());
 
         Self {
@@ -84,6 +100,7 @@ impl BuildView {
             tree_panel,
             items_panel,
             skills_panel,
+            notes_panel,
             import_panel,
             active_tab: BuildTab::Tree,
             is_unsaved_new: false,
@@ -91,6 +108,8 @@ impl BuildView {
             classes,
             selected_class,
             selected_ascend,
+            secondary_ascendancies,
+            selected_secondary,
             char_level: header.level.to_string(),
             level_auto_mode: header.level_auto,
         }
@@ -164,6 +183,7 @@ impl BuildView {
         // Top bar: back button, build name, class/ascendancy, level, points
         let mut class_changed = false;
         let mut ascend_changed = false;
+        let mut secondary_changed = false;
         let mut header_changed = false;
 
         ui.horizontal(|ui| {
@@ -251,6 +271,26 @@ impl BuildView {
                         ascend_changed = true;
                     }
                 }
+
+                // Secondary ascendancy (only on trees that support it).
+                if !self.secondary_ascendancies.is_empty() {
+                    let prev_sec = self.selected_secondary;
+                    let selected_label = self
+                        .secondary_ascendancies
+                        .get(self.selected_secondary)
+                        .map(|e| e.name.as_str())
+                        .unwrap_or("None");
+                    egui::ComboBox::from_id_salt("secondary_ascend_select")
+                        .selected_text(selected_label)
+                        .show_ui(ui, |ui| {
+                            for (i, asc) in self.secondary_ascendancies.iter().enumerate() {
+                                ui.selectable_value(&mut self.selected_secondary, i, &asc.name);
+                            }
+                        });
+                    if self.selected_secondary != prev_sec {
+                        secondary_changed = true;
+                    }
+                }
             }
 
             ui.separator();
@@ -262,6 +302,12 @@ impl BuildView {
                     .desired_width(30.0)
                     .char_limit(3),
             );
+            if let Ok(level) = self.char_level.parse::<u32>() {
+                let tooltip = experience_multiplier_tooltip(bridge.lua(), level);
+                if !tooltip.is_empty() {
+                    level_response.clone().on_hover_text(tooltip);
+                }
+            }
             if level_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 header_changed = true;
             }
@@ -280,6 +326,20 @@ impl BuildView {
             let ascend_id = self.classes[self.selected_class].ascendancies[self.selected_ascend].ascend_class_id;
             if let Err(e) = select_class_and_ascendancy(bridge, class_id, ascend_id) {
                 log::error!("Failed to change class/ascendancy: {e}");
+            } else {
+                self.refresh_all(bridge);
+            }
+        }
+
+        // Apply secondary ascendancy change
+        if secondary_changed {
+            let id = self
+                .secondary_ascendancies
+                .get(self.selected_secondary)
+                .map(|e| e.id)
+                .unwrap_or(0);
+            if let Err(e) = select_secondary_ascendancy(bridge, id) {
+                log::error!("Failed to change secondary ascendancy: {e}");
             } else {
                 self.refresh_all(bridge);
             }
@@ -309,6 +369,7 @@ impl BuildView {
                 ui.selectable_value(&mut self.active_tab, BuildTab::Skills, "Skills");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Items, "Items");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Config, "Config");
+                ui.selectable_value(&mut self.active_tab, BuildTab::Notes, "Notes");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Import, "Import/Export");
             });
             ui.separator();
@@ -341,6 +402,11 @@ impl BuildView {
                         self.refresh_calc_output(bridge);
                     }
                 }
+                BuildTab::Notes => {
+                    if let Some(ref mut notes) = self.notes_panel {
+                        notes.show(ui, bridge);
+                    }
+                }
                 BuildTab::Import => {
                     if self.import_panel.show(ui, bridge) {
                         // Build was imported — refresh everything
@@ -371,6 +437,7 @@ impl BuildView {
         self.tree_panel = Some(TreePanel::new(bridge.lua()));
         self.items_panel = Some(ItemsPanel::new(bridge.lua()));
         self.skills_panel = Some(SkillsPanel::new(bridge.lua()));
+        self.notes_panel = Some(NotesPanel::new(bridge.lua()));
     }
 
     fn show_stat_sidebar(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) {
@@ -454,6 +521,64 @@ impl BuildView {
                         self.refresh_calc_output(bridge);
                     }
                 });
+            }
+
+            // Minion type dropdown
+            if skill_info.show_minions && !skill_info.minion_labels.is_empty() {
+                let mut minion_idx = skill_info.selected_minion;
+                egui::ComboBox::from_id_salt("main_minion")
+                    .selected_text(
+                        skill_info
+                            .minion_labels
+                            .get(minion_idx)
+                            .cloned()
+                            .unwrap_or_else(|| "—".to_string()),
+                    )
+                    .width(ui.available_width() - 8.0)
+                    .show_ui(ui, |ui| {
+                        for (i, name) in skill_info.minion_labels.iter().enumerate() {
+                            ui.selectable_value(&mut minion_idx, i, name);
+                        }
+                    });
+                if minion_idx != skill_info.selected_minion
+                    && let Some(id) = skill_info.minion_ids.get(minion_idx)
+                {
+                    let _ = set_minion(bridge.lua(), id);
+                    self.refresh_calc_output(bridge);
+                }
+            }
+
+            // Manage Spectres (placeholder — spectre library popup not implemented yet)
+            if skill_info.show_spectre_library {
+                ui.add_enabled_ui(false, |ui| {
+                    ui.button("Manage Spectres…")
+                        .on_disabled_hover_text(
+                            "Spectre library not implemented yet. Use upstream PoB to curate spectres.",
+                        );
+                });
+            }
+
+            // Minion skill dropdown
+            if skill_info.show_minions && !skill_info.minion_skills.is_empty() {
+                let mut skill_idx = skill_info.selected_minion_skill;
+                egui::ComboBox::from_id_salt("main_minion_skill")
+                    .selected_text(
+                        skill_info
+                            .minion_skills
+                            .get(skill_idx)
+                            .cloned()
+                            .unwrap_or_else(|| "—".to_string()),
+                    )
+                    .width(ui.available_width() - 8.0)
+                    .show_ui(ui, |ui| {
+                        for (i, name) in skill_info.minion_skills.iter().enumerate() {
+                            ui.selectable_value(&mut skill_idx, i, name);
+                        }
+                    });
+                if skill_idx != skill_info.selected_minion_skill {
+                    let _ = set_minion_skill(bridge.lua(), skill_idx);
+                    self.refresh_calc_output(bridge);
+                }
             }
 
             // Mine count (for mine skills)
@@ -579,6 +704,128 @@ fn find_current_selection(lua: &mlua::Lua, classes: &[ClassEntry]) -> (usize, us
     (class_idx, ascend_idx)
 }
 
+/// Load secondary (alternate) ascendancies for the current tree version.
+/// Returns empty vec if the tree doesn't support them.
+fn load_secondary_ascendancies(lua: &mlua::Lua) -> Vec<SecondaryAscendEntry> {
+    let result: Result<mlua::Table, _> = lua
+        .load(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            local out = {}
+            if spec.tree and spec.tree.alternate_ascendancies then
+                for i, asc in ipairs(spec.tree.alternate_ascendancies) do
+                    table.insert(out, { id = i, name = asc.name or ("Ascendancy "..i) })
+                end
+            end
+            return out
+            "#,
+        )
+        .eval();
+
+    let Ok(table) = result else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    for pair in table.sequence_values::<mlua::Table>() {
+        let Ok(t) = pair else { continue };
+        entries.push(SecondaryAscendEntry {
+            id: t.get("id").unwrap_or(0),
+            name: t.get("name").unwrap_or_default(),
+        });
+    }
+    // If there are alternates, prepend a synthetic "None" entry (id 0).
+    if !entries.is_empty() {
+        entries.insert(
+            0,
+            SecondaryAscendEntry {
+                id: 0,
+                name: "None".to_string(),
+            },
+        );
+    }
+    entries
+}
+
+fn find_secondary_selection(lua: &mlua::Lua, entries: &[SecondaryAscendEntry]) -> usize {
+    let cur: u32 = lua
+        .load("return mainObject_ref.main.modes['BUILD'].spec.curSecondaryAscendClassId or 0")
+        .eval()
+        .unwrap_or(0);
+    entries.iter().position(|e| e.id == cur).unwrap_or(0)
+}
+
+fn select_secondary_ascendancy(bridge: &LuaBridge, ascend_class_id: u32) -> Result<(), mlua::Error> {
+    bridge
+        .lua()
+        .load(format!(
+            r#"
+            local build = mainObject_ref.main.modes['BUILD']
+            build.spec:SelectSecondaryAscendClass({ascend_class_id})
+            build.spec:AddUndoState()
+            build.buildFlag = true
+            _runCallback('OnFrame')
+            "#
+        ))
+        .exec()
+}
+
+/// Compute the experience multiplier tooltip for a given player level.
+///
+/// Reads `data.monsterExperienceLevelMap` from Lua and applies upstream's formula
+/// (see upstream `Modules/Build.lua` tooltipFunc for `characterLevel`).
+fn experience_multiplier_tooltip(lua: &mlua::Lua, player_level: u32) -> String {
+    if !(1..=100).contains(&player_level) {
+        return String::new();
+    }
+    let level_map: Vec<u32> = match lua
+        .load(
+            r#"
+            local m = mainObject_ref.main.modes['BUILD'].data and mainObject_ref.main.modes['BUILD'].data.monsterExperienceLevelMap
+            if not m then return {} end
+            local out = {}
+            for i, lvl in ipairs(m) do out[i] = lvl end
+            return out
+            "#,
+        )
+        .eval::<mlua::Table>()
+    {
+        Ok(t) => t.sequence_values::<u32>().filter_map(|r| r.ok()).collect(),
+        Err(_) => return String::new(),
+    };
+    if level_map.is_empty() {
+        return String::new();
+    }
+
+    let pl = player_level as f64;
+    let safe_zone = 3.0 + (pl / 16.0).floor();
+    let mut lines = vec!["Experience multiplier:".to_string()];
+    for (idx, &exp_level) in level_map.iter().enumerate() {
+        let area_level = (idx + 1) as u32;
+        let diff = (pl - exp_level as f64).abs() - safe_zone;
+        let mut mult = if diff <= 0.0 {
+            1.0
+        } else {
+            ((pl + 5.0) / (pl + 5.0 + diff.powf(2.5))).powf(1.5)
+        };
+        if player_level >= 95 {
+            let penalties = [0.935, 0.885, 0.813, 0.7175, 0.6];
+            let p = penalties
+                .get((player_level - 95) as usize)
+                .copied()
+                .unwrap_or(0.0);
+            mult *= (1.0 / (1.0 + 0.1 * (pl - 94.0))) * p;
+        }
+        if mult > 0.01 {
+            let mut line = area_level.to_string();
+            if area_level >= 68 {
+                line = format!("{line} (Tier {})", area_level - 67);
+            }
+            lines.push(format!("{line}: {:.1}%", mult * 100.0));
+        }
+    }
+    lines.join("\n")
+}
+
 /// Change the class and ascendancy in Lua.
 fn select_class_and_ascendancy(bridge: &LuaBridge, class_id: u32, ascend_class_id: u32) -> Result<(), mlua::Error> {
     bridge.lua().load(format!(
@@ -666,6 +913,16 @@ struct SkillSelectionInfo {
     /// Show mine count input (for mine skills)
     show_mines: bool,
     mine_count: String,
+    /// Minion type dropdown (e.g. for Raise Zombie, Summon Skeletons).
+    show_minions: bool,
+    minion_labels: Vec<String>,
+    minion_ids: Vec<String>,
+    selected_minion: usize,
+    /// Minion skill dropdown (selects which skill the minion uses).
+    minion_skills: Vec<String>,
+    selected_minion_skill: usize,
+    /// "Manage Spectres..." button shown for spectres (minion list is user-curated).
+    show_spectre_library: bool,
 }
 
 fn load_skill_selection(lua: &mlua::Lua) -> SkillSelectionInfo {
@@ -687,6 +944,13 @@ fn load_skill_selection(lua: &mlua::Lua) -> SkillSelectionInfo {
         local stageCount = ""
         local showMines = false
         local mineCount = ""
+        local showMinions = false
+        local minionLabels = {}
+        local minionIds = {}
+        local selMinion = 1
+        local minionSkills = {}
+        local selMinionSkill = 1
+        local showSpectreLibrary = false
         if selGroup >= 1 and selGroup <= #groupList then
             local sg = groupList[selGroup]
             if sg.displaySkillList then
@@ -726,6 +990,35 @@ fn load_skill_selection(lua: &mlua::Lua) -> SkillSelectionInfo {
                         showStages = true
                         stageCount = tostring(src and src.skillStageCount or skill.skillData and skill.skillData.stagesMin or 1)
                     end
+                    -- Minion list
+                    local minionList = skill.minionList
+                    local hasMinions = minionList and minionList[1]
+                    local minionListFromGE = ge.minionList
+                    if (hasMinions or minionListFromGE) and not (skill.skillFlags and skill.skillFlags.disable) then
+                        showMinions = true
+                        -- Spectre library button shows when skill has a minionList hook but no bound minions yet (e.g. Raise Spectre).
+                        showSpectreLibrary = minionListFromGE and not (minionListFromGE[1])
+                        local dataMinions = mainObject_ref.main.modes['BUILD'].data and mainObject_ref.main.modes['BUILD'].data.minions
+                        if hasMinions and dataMinions then
+                            for _, mid in ipairs(minionList) do
+                                local mdata = dataMinions[mid]
+                                table.insert(minionLabels, mdata and mdata.name or mid)
+                                table.insert(minionIds, mid)
+                            end
+                            local curMinion = src and src.skillMinion
+                            for i, mid in ipairs(minionIds) do
+                                if mid == curMinion then selMinion = i break end
+                            end
+                        end
+                        -- Active minion's skills
+                        if skill.minion and skill.minion.activeSkillList then
+                            for _, ms in ipairs(skill.minion.activeSkillList) do
+                                local nm = ms.activeEffect and ms.activeEffect.grantedEffect and ms.activeEffect.grantedEffect.name or "?"
+                                table.insert(minionSkills, nm)
+                            end
+                            selMinionSkill = src and src.skillMinionSkill or 1
+                        end
+                    end
                 end
             end
         end
@@ -740,6 +1033,13 @@ fn load_skill_selection(lua: &mlua::Lua) -> SkillSelectionInfo {
             stageCount = stageCount,
             showMines = showMines,
             mineCount = mineCount,
+            showMinions = showMinions,
+            minionLabels = minionLabels,
+            minionIds = minionIds,
+            selMinion = selMinion,
+            minionSkills = minionSkills,
+            selMinionSkill = selMinionSkill,
+            showSpectreLibrary = showSpectreLibrary,
         }
     "#,
     ).eval();
@@ -756,6 +1056,13 @@ fn load_skill_selection(lua: &mlua::Lua) -> SkillSelectionInfo {
             stage_count: String::new(),
             show_mines: false,
             mine_count: String::new(),
+            show_minions: false,
+            minion_labels: Vec::new(),
+            minion_ids: Vec::new(),
+            selected_minion: 0,
+            minion_skills: Vec::new(),
+            selected_minion_skill: 0,
+            show_spectre_library: false,
         };
     };
 
@@ -775,6 +1082,19 @@ fn load_skill_selection(lua: &mlua::Lua) -> SkillSelectionInfo {
     let stage_count: String = t.get("stageCount").unwrap_or_default();
     let show_mines: bool = t.get("showMines").unwrap_or(false);
     let mine_count: String = t.get("mineCount").unwrap_or_default();
+    let show_minions: bool = t.get("showMinions").unwrap_or(false);
+    let minion_labels: Vec<String> = t.get::<mlua::Table>("minionLabels")
+        .map(|tbl| tbl.sequence_values::<String>().filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+    let minion_ids: Vec<String> = t.get::<mlua::Table>("minionIds")
+        .map(|tbl| tbl.sequence_values::<String>().filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+    let sel_minion: usize = t.get::<u32>("selMinion").unwrap_or(1) as usize;
+    let minion_skills: Vec<String> = t.get::<mlua::Table>("minionSkills")
+        .map(|tbl| tbl.sequence_values::<String>().filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+    let sel_minion_skill: usize = t.get::<u32>("selMinionSkill").unwrap_or(1) as usize;
+    let show_spectre_library: bool = t.get("showSpectreLibrary").unwrap_or(false);
 
     // Lua indices are 1-based, convert to 0-based
     SkillSelectionInfo {
@@ -788,6 +1108,15 @@ fn load_skill_selection(lua: &mlua::Lua) -> SkillSelectionInfo {
         stage_count,
         show_mines,
         mine_count,
+        show_minions,
+        selected_minion: sel_minion.saturating_sub(1).min(minion_labels.len().saturating_sub(1)),
+        selected_minion_skill: sel_minion_skill
+            .saturating_sub(1)
+            .min(minion_skills.len().saturating_sub(1)),
+        minion_labels,
+        minion_ids,
+        minion_skills,
+        show_spectre_library,
     }
 }
 
@@ -854,6 +1183,36 @@ fn set_mine_count(lua: &mlua::Lua, count: &str) -> Result<(), mlua::Error> {
         local sg = build.skillsTab.socketGroupList[build.mainSocketGroup]
         local skill = sg.displaySkillList[sg.mainActiveSkill]
         skill.activeEffect.srcInstance.skillMineCount = tonumber("{count}")
+        build.modFlag = true
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#
+    )).exec()
+}
+
+fn set_minion(lua: &mlua::Lua, minion_id: &str) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        local sg = build.skillsTab.socketGroupList[build.mainSocketGroup]
+        local skill = sg.displaySkillList[sg.mainActiveSkill]
+        skill.activeEffect.srcInstance.skillMinion = ...
+        build.modFlag = true
+        build.buildFlag = true
+        _runCallback('OnFrame')
+        "#,
+    )
+    .call::<()>(minion_id)
+}
+
+fn set_minion_skill(lua: &mlua::Lua, index: usize) -> Result<(), mlua::Error> {
+    let lua_idx = index + 1;
+    lua.load(format!(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        local sg = build.skillsTab.socketGroupList[build.mainSocketGroup]
+        local skill = sg.displaySkillList[sg.mainActiveSkill]
+        skill.activeEffect.srcInstance.skillMinionSkill = {lua_idx}
         build.modFlag = true
         build.buildFlag = true
         _runCallback('OnFrame')
