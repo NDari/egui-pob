@@ -1,5 +1,7 @@
 # CLAUDE.md — egui-pob
 
+> **Current PoE 1 version: 3.28.** When reasoning about tree data, asset paths, CDN bundle versions, or which ascendancies/bloodlines/nodes exist, assume 3.28 unless the user says otherwise. The authoritative source is the highest `3_XX` directory under `upstream/src/TreeData/`.
+
 ## Project Overview
 
 Rust + egui frontend for Path of Building (PoB) with an embedded LuaJIT backend. Upstream PoB is a read-only git submodule. The Rust app loads upstream Lua code headless (rendering stubbed), then renders everything with egui.
@@ -99,6 +101,7 @@ upstream/                # Git submodule — READ-ONLY
 
 - **`initial-plan.md`** — Original implementation plan covering architecture, data interface design, phased build-out (A through F, all complete), and distribution strategy.
 - **`parity-plan.md`** — Comprehensive feature parity tracker (~200+ items) comparing current state against upstream PoB. Organized by area: build management, tree, skills, items, calcs, config, import/export, UI polish, and infrastructure.
+- **`poe2-integration.md`** — Plan for adding PoE 2 passive-tree support alongside PoE 1. Dual-submodule / dual-Lua-VM architecture, BC7/zstd atlas pipeline, phased work breakdown (A-F), XL effort estimate.
 
 ## Documentation
 

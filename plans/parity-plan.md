@@ -44,7 +44,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Build name display
 - [x] Class dropdown
 - [x] Ascendancy dropdown
-- [ ] Secondary ascendancy (bloodline) dropdown
+- [x] Secondary ascendancy (bloodline) dropdown
 - [x] Character level edit field (1-100)
 - [x] Level scaling mode toggle (Auto/Manual)
 - [x] Passive points used display (N / M)
@@ -52,7 +52,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - ~~Bandit reward selection~~ (covered by Config tab)
 - ~~Pantheon major god selection~~ (covered by Config tab)
 - ~~Pantheon minor god selection~~ (covered by Config tab)
-- [ ] Experience multiplier tooltip on level hover
+- [x] Experience multiplier tooltip on level hover
 
 ---
 
@@ -289,11 +289,11 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 - [x] Display all config option types (checkbox, count, list, text)
 - [x] Change config values and trigger recalc
-- [ ] Config search/filter bar
-- [ ] Show/hide ineligible configurations toggle
-- [ ] Section headers with collapsible groups
-- [ ] Conditional option visibility (ifNode, ifOption, ifCond dependencies)
-- [ ] Tooltips for config option explanations
+- [x] Config search/filter bar
+- [x] Show/hide ineligible configurations toggle
+- [x] Section headers with collapsible groups
+- [x] Conditional option visibility (ifNode, ifOption, ifCond dependencies)
+- [x] Tooltips for config option explanations
 - [ ] Config sets (multiple independent configs per build)
 - [ ] Config set management popup
 - [ ] Reset to defaults
@@ -303,10 +303,10 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 ## 8. Notes Tab
 
-- [ ] Notes tab (large multiline text editor)
-- [ ] Color code support (PoB color tags: `^7`, `^xHEXCODE`)
-- [ ] Color code buttons (Normal, Magic, Rare, Unique, Fire, Cold, etc.)
-- [ ] Show/hide color codes toggle
+- [x] Notes tab (large multiline text editor)
+- [x] Color code support (PoB color tags: `^7`, `^xHEXCODE`)
+- [x] Color code buttons (Normal, Magic, Rare, Unique, Fire, Cold, etc.)
+- [x] Show/hide color codes toggle
 - [ ] Ctrl+Z/Y undo/redo within editor
 - [ ] Zoom support (Ctrl+scroll)
 
@@ -366,9 +366,9 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Skill part dropdown (for multi-part skills)
 - [x] Skill stage count input
 - [x] Active mines count input
-- [ ] Minion type dropdown
-- [ ] Manage Spectres button + spectre library popup
-- [ ] Minion skill dropdown
+- [x] Minion type dropdown
+- [~] Manage Spectres button (button shown; library popup not implemented)
+- [x] Minion skill dropdown
 
 ---
 

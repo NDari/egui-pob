@@ -101,11 +101,12 @@ The general approach:
 
 | Crate / Tool | Description | Status |
 |---|---|---|
-| [`ggpk`](https://crates.io/crates/ggpk) ([GitHub](https://github.com/ex-nihil/ggpk)) | CLI + library for reading/extracting files from GGPK archives. Handles the legacy GGPK container format (file listing, regex filtering, extraction). **Does not handle bundle decompression.** LGPL-3.0. | v1.2.2, last updated Nov 2022. Dormant. |
-| [`poe_bundle`](https://lib.rs/crates/poe_bundle) | Library for extracting Oodle-compressed bundles. Wraps a C++ ooz fork via FFI for decompression. Depends on the `ggpk` crate for GGPK container reading. | v0.1.5, last updated Nov 2022. Early stage. |
-| [ggpk-explorer](https://github.com/juddisjudd/ggpk-explorer) | Full GUI explorer for **both** PoE 1 GGPK and PoE 2 bundle formats. Oodle decompression, DAT schema viewing, DDS texture viewer, search, CDN fallback for missing bundles. Most feature-complete Rust option. GPL-3.0. | v1.1.3, Jan 2026. Actively maintained. |
+| [`oozextract`](https://crates.io/crates/oozextract) ([GitHub](https://github.com/lvlvllvlvllvlvl/oozextract)) | **Pure-Rust Oodle decompressor.** Supports Kraken / Mermaid / Selkie / Leviathan / LZNA / Bitknit. No `cc`, no `bindgen`, no `build.rs` — deps are just `bytemuck`, `bytes`, `wide` (SIMD). Has a WASM feature. MIT. | v0.5.1, Nov 2024. Eliminates the need for a C/C++ toolchain. |
+| [`ggpk`](https://crates.io/crates/ggpk) ([GitHub](https://github.com/ex-nihil/ggpk)) | CLI + library for reading/extracting files from GGPK archives. Handles the legacy GGPK container format (file listing, regex filtering, extraction). **Does not handle bundle decompression.** LGPL-3.0. | v1.2.2, Nov 2022. Dormant. |
+| [`poe_bundle`](https://lib.rs/crates/poe_bundle) | Library for extracting Oodle-compressed bundles. Wraps a C++ ooz fork via FFI. | v0.1.5, Nov 2022. Early stage. |
+| [ggpk-explorer](https://github.com/juddisjudd/ggpk-explorer) | Full GUI explorer for both PoE 1 GGPK and PoE 2 bundle formats. GPL-3.0. Bundle + index parsing (`src/bundles/{bundle,cdn,index,path_enrichment}.rs`) is cleanly isolated from the GUI — vendorable. Its `src/ooz/sys.rs` is raw FFI to a vendored zao/ooz (16 C++ files via `cc`+`bindgen`); swapping that for `oozextract` collapses to ~one function. The `cdn.rs` module shows the bundle fallback endpoint (see below). | v1.1.3, Jan 2026. Actively maintained. |
 
-The `ggpk` + `poe_bundle` combo is the most relevant as library dependencies since we're already Rust. `ggpk-explorer` is the most complete and actively maintained -- useful as a reference implementation or for extracting its bundle/decompression code.
+**Recommended pipeline:** vendor `oozextract` + write a small `_.index.bin` parser with MurmurHash64A (seed `0x1337b33f`). No C toolchain, reproducible from any local PoE install. Roughly ~300 LoC plus the crate, excluding GGPK container reading (only needed for standalone — Steam installs are already loose bundle files).
 
 ### Other languages
 
@@ -117,6 +118,51 @@ The `ggpk` + `poe_bundle` combo is the most relevant as library dependencies sin
 | [PyPoE](https://github.com/OmegaK2/PyPoE) | Python | Developing bundle structure parsing support. |
 | PoB Exporter | Lua | Built into upstream PoB (`src/Export/Launch.lua`). DAT viewer + custom export scripts. What upstream uses to extract game data. |
 
+## PoE CDN URLs: not a shortcut
+
+Upstream PoB hardcodes URLs like:
+
+```
+https://web.poecdn.com/gen/image/<base64>/<hash>/ClassesPrimalist.png
+```
+
+Decoding that base64 (e.g. `WzIyLCJlMzIwYTYwYmNiZTY4ZmQ5YTc2NmE1ZmY4MzhjMDMyNCIseyJ0IjoyNywic3AiOjAuMzgzNX1d`) yields a JSON tuple:
+
+```json
+[22, "e320a60bcbe68fd9a766a5ff838c0324", {"t": 27, "sp": 0.3835}]
+```
+
+- `22` = API version
+- the hex string = MD5 content fingerprint of the source DDS/atlas
+- `{t, sp}` = texture index + scale/pixel ratio
+- the trailing `/3d68393250/` path segment is a short HMAC-style signature
+
+**These URLs rotate every patch**: the md5 changes when the source asset changes, and the signature changes alongside. Upstream PoB re-patches these strings each release. Testing the URLs currently committed to upstream returns **404**. There is no public "latest version of this texture" endpoint, and simpler fallbacks (`/image/Art/...`, `/image/passive-skill/...`) also 404.
+
+**What IS stable:** `https://patch.poecdn.com/{patch_version}/Bundles2/{bundle_name}` serves whole bundles by name (PoE 2: `patch-poe2.poecdn.com`). This means a fresh PoE install is not strictly required — you can pin a patch version, fetch `_.index.bin` + specific bundles by name over HTTP, and extract. See `ggpk-explorer/src/bundles/cdn.rs` for the pattern.
+
+## Concrete example: extracting bloodline ascendancy backgrounds
+
+The Azmeri / secondary-ascendancy backgrounds live at:
+
+```
+Art/2DArt/UIImages/InGame/PassiveSkillScreen/ClassesPrimalist.png
+Art/2DArt/UIImages/InGame/PassiveSkillScreen/ClassesWarden.png
+Art/2DArt/UIImages/InGame/PassiveSkillScreen/ClassesWarlock.png
+```
+
+Plus the Azmeri node frames: `AzmeriAscendancyFrameLargeNormal.png`, etc. (see `upstream/src/Classes/PassiveTree.lua` lines 202-222 for the full list).
+
+Upstream already has these PNGs committed under `upstream/src/TreeData/` (pre-extracted), so they're available at runtime through the submodule today.
+
+To re-extract them ourselves:
+
+1. Parse `Bundles2/_.index.bin` (decompress with `oozextract`, then read the structured header: bundle list → file-hash table → path-rep table).
+2. Lowercase the target path and hash it with MurmurHash64A, seed `0x1337b33f`.
+3. Look up the containing bundle + byte offset in the index.
+4. Fetch the bundle either from local `Bundles2/<name>.bundle.bin` or `patch.poecdn.com/{patch_ver}/Bundles2/<name>`.
+5. Decompress with `oozextract`, slice at the offset, write the PNG.
+
 ## Current State
 
 - Upstream PoB includes pre-extracted art files committed directly to the repo
@@ -127,9 +173,11 @@ The `ggpk` + `poe_bundle` combo is the most relevant as library dependencies sin
 
 Build a standalone Rust tool that can:
 
-1. Parse `_.index.bin` from a PoE installation
-2. Decompress Oodle bundles (via FFI to libooz, or using `poe_bundle` crate, or referencing `ggpk-explorer`'s implementation)
-3. Extract all needed art assets directly, independent of upstream's bundled files
-4. Automate tree data + art updates when new PoE patches ship
+1. Decompress `_.index.bin` with `oozextract`, parse the index to build a path-hash → (bundle, offset, size) map
+2. Fetch bundles either from a local PoE install or from `patch.poecdn.com/{ver}/Bundles2/{name}` (installer-free)
+3. Extract a declarative list of art assets (class backgrounds, Azmeri frames, oil icons, tooltip headers) to `assets/`
+4. Optionally re-run against a newer patch to update everything
 
-The `ggpk` + `poe_bundle` crates could serve as a starting point, though they haven't been updated since 2022. The `ggpk-explorer` project is actively maintained and handles both PoE 1 and PoE 2 formats -- its decompression and index parsing code would be the best reference for a custom extraction tool.
+Scope estimate with the `oozextract` + custom index parser approach: ~300 LoC of Rust plus the crate, no C/C++ toolchain required. `ggpk-explorer`'s `src/bundles/` directory is the cleanest reference implementation for the index parsing and CDN fallback logic; swap its `src/ooz/sys.rs` FFI for `oozextract::Oozextract::decompress()` and the tool is pure Rust.
+
+For the legacy standalone GGPK container (Windows-only `Content.ggpk`), the `ggpk` crate (dormant but functional) wraps reading, or the container parsing in `ggpk-explorer/src/ggpk/` can be vendored. Steam installs skip this layer entirely — bundles are already loose files.

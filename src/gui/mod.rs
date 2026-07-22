@@ -206,18 +206,26 @@ pub fn show_stat_table(ui: &mut egui::Ui, output: &CalcOutput) {
         ("ChaosResist", "Chaos Resistance"),
     ];
 
+    // Split the available width 50/50 so neither column can push the panel wider.
+    let avail = ui.available_width();
+    let col_width = (avail * 0.5 - 8.0).max(40.0);
+
     egui::Grid::new("key_stats")
         .num_columns(2)
         .striped(true)
-        .min_col_width(100.0)
+        .min_col_width(col_width)
+        .max_col_width(col_width)
         .show(ui, |ui| {
             for (stat, label) in &key_stats {
                 if let Some(value) = output.stats.get(*stat) {
-                    ui.label(*label);
+                    ui.add(egui::Label::new(*label).truncate());
                     let text = format_stat_value(stat, *value);
                     let color = stat_value_color(stat);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(text).color(color));
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(text).color(color))
+                                .truncate(),
+                        );
                     });
                     ui.end_row();
                 }
