@@ -3,6 +3,7 @@
 use pob_egui::data::CalcOutput;
 use pob_egui::lua_bridge::LuaBridge;
 
+use super::calcs_tab::CalcsPanel;
 use super::config_tab::ConfigPanel;
 use super::import_tab::ImportPanel;
 use super::items_tab::ItemsPanel;
@@ -16,6 +17,7 @@ pub enum BuildTab {
     Tree,
     Skills,
     Items,
+    Calcs,
     Config,
     Notes,
     Import,
@@ -47,6 +49,9 @@ pub struct BuildView {
     pub tree_panel: Option<TreePanel>,
     pub items_panel: Option<ItemsPanel>,
     pub skills_panel: Option<SkillsPanel>,
+    pub calcs_panel: Option<CalcsPanel>,
+    /// True when calc data changed and the calcs panel needs a refresh.
+    calcs_stale: bool,
     pub notes_panel: Option<NotesPanel>,
     pub import_panel: ImportPanel,
     pub active_tab: BuildTab,
@@ -100,6 +105,8 @@ impl BuildView {
             tree_panel,
             items_panel,
             skills_panel,
+            calcs_panel: None, // created lazily on first tab visit
+            calcs_stale: false,
             notes_panel,
             import_panel,
             active_tab: BuildTab::Tree,
@@ -312,7 +319,11 @@ impl BuildView {
                 header_changed = true;
             }
 
-            let mode_label = if self.level_auto_mode { "Auto" } else { "Manual" };
+            let mode_label = if self.level_auto_mode {
+                "Auto"
+            } else {
+                "Manual"
+            };
             if ui.button(mode_label).clicked() {
                 self.level_auto_mode = !self.level_auto_mode;
                 header_changed = true;
@@ -323,7 +334,8 @@ impl BuildView {
         // Apply class/ascendancy changes
         if class_changed || ascend_changed {
             let class_id = self.classes[self.selected_class].class_id;
-            let ascend_id = self.classes[self.selected_class].ascendancies[self.selected_ascend].ascend_class_id;
+            let ascend_id = self.classes[self.selected_class].ascendancies[self.selected_ascend]
+                .ascend_class_id;
             if let Err(e) = select_class_and_ascendancy(bridge, class_id, ascend_id) {
                 log::error!("Failed to change class/ascendancy: {e}");
             } else {
@@ -368,6 +380,7 @@ impl BuildView {
                 ui.selectable_value(&mut self.active_tab, BuildTab::Tree, "Tree");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Skills, "Skills");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Items, "Items");
+                ui.selectable_value(&mut self.active_tab, BuildTab::Calcs, "Calcs");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Config, "Config");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Notes, "Notes");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Import, "Import/Export");
@@ -393,6 +406,24 @@ impl BuildView {
                 BuildTab::Items => {
                     if let Some(ref items) = self.items_panel {
                         items.show(ui, bridge);
+                    }
+                }
+                BuildTab::Calcs => {
+                    if self.calcs_panel.is_none() {
+                        self.calcs_panel = Some(CalcsPanel::new(bridge.lua()));
+                        self.calcs_stale = false;
+                    } else if self.calcs_stale {
+                        if let Some(ref mut calcs) = self.calcs_panel {
+                            calcs.refresh(bridge.lua());
+                        }
+                        self.calcs_stale = false;
+                    }
+                    if let Some(ref mut calcs) = self.calcs_panel
+                        && calcs.show(ui, bridge)
+                    {
+                        self.refresh_calc_output(bridge);
+                        // The panel refreshed itself; don't do it again
+                        self.calcs_stale = false;
                     }
                 }
                 BuildTab::Config => {
@@ -428,6 +459,7 @@ impl BuildView {
                 log::error!("Failed to refresh calc output: {e}");
             }
         }
+        self.calcs_stale = true;
     }
 
     /// Refresh all panels after a major change (e.g., build import).
@@ -437,6 +469,7 @@ impl BuildView {
         self.tree_panel = Some(TreePanel::new(bridge.lua()));
         self.items_panel = Some(ItemsPanel::new(bridge.lua()));
         self.skills_panel = Some(SkillsPanel::new(bridge.lua()));
+        self.calcs_panel = None; // recreated lazily on next visit
         self.notes_panel = Some(NotesPanel::new(bridge.lua()));
     }
 
@@ -507,7 +540,8 @@ impl BuildView {
                             .desired_width(40.0)
                             .char_limit(4),
                     );
-                    let mut changed = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let mut changed =
+                        response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if ui.button("-").clicked() {
                         buf = (cur - 1).max(1).to_string();
                         changed = true;
@@ -551,10 +585,9 @@ impl BuildView {
             // Manage Spectres (placeholder — spectre library popup not implemented yet)
             if skill_info.show_spectre_library {
                 ui.add_enabled_ui(false, |ui| {
-                    ui.button("Manage Spectres…")
-                        .on_disabled_hover_text(
-                            "Spectre library not implemented yet. Use upstream PoB to curate spectres.",
-                        );
+                    ui.button("Manage Spectres…").on_disabled_hover_text(
+                        "Spectre library not implemented yet. Use upstream PoB to curate spectres.",
+                    );
                 });
             }
 
@@ -592,7 +625,8 @@ impl BuildView {
                             .desired_width(40.0)
                             .char_limit(4),
                     );
-                    let mut changed = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let mut changed =
+                        response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if ui.button("-").clicked() {
                         buf = (cur - 1).max(1).to_string();
                         changed = true;
@@ -626,8 +660,9 @@ impl BuildView {
 
 /// Load the list of classes and their ascendancies from Lua.
 fn load_class_list(lua: &mlua::Lua) -> Vec<ClassEntry> {
-    let result: Result<mlua::Table, _> = lua.load(
-        r#"
+    let result: Result<mlua::Table, _> = lua
+        .load(
+            r#"
         local spec = mainObject_ref.main.modes['BUILD'].spec
         local classes = spec.tree.classes
         local result = {}
@@ -649,7 +684,8 @@ fn load_class_list(lua: &mlua::Lua) -> Vec<ClassEntry> {
         table.sort(result, function(a, b) return a.name < b.name end)
         return result
     "#,
-    ).eval();
+        )
+        .eval();
 
     let Ok(table) = result else {
         log::error!("Failed to load class list from Lua");
@@ -699,7 +735,11 @@ fn find_current_selection(lua: &mlua::Lua, classes: &[ClassEntry]) -> (usize, us
         .unwrap_or(0);
     let ascend_idx = classes
         .get(class_idx)
-        .and_then(|c| c.ascendancies.iter().position(|a| a.ascend_class_id == cur_ascend_id))
+        .and_then(|c| {
+            c.ascendancies
+                .iter()
+                .position(|a| a.ascend_class_id == cur_ascend_id)
+        })
         .unwrap_or(0);
     (class_idx, ascend_idx)
 }
@@ -754,7 +794,10 @@ fn find_secondary_selection(lua: &mlua::Lua, entries: &[SecondaryAscendEntry]) -
     entries.iter().position(|e| e.id == cur).unwrap_or(0)
 }
 
-fn select_secondary_ascendancy(bridge: &LuaBridge, ascend_class_id: u32) -> Result<(), mlua::Error> {
+fn select_secondary_ascendancy(
+    bridge: &LuaBridge,
+    ascend_class_id: u32,
+) -> Result<(), mlua::Error> {
     bridge
         .lua()
         .load(format!(
@@ -827,9 +870,15 @@ fn experience_multiplier_tooltip(lua: &mlua::Lua, player_level: u32) -> String {
 }
 
 /// Change the class and ascendancy in Lua.
-fn select_class_and_ascendancy(bridge: &LuaBridge, class_id: u32, ascend_class_id: u32) -> Result<(), mlua::Error> {
-    bridge.lua().load(format!(
-        r#"
+fn select_class_and_ascendancy(
+    bridge: &LuaBridge,
+    class_id: u32,
+    ascend_class_id: u32,
+) -> Result<(), mlua::Error> {
+    bridge
+        .lua()
+        .load(format!(
+            r#"
         local build = mainObject_ref.main.modes['BUILD']
         local spec = build.spec
         spec:SelectClass({class_id})
@@ -838,7 +887,8 @@ fn select_class_and_ascendancy(bridge: &LuaBridge, class_id: u32, ascend_class_i
         build.buildFlag = true
         _runCallback('OnFrame')
     "#
-    )).exec()
+        ))
+        .exec()
 }
 
 struct CharHeader {
@@ -889,15 +939,18 @@ fn apply_char_header(bridge: &LuaBridge, view: &BuildView) -> Result<(), mlua::E
     let level: u32 = view.char_level.parse().unwrap_or(1).clamp(1, 100);
     let auto_mode = view.level_auto_mode;
 
-    bridge.lua().load(format!(
-        r#"
+    bridge
+        .lua()
+        .load(format!(
+            r#"
         local build = mainObject_ref.main.modes['BUILD']
         build.characterLevel = {level}
         build.characterLevelAutoMode = {auto_mode}
         build.buildFlag = true
         _runCallback('OnFrame')
     "#
-    )).exec()
+        ))
+        .exec()
 }
 
 struct SkillSelectionInfo {
@@ -1066,16 +1119,31 @@ fn load_skill_selection(lua: &mlua::Lua) -> SkillSelectionInfo {
         };
     };
 
-    let groups: Vec<String> = t.get::<mlua::Table>("groups")
-        .map(|tbl| tbl.sequence_values::<String>().filter_map(|r| r.ok()).collect())
+    let groups: Vec<String> = t
+        .get::<mlua::Table>("groups")
+        .map(|tbl| {
+            tbl.sequence_values::<String>()
+                .filter_map(|r| r.ok())
+                .collect()
+        })
         .unwrap_or_default();
     let sel_group: usize = t.get::<u32>("selGroup").unwrap_or(1) as usize;
-    let active_skills: Vec<String> = t.get::<mlua::Table>("activeSkills")
-        .map(|tbl| tbl.sequence_values::<String>().filter_map(|r| r.ok()).collect())
+    let active_skills: Vec<String> = t
+        .get::<mlua::Table>("activeSkills")
+        .map(|tbl| {
+            tbl.sequence_values::<String>()
+                .filter_map(|r| r.ok())
+                .collect()
+        })
         .unwrap_or_default();
     let sel_skill: usize = t.get::<u32>("selSkill").unwrap_or(1) as usize;
-    let skill_parts: Vec<String> = t.get::<mlua::Table>("skillParts")
-        .map(|tbl| tbl.sequence_values::<String>().filter_map(|r| r.ok()).collect())
+    let skill_parts: Vec<String> = t
+        .get::<mlua::Table>("skillParts")
+        .map(|tbl| {
+            tbl.sequence_values::<String>()
+                .filter_map(|r| r.ok())
+                .collect()
+        })
         .unwrap_or_default();
     let sel_part: usize = t.get::<u32>("selPart").unwrap_or(1) as usize;
     let show_stages: bool = t.get("showStages").unwrap_or(false);
@@ -1083,33 +1151,56 @@ fn load_skill_selection(lua: &mlua::Lua) -> SkillSelectionInfo {
     let show_mines: bool = t.get("showMines").unwrap_or(false);
     let mine_count: String = t.get("mineCount").unwrap_or_default();
     let show_minions: bool = t.get("showMinions").unwrap_or(false);
-    let minion_labels: Vec<String> = t.get::<mlua::Table>("minionLabels")
-        .map(|tbl| tbl.sequence_values::<String>().filter_map(|r| r.ok()).collect())
+    let minion_labels: Vec<String> = t
+        .get::<mlua::Table>("minionLabels")
+        .map(|tbl| {
+            tbl.sequence_values::<String>()
+                .filter_map(|r| r.ok())
+                .collect()
+        })
         .unwrap_or_default();
-    let minion_ids: Vec<String> = t.get::<mlua::Table>("minionIds")
-        .map(|tbl| tbl.sequence_values::<String>().filter_map(|r| r.ok()).collect())
+    let minion_ids: Vec<String> = t
+        .get::<mlua::Table>("minionIds")
+        .map(|tbl| {
+            tbl.sequence_values::<String>()
+                .filter_map(|r| r.ok())
+                .collect()
+        })
         .unwrap_or_default();
     let sel_minion: usize = t.get::<u32>("selMinion").unwrap_or(1) as usize;
-    let minion_skills: Vec<String> = t.get::<mlua::Table>("minionSkills")
-        .map(|tbl| tbl.sequence_values::<String>().filter_map(|r| r.ok()).collect())
+    let minion_skills: Vec<String> = t
+        .get::<mlua::Table>("minionSkills")
+        .map(|tbl| {
+            tbl.sequence_values::<String>()
+                .filter_map(|r| r.ok())
+                .collect()
+        })
         .unwrap_or_default();
     let sel_minion_skill: usize = t.get::<u32>("selMinionSkill").unwrap_or(1) as usize;
     let show_spectre_library: bool = t.get("showSpectreLibrary").unwrap_or(false);
 
     // Lua indices are 1-based, convert to 0-based
     SkillSelectionInfo {
-        selected_group: sel_group.saturating_sub(1).min(groups.len().saturating_sub(1)),
+        selected_group: sel_group
+            .saturating_sub(1)
+            .min(groups.len().saturating_sub(1)),
         socket_groups: groups,
-        selected_skill: sel_skill.saturating_sub(1).min(active_skills.len().saturating_sub(1)),
+        selected_skill: sel_skill
+            .saturating_sub(1)
+            .min(active_skills.len().saturating_sub(1)),
         active_skills,
-        selected_part: sel_part.saturating_sub(1).min(skill_parts.len().saturating_sub(1)),
+        selected_part: sel_part
+            .saturating_sub(1)
+            .min(skill_parts.len().saturating_sub(1)),
         skill_parts,
         show_stages,
         stage_count,
         show_mines,
         mine_count,
         show_minions,
-        selected_minion: sel_minion.saturating_sub(1).min(minion_labels.len().saturating_sub(1)),
+        selected_minion: sel_minion
+            .saturating_sub(1)
+            .min(minion_labels.len().saturating_sub(1)),
         selected_minion_skill: sel_minion_skill
             .saturating_sub(1)
             .min(minion_skills.len().saturating_sub(1)),
@@ -1130,7 +1221,8 @@ fn set_main_socket_group(lua: &mlua::Lua, index: usize) -> Result<(), mlua::Erro
         build.buildFlag = true
         _runCallback('OnFrame')
     "#
-    )).exec()
+    ))
+    .exec()
 }
 
 fn set_main_active_skill(lua: &mlua::Lua, index: usize) -> Result<(), mlua::Error> {
@@ -1144,7 +1236,8 @@ fn set_main_active_skill(lua: &mlua::Lua, index: usize) -> Result<(), mlua::Erro
         build.buildFlag = true
         _runCallback('OnFrame')
     "#
-    )).exec()
+    ))
+    .exec()
 }
 
 fn set_skill_part(lua: &mlua::Lua, index: usize) -> Result<(), mlua::Error> {
@@ -1159,7 +1252,8 @@ fn set_skill_part(lua: &mlua::Lua, index: usize) -> Result<(), mlua::Error> {
         build.buildFlag = true
         _runCallback('OnFrame')
     "#
-    )).exec()
+    ))
+    .exec()
 }
 
 fn set_stage_count(lua: &mlua::Lua, count: &str) -> Result<(), mlua::Error> {
@@ -1173,7 +1267,8 @@ fn set_stage_count(lua: &mlua::Lua, count: &str) -> Result<(), mlua::Error> {
         build.buildFlag = true
         _runCallback('OnFrame')
     "#
-    )).exec()
+    ))
+    .exec()
 }
 
 fn set_mine_count(lua: &mlua::Lua, count: &str) -> Result<(), mlua::Error> {
@@ -1187,7 +1282,8 @@ fn set_mine_count(lua: &mlua::Lua, count: &str) -> Result<(), mlua::Error> {
         build.buildFlag = true
         _runCallback('OnFrame')
     "#
-    )).exec()
+    ))
+    .exec()
 }
 
 fn set_minion(lua: &mlua::Lua, minion_id: &str) -> Result<(), mlua::Error> {
@@ -1217,7 +1313,8 @@ fn set_minion_skill(lua: &mlua::Lua, index: usize) -> Result<(), mlua::Error> {
         build.buildFlag = true
         _runCallback('OnFrame')
     "#
-    )).exec()
+    ))
+    .exec()
 }
 
 /// Save the current build to disk with a given name (Save As).

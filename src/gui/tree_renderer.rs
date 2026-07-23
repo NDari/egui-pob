@@ -2,7 +2,7 @@
 //! When a sprite atlas is loaded, nodes are rendered with actual game textures.
 //! Falls back to colored circles when sprites are unavailable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use pob_egui::data::tree::{ArcInfo, GroupBackground, NodeType, TreeData, TreeNode};
@@ -23,6 +23,40 @@ impl Palette {
     const CONNECTION_ALLOCATED: egui::Color32 = egui::Color32::from_rgb(200, 170, 50);
     const ASCENDANCY: egui::Color32 = egui::Color32::from_rgb(140, 100, 160);
     const HOVER_OUTLINE: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
+    const SEARCH_HIGHLIGHT: egui::Color32 = egui::Color32::from_rgb(255, 50, 50);
+    /// Connectors/rings along the shortest path to the hovered node.
+    const PATH_PREVIEW: egui::Color32 = egui::Color32::from_rgb(140, 190, 80);
+    /// Nodes/connectors that would disconnect if the hovered node were removed.
+    const DEPENDENT: egui::Color32 = egui::Color32::from_rgb(220, 60, 50);
+    /// Red tint applied to sprites of dependent nodes.
+    const DEPENDENT_TINT: egui::Color32 = egui::Color32::from_rgb(255, 90, 80);
+}
+
+/// A click on a tree node.
+pub struct NodeClick {
+    pub node_id: u32,
+    /// True for a right (secondary) click.
+    pub is_right: bool,
+}
+
+/// Result of drawing the tree for one frame.
+#[derive(Default)]
+pub struct TreeViewResponse {
+    pub clicked: Option<NodeClick>,
+    /// Node currently under the cursor.
+    pub hovered: Option<u32>,
+}
+
+/// Per-frame interaction overlays.
+pub struct TreeOverlays<'a> {
+    pub search_matches: &'a HashSet<u32>,
+    /// The node the path/depends sets below belong to. They are only applied
+    /// while this node is the hovered one (the caller's cache can lag a frame).
+    pub hover_node: Option<u32>,
+    /// Nodes on the shortest path to `hover_node`.
+    pub hover_path: &'a HashSet<u32>,
+    /// Nodes that would disconnect if `hover_node` were deallocated.
+    pub hover_depends: &'a HashSet<u32>,
 }
 
 /// Border color for passive tooltips (upstream default: rgb(128, 77, 0)).
@@ -93,16 +127,29 @@ impl TooltipHeaders {
 
         // Load oil icons from TreeData/
         let oil_names = [
-            "AmberOil", "AzureOil", "BlackOil", "ClearOil", "CrimsonOil",
-            "GoldenOil", "IndigoOil", "OpalescentOil", "PrismaticOil",
-            "SepiaOil", "SilverOil", "TealOil", "VerdantOil", "VioletOil",
+            "AmberOil",
+            "AzureOil",
+            "BlackOil",
+            "ClearOil",
+            "CrimsonOil",
+            "GoldenOil",
+            "IndigoOil",
+            "OpalescentOil",
+            "PrismaticOil",
+            "SepiaOil",
+            "SilverOil",
+            "TealOil",
+            "VerdantOil",
+            "VioletOil",
         ];
         let mut oil_icons = HashMap::new();
         if let Some(td) = tree_data_dir {
             // Oil icons live in the TreeData root, not the versioned subdirectory
             let oil_dir = td.parent().unwrap_or(td);
             for name in &oil_names {
-                if let Some(tex) = load_png(&oil_dir.join(format!("{name}.png")), &format!("oil_{name}")) {
+                if let Some(tex) =
+                    load_png(&oil_dir.join(format!("{name}.png")), &format!("oil_{name}"))
+                {
                     oil_icons.insert((*name).to_string(), tex);
                 }
             }
@@ -182,14 +229,14 @@ impl TreeCamera {
 }
 
 /// Draw the passive tree and handle pan/zoom/hover interactions.
-/// Returns the ID of a clicked node, if any.
 pub fn draw_tree(
     ui: &mut egui::Ui,
     tree: &TreeData,
     camera: &mut TreeCamera,
     atlas: Option<&TreeSpriteAtlas>,
     tooltip_headers: Option<&TooltipHeaders>,
-) -> Option<u32> {
+    overlays: &TreeOverlays,
+) -> TreeViewResponse {
     ui.ctx().style_mut(|s| {
         s.interaction.tooltip_delay = 0.05;
         s.interaction.tooltip_grace_time = 0.05;
@@ -237,38 +284,7 @@ pub fn draw_tree(
         draw_group_backgrounds(&painter, tree, camera, &rect, &visible_rect, atlas);
     }
 
-    // Draw connections
-    for conn in &tree.connections {
-        let (Some(from_node), Some(to_node)) =
-            (tree.nodes.get(&conn.from_id), tree.nodes.get(&conn.to_id))
-        else {
-            continue;
-        };
-
-        let from_screen = camera.tree_to_screen(from_node.x, from_node.y, &rect);
-        let to_screen = camera.tree_to_screen(to_node.x, to_node.y, &rect);
-
-        if !line_intersects_rect(from_screen, to_screen, &visible_rect) {
-            continue;
-        }
-
-        let both_allocated = from_node.is_allocated && to_node.is_allocated;
-        let color = if both_allocated {
-            Palette::CONNECTION_ALLOCATED
-        } else {
-            Palette::CONNECTION
-        };
-        let width = if both_allocated { 2.0 } else { 1.0 };
-        let stroke = egui::Stroke::new(width, color);
-
-        if let Some(arc) = &conn.arc {
-            draw_arc(&painter, arc, from_node, to_node, camera, &rect, stroke);
-        } else {
-            painter.line_segment([from_screen, to_screen], stroke);
-        }
-    }
-
-    // Find hovered node
+    // Find hovered node (before connections so they can react to it)
     let mouse_pos = ui.input(|i| i.pointer.hover_pos());
     let mut hovered_node: Option<&TreeNode> = None;
     let mut hovered_dist_sq = f32::MAX;
@@ -289,6 +305,57 @@ pub fn draw_tree(
         }
     }
 
+    // Only apply path/depends overlays if they belong to the node actually
+    // being hovered (the caller's cache can lag a frame behind).
+    let hovered_id = hovered_node.map(|n| n.id);
+    let (hover_path, hover_depends): (&HashSet<u32>, &HashSet<u32>) =
+        if overlays.hover_node.is_some() && overlays.hover_node == hovered_id {
+            (overlays.hover_path, overlays.hover_depends)
+        } else {
+            static EMPTY: std::sync::LazyLock<HashSet<u32>> =
+                std::sync::LazyLock::new(HashSet::new);
+            (&EMPTY, &EMPTY)
+        };
+
+    // Draw connections
+    for conn in &tree.connections {
+        let (Some(from_node), Some(to_node)) =
+            (tree.nodes.get(&conn.from_id), tree.nodes.get(&conn.to_id))
+        else {
+            continue;
+        };
+
+        let from_screen = camera.tree_to_screen(from_node.x, from_node.y, &rect);
+        let to_screen = camera.tree_to_screen(to_node.x, to_node.y, &rect);
+
+        if !line_intersects_rect(from_screen, to_screen, &visible_rect) {
+            continue;
+        }
+
+        // Connector state, mirroring upstream: dependent (red) wins, then
+        // active (both allocated), then hover-path preview, then normal.
+        let both_allocated = from_node.is_allocated && to_node.is_allocated;
+        let in_path =
+            |n: &TreeNode| n.is_allocated || Some(n.id) == hovered_id || hover_path.contains(&n.id);
+        let (color, width): (egui::Color32, f32) =
+            if hover_depends.contains(&from_node.id) && hover_depends.contains(&to_node.id) {
+                (Palette::DEPENDENT, 2.0)
+            } else if both_allocated {
+                (Palette::CONNECTION_ALLOCATED, 2.0)
+            } else if !hover_path.is_empty() && in_path(from_node) && in_path(to_node) {
+                (Palette::PATH_PREVIEW, 2.0)
+            } else {
+                (Palette::CONNECTION, 1.0)
+            };
+        let stroke = egui::Stroke::new(width, color);
+
+        if let Some(arc) = &conn.arc {
+            draw_arc(&painter, arc, from_node, to_node, camera, &rect, stroke);
+        } else {
+            painter.line_segment([from_screen, to_screen], stroke);
+        }
+    }
+
     // Draw nodes
     for node in tree.nodes.values() {
         let screen_pos = camera.tree_to_screen(node.x, node.y, &rect);
@@ -299,16 +366,27 @@ pub fn draw_tree(
 
         let radius = (node.node_type.radius() * camera.zoom).max(1.5);
         let is_hovered = hovered_node.is_some_and(|h| h.id == node.id);
+        let is_dependent = hover_depends.contains(&node.id) && Some(node.id) != hovered_id;
+
+        // Dependent nodes get a red tint: they would disconnect if the
+        // hovered node were deallocated.
+        let tint = if is_dependent {
+            Palette::DEPENDENT_TINT
+        } else {
+            egui::Color32::WHITE
+        };
 
         let drew_sprite = if let Some(atlas) = atlas {
-            draw_node_sprite(&painter, node, screen_pos, radius, atlas)
+            draw_node_sprite(&painter, node, screen_pos, radius, atlas, tint)
         } else {
             false
         };
 
         if !drew_sprite {
             // Fallback: colored circle
-            let color = if node.is_allocated {
+            let color = if is_dependent {
+                Palette::DEPENDENT
+            } else if node.is_allocated {
                 Palette::ALLOCATED
             } else if node.ascendancy_name.is_some() {
                 Palette::ASCENDANCY
@@ -316,6 +394,16 @@ pub fn draw_tree(
                 node_type_color(node.node_type)
             };
             painter.circle_filled(screen_pos, radius, color);
+        }
+
+        // Path preview ring: unallocated nodes on the shortest path to the
+        // hovered node (stand-in for upstream's highlighted frame).
+        if !node.is_allocated && Some(node.id) != hovered_id && hover_path.contains(&node.id) {
+            painter.circle_stroke(
+                screen_pos,
+                radius + 2.0,
+                egui::Stroke::new(2.0_f32, Palette::PATH_PREVIEW),
+            );
         }
 
         // Hover outline
@@ -327,6 +415,16 @@ pub fn draw_tree(
             );
         }
 
+        // Search match highlight ring. The zoom^0.4 divisor (from upstream)
+        // keeps rings visible when zoomed out.
+        if overlays.search_matches.contains(&node.id) {
+            let ring_radius = (43.75 * camera.zoom / camera.zoom.powf(0.4)).max(radius + 4.0);
+            painter.circle_stroke(
+                screen_pos,
+                ring_radius,
+                egui::Stroke::new(2.5_f32, Palette::SEARCH_HIGHLIGHT),
+            );
+        }
     }
 
     // Tooltip — temporarily override popup frame to be transparent
@@ -345,15 +443,27 @@ pub fn draw_tree(
         ui.ctx().style_mut(|s| s.visuals = saved);
     }
 
-    // Handle click
-    let mut clicked_node_id = None;
-    if response.clicked()
-        && let Some(node) = hovered_node
-    {
-        clicked_node_id = Some(node.id);
-    }
+    // Handle click (left or right)
+    let clicked = hovered_node.and_then(|node| {
+        if response.clicked() {
+            Some(NodeClick {
+                node_id: node.id,
+                is_right: false,
+            })
+        } else if response.secondary_clicked() {
+            Some(NodeClick {
+                node_id: node.id,
+                is_right: true,
+            })
+        } else {
+            None
+        }
+    });
 
-    clicked_node_id
+    TreeViewResponse {
+        clicked,
+        hovered: hovered_id,
+    }
 }
 
 /// Try to draw a node using sprite textures. Returns true if successful.
@@ -363,6 +473,7 @@ fn draw_node_sprite(
     screen_pos: egui::Pos2,
     radius: f32,
     atlas: &TreeSpriteAtlas,
+    tint: egui::Color32,
 ) -> bool {
     // ClassStart nodes use dedicated art instead of normal icon+frame
     if node.node_type == NodeType::ClassStart {
@@ -377,10 +488,9 @@ fn draw_node_sprite(
         {
             let w = bg.width * 1.33 * radius / node.node_type.radius();
             let h = bg.height * 1.33 * radius / node.node_type.radius();
-            let img_rect =
-                egui::Rect::from_center_size(screen_pos, egui::vec2(w * 2.0, h * 2.0));
+            let img_rect = egui::Rect::from_center_size(screen_pos, egui::vec2(w * 2.0, h * 2.0));
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-            painter.image(tex, img_rect, uv, egui::Color32::WHITE);
+            painter.image(tex, img_rect, uv, tint);
             return true;
         }
         return false;
@@ -473,18 +583,19 @@ fn draw_node_sprite(
             egui::pos2(effect_region.u_min, effect_region.v_min),
             egui::pos2(effect_region.u_max, effect_region.v_max),
         );
-        painter.image(effect_tex, effect_rect, effect_uv, egui::Color32::WHITE);
+        painter.image(effect_tex, effect_rect, effect_uv, tint);
     }
 
     // Draw the icon sprite — scale down slightly so square JPEG corners
     // are hidden behind the circular frame overlay
     let icon_half = half * 0.85;
-    let icon_rect = egui::Rect::from_center_size(screen_pos, egui::vec2(icon_half * 2.0, icon_half * 2.0));
+    let icon_rect =
+        egui::Rect::from_center_size(screen_pos, egui::vec2(icon_half * 2.0, icon_half * 2.0));
     let uv = egui::Rect::from_min_max(
         egui::pos2(region.u_min, region.v_min),
         egui::pos2(region.u_max, region.v_max),
     );
-    painter.image(texture_id, icon_rect, uv, egui::Color32::WHITE);
+    painter.image(texture_id, icon_rect, uv, tint);
 
     // Draw frame overlay
     let frame_region = get_frame_region(&atlas.frames, node);
@@ -506,7 +617,7 @@ fn draw_node_sprite(
             egui::pos2(frame.u_min, frame.v_min),
             egui::pos2(frame.u_max, frame.v_max),
         );
-        painter.image(frame_tex, frame_rect, frame_uv, egui::Color32::WHITE);
+        painter.image(frame_tex, frame_rect, frame_uv, tint);
     }
 
     true
@@ -570,7 +681,10 @@ fn node_type_color(node_type: NodeType) -> egui::Color32 {
 fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&TooltipHeaders>) {
     let frame = egui::Frame::NONE
         .fill(TOOLTIP_BG)
-        .stroke(egui::Stroke::new(TOOLTIP_BORDER_WIDTH, TOOLTIP_BORDER_COLOR))
+        .stroke(egui::Stroke::new(
+            TOOLTIP_BORDER_WIDTH,
+            TOOLTIP_BORDER_COLOR,
+        ))
         .inner_margin(egui::Margin::same(8));
 
     frame.show(ui, |ui| {
@@ -593,10 +707,7 @@ fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&Toolti
             let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
             // Left cap
-            let left_rect = egui::Rect::from_min_size(
-                header_rect.min,
-                egui::vec2(side_w, h),
-            );
+            let left_rect = egui::Rect::from_min_size(header_rect.min, egui::vec2(side_w, h));
             painter.image(strip.left.id(), left_rect, full_uv, egui::Color32::WHITE);
 
             // Tiled middle
@@ -636,7 +747,11 @@ fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&Toolti
                 header_rect.center().y - name_galley.size().y / 2.0,
             );
             painter.galley(text_pos, name_galley.clone(), egui::Color32::WHITE);
-            painter.galley(text_pos + egui::vec2(1.0, 0.0), name_galley, egui::Color32::WHITE);
+            painter.galley(
+                text_pos + egui::vec2(1.0, 0.0),
+                name_galley,
+                egui::Color32::WHITE,
+            );
         } else {
             // Fallback: plain text header
             let type_label = match node.node_type {
@@ -677,7 +792,10 @@ fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&Toolti
                     let short = oil_name.strip_suffix("Oil").unwrap_or(oil_name);
                     ui.label(egui::RichText::new(short).size(14.0).color(oil_color));
                     if let Some(tex) = headers.and_then(|h| h.oil_icons.get(oil_name.as_str())) {
-                        ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(icon_size, icon_size)));
+                        ui.image(egui::load::SizedTexture::new(
+                            tex.id(),
+                            egui::vec2(icon_size, icon_size),
+                        ));
                     }
                 }
             });
@@ -688,7 +806,9 @@ fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&Toolti
             ui.separator();
             for stat in &node.stats {
                 ui.label(
-                    egui::RichText::new(stat).size(16.0).color(egui::Color32::from_rgb(136, 136, 255)),
+                    egui::RichText::new(stat)
+                        .size(16.0)
+                        .color(egui::Color32::from_rgb(136, 136, 255)),
                 );
             }
         }
@@ -743,13 +863,13 @@ fn draw_class_start_background(
 ) {
     // class_id -> (asset suffix, tree x, tree y)
     let (suffix, tx, ty) = match tree.class_id {
-        1 => ("Str", -2750.0_f32, 1600.0_f32),      // Marauder
-        2 => ("Dex", 2550.0, 1600.0),                // Ranger
-        3 => ("Int", -250.0, -2200.0),                // Witch
-        4 => ("StrDex", -150.0, 2350.0),              // Duelist
-        5 => ("StrInt", -2100.0, -1500.0),            // Templar
-        6 => ("DexInt", 2350.0, -1950.0),             // Shadow
-        _ => return, // Scion (0) or unknown — no background
+        1 => ("Str", -2750.0_f32, 1600.0_f32), // Marauder
+        2 => ("Dex", 2550.0, 1600.0),          // Ranger
+        3 => ("Int", -250.0, -2200.0),         // Witch
+        4 => ("StrDex", -150.0, 2350.0),       // Duelist
+        5 => ("StrInt", -2100.0, -1500.0),     // Templar
+        6 => ("DexInt", 2350.0, -1950.0),      // Shadow
+        _ => return,                           // Scion (0) or unknown — no background
     };
 
     let Some(bg) = atlas.class_backgrounds.get(suffix) else {
@@ -784,8 +904,13 @@ fn draw_group_backgrounds(
             if let Some(name) = &group.ascendancy_name {
                 // Fall back to Ascendant art for regular ascendancies without their own image;
                 // bloodlines have no background art.
-                let bg = atlas.ascendancy_backgrounds.get(name.as_str())
-                    .or_else(|| if group.is_bloodline { None } else { atlas.ascendancy_backgrounds.get("Ascendant") });
+                let bg = atlas.ascendancy_backgrounds.get(name.as_str()).or_else(|| {
+                    if group.is_bloodline {
+                        None
+                    } else {
+                        atlas.ascendancy_backgrounds.get("Ascendant")
+                    }
+                });
                 if let Some(bg) = bg {
                     let screen_pos = camera.tree_to_screen(group.x, group.y, viewport);
                     let w = bg.width * 1.33 * camera.zoom;
@@ -794,10 +919,13 @@ fn draw_group_backgrounds(
                         egui::Rect::from_center_size(screen_pos, egui::vec2(w * 2.0, h * 2.0));
                     if img_rect.intersects(*visible_rect) {
                         if let Some(tex) = atlas.texture_id(bg.sheet_index) {
-                            let uv =
-                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            let uv = egui::Rect::from_min_max(
+                                egui::pos2(0.0, 0.0),
+                                egui::pos2(1.0, 1.0),
+                            );
                             // Dim non-selected ascendancies (upstream uses alpha 0.25)
-                            let is_selected = tree.ascendancy_name.as_deref() == Some(name.as_str());
+                            let is_selected =
+                                tree.ascendancy_name.as_deref() == Some(name.as_str());
                             let tint = if is_selected {
                                 egui::Color32::WHITE
                             } else {

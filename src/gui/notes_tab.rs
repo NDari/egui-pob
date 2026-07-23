@@ -13,18 +13,66 @@ struct ColorButton {
 }
 
 const COLOR_BUTTONS: &[ColorButton] = &[
-    ColorButton { label: "NORMAL",       code: "^xC8C8C8", display: egui::Color32::from_rgb(200, 200, 200) },
-    ColorButton { label: "MAGIC",        code: "^x8888FF", display: egui::Color32::from_rgb(136, 136, 255) },
-    ColorButton { label: "RARE",         code: "^xFFFF77", display: egui::Color32::from_rgb(255, 255, 119) },
-    ColorButton { label: "UNIQUE",       code: "^xAF6025", display: egui::Color32::from_rgb(175, 96, 37) },
-    ColorButton { label: "FIRE",         code: "^xB97123", display: egui::Color32::from_rgb(185, 113, 35) },
-    ColorButton { label: "COLD",         code: "^x3F6DB3", display: egui::Color32::from_rgb(63, 109, 179) },
-    ColorButton { label: "LIGHTNING",    code: "^xADAA47", display: egui::Color32::from_rgb(173, 170, 71) },
-    ColorButton { label: "CHAOS",        code: "^xD02090", display: egui::Color32::from_rgb(208, 32, 144) },
-    ColorButton { label: "STRENGTH",     code: "^xE05030", display: egui::Color32::from_rgb(224, 80, 48) },
-    ColorButton { label: "DEXTERITY",    code: "^x70FF70", display: egui::Color32::from_rgb(112, 255, 112) },
-    ColorButton { label: "INTELLIGENCE", code: "^x7070FF", display: egui::Color32::from_rgb(112, 112, 255) },
-    ColorButton { label: "DEFAULT",      code: "^7",       display: egui::Color32::from_rgb(230, 230, 230) },
+    ColorButton {
+        label: "NORMAL",
+        code: "^xC8C8C8",
+        display: egui::Color32::from_rgb(200, 200, 200),
+    },
+    ColorButton {
+        label: "MAGIC",
+        code: "^x8888FF",
+        display: egui::Color32::from_rgb(136, 136, 255),
+    },
+    ColorButton {
+        label: "RARE",
+        code: "^xFFFF77",
+        display: egui::Color32::from_rgb(255, 255, 119),
+    },
+    ColorButton {
+        label: "UNIQUE",
+        code: "^xAF6025",
+        display: egui::Color32::from_rgb(175, 96, 37),
+    },
+    ColorButton {
+        label: "FIRE",
+        code: "^xB97123",
+        display: egui::Color32::from_rgb(185, 113, 35),
+    },
+    ColorButton {
+        label: "COLD",
+        code: "^x3F6DB3",
+        display: egui::Color32::from_rgb(63, 109, 179),
+    },
+    ColorButton {
+        label: "LIGHTNING",
+        code: "^xADAA47",
+        display: egui::Color32::from_rgb(173, 170, 71),
+    },
+    ColorButton {
+        label: "CHAOS",
+        code: "^xD02090",
+        display: egui::Color32::from_rgb(208, 32, 144),
+    },
+    ColorButton {
+        label: "STRENGTH",
+        code: "^xE05030",
+        display: egui::Color32::from_rgb(224, 80, 48),
+    },
+    ColorButton {
+        label: "DEXTERITY",
+        code: "^x70FF70",
+        display: egui::Color32::from_rgb(112, 255, 112),
+    },
+    ColorButton {
+        label: "INTELLIGENCE",
+        code: "^x7070FF",
+        display: egui::Color32::from_rgb(112, 112, 255),
+    },
+    ColorButton {
+        label: "DEFAULT",
+        code: "^7",
+        display: egui::Color32::from_rgb(230, 230, 230),
+    },
 ];
 
 pub struct NotesPanel {
@@ -58,7 +106,9 @@ impl NotesPanel {
         // Color code buttons in a grid (4 per row)
         ui.horizontal_wrapped(|ui| {
             for btn in COLOR_BUTTONS {
-                let rich = egui::RichText::new(btn.label).color(btn.display).monospace();
+                let rich = egui::RichText::new(btn.label)
+                    .color(btn.display)
+                    .monospace();
                 if ui.button(rich).clicked() {
                     self.apply_color(btn.code);
                     changed = true;

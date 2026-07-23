@@ -1,6 +1,7 @@
 //! Rust-side data structures for marshaled Lua data.
 
 pub mod build_list;
+pub mod calcs;
 pub mod config;
 pub mod items;
 pub mod skills;

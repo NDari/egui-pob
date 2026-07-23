@@ -115,6 +115,355 @@ fn test_node_allocation_changes_stats() {
 }
 
 // ---------------------------------------------------------------------------
+// Mastery effect selection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_mastery_effect_selection_roundtrip() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+
+    // Find an unallocated, reachable mastery node with selectable effects
+    let node_id: u32 = bridge
+        .lua()
+        .load(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            spec:BuildAllDependsAndPaths()
+            for id, node in pairs(spec.nodes) do
+                if not spec.allocNodes[id]
+                   and node.type == "Mastery"
+                   and node.masteryEffects
+                   and node.path and #node.path > 0 then
+                    return id
+                end
+            end
+            return 0
+        "#,
+        )
+        .eval()
+        .expect("failed to find a mastery node");
+    assert!(node_id > 0, "should find an unallocated mastery node");
+
+    // Fetch its effects
+    let list = pob_egui::data::tree::fetch_mastery_effects(bridge.lua(), node_id)
+        .expect("failed to fetch mastery effects")
+        .expect("mastery node should have selectable effects");
+    assert!(!list.node_name.is_empty(), "mastery should have a name");
+    assert!(!list.effects.is_empty(), "should have at least one effect");
+    assert!(list.current.is_none(), "no effect selected yet");
+    for effect in &list.effects {
+        assert!(effect.id > 0, "effect id should be positive");
+        assert!(!effect.label.is_empty(), "effect label should not be empty");
+    }
+    println!(
+        "Mastery {node_id} ({}): {} effects",
+        list.node_name,
+        list.effects.len()
+    );
+
+    // Select the first effect - node should become allocated with that effect
+    let effect_id = list.effects[0].id;
+    pob_egui::data::tree::select_mastery_effect(bridge.lua(), node_id, effect_id)
+        .expect("failed to select mastery effect");
+
+    let (is_alloc, selected): (bool, u32) = bridge
+        .lua()
+        .load(format!(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            return spec.allocNodes[{node_id}] ~= nil, spec.masterySelections[{node_id}] or 0
+        "#
+        ))
+        .eval()
+        .expect("failed to read selection state");
+    assert!(is_alloc, "mastery node should be allocated after selection");
+    assert_eq!(selected, effect_id, "selected effect should be recorded");
+
+    // Re-fetching should report the current selection
+    let list2 = pob_egui::data::tree::fetch_mastery_effects(bridge.lua(), node_id)
+        .expect("failed to re-fetch mastery effects")
+        .expect("should still have effects");
+    assert_eq!(list2.current, Some(effect_id));
+
+    // Refreshing mastery stats should give the node the selected effect's stats
+    let mut tree = TreeData::extract(bridge.lua()).expect("failed to extract tree");
+    tree.refresh_mastery_stats(bridge.lua())
+        .expect("failed to refresh mastery stats");
+    let node = tree.nodes.get(&node_id).expect("node should exist");
+    assert!(node.is_allocated, "extracted node should be allocated");
+    assert_eq!(
+        node.stats.join(" / "),
+        list.effects[0].label,
+        "node stats should match the selected effect"
+    );
+
+    // Deallocating should clear the mastery selection (Lua handles cleanup)
+    pob_egui::data::tree::toggle_node(bridge.lua(), node_id).expect("failed to toggle node");
+    let (is_alloc, selected): (bool, u32) = bridge
+        .lua()
+        .load(format!(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            return spec.allocNodes[{node_id}] ~= nil, spec.masterySelections[{node_id}] or 0
+        "#
+        ))
+        .eval()
+        .expect("failed to read selection state");
+    assert!(!is_alloc, "mastery node should be deallocated");
+    assert_eq!(
+        selected, 0,
+        "mastery selection should be cleared on dealloc"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Hover path/depends info and undo/redo
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_hover_info_and_undo_redo() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+
+    // Find an unallocated normal node reachable from the allocated tree.
+    // Paths should already be current from the build load (no explicit
+    // BuildAllDependsAndPaths) because the app relies on that too.
+    let node_id: u32 = bridge
+        .lua()
+        .load(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            for id, node in pairs(spec.nodes) do
+                if not spec.allocNodes[id]
+                   and node.type == "Normal"
+                   and not node.ascendancyName
+                   and node.path and #node.path > 0 then
+                    return id
+                end
+            end
+            return 0
+        "#,
+        )
+        .eval()
+        .expect("failed to find an unallocated node");
+    assert!(node_id > 0, "should find an unallocated reachable node");
+
+    // Unallocated: path leads to it, nothing depends on it
+    let info = pob_egui::data::tree::fetch_hover_info(bridge.lua(), node_id)
+        .expect("failed to fetch hover info");
+    assert!(
+        info.path.contains(&node_id),
+        "path should include the node itself"
+    );
+    assert!(
+        info.depends.is_empty(),
+        "unallocated node should have no dependents"
+    );
+
+    let alloc_count = |lua: &mlua::Lua| -> u32 {
+        lua.load(
+            r#"
+            local count = 0
+            for _ in pairs(mainObject_ref.main.modes['BUILD'].spec.allocNodes) do
+                count = count + 1
+            end
+            return count
+        "#,
+        )
+        .eval()
+        .expect("failed to count allocated nodes")
+    };
+
+    // Allocate it: it should now (at least) depend on itself
+    let before_count = alloc_count(bridge.lua());
+    pob_egui::data::tree::toggle_node(bridge.lua(), node_id).expect("failed to allocate");
+    let after_count = alloc_count(bridge.lua());
+    assert!(after_count > before_count, "allocation should add node(s)");
+
+    let info = pob_egui::data::tree::fetch_hover_info(bridge.lua(), node_id)
+        .expect("failed to fetch hover info after alloc");
+    assert!(
+        info.depends.contains(&node_id),
+        "allocated node should depend on itself"
+    );
+
+    // Undo restores the previous allocation state; redo reapplies it
+    pob_egui::data::tree::undo(bridge.lua()).expect("undo failed");
+    assert_eq!(
+        alloc_count(bridge.lua()),
+        before_count,
+        "undo should restore allocation count"
+    );
+    pob_egui::data::tree::redo(bridge.lua()).expect("redo failed");
+    assert_eq!(
+        alloc_count(bridge.lua()),
+        after_count,
+        "redo should reapply the allocation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tree search
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_tree_search_on_real_tree() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+
+    let tree = TreeData::extract(bridge.lua()).expect("failed to extract tree data");
+
+    // Common stat text should match plenty of nodes
+    let life_matches = tree.search_matches("life");
+    assert!(
+        life_matches.len() > 50,
+        "'life' should match many nodes, got {}",
+        life_matches.len()
+    );
+
+    // Multi-term search narrows results (AND semantics)
+    let narrowed = tree.search_matches("life mana");
+    assert!(
+        !narrowed.is_empty() && narrowed.len() < life_matches.len(),
+        "'life mana' should narrow the match set: {} vs {}",
+        narrowed.len(),
+        life_matches.len()
+    );
+
+    // oil: prefix matches nodes with anoint recipes (notables)
+    let oil_matches = tree.search_matches("oil:");
+    assert!(
+        !oil_matches.is_empty(),
+        "'oil:' should match nodes with anoint recipes"
+    );
+    for id in &oil_matches {
+        assert!(
+            !tree.nodes[id].recipe.is_empty(),
+            "oil: matches should all have recipes"
+        );
+    }
+
+    // Type search finds keystones
+    let keystones = tree.search_matches("keystone");
+    assert!(!keystones.is_empty(), "'keystone' should match keystones");
+
+    // Empty and garbage queries
+    assert!(tree.search_matches("").is_empty());
+    assert!(tree.search_matches("xyzzy_no_such_stat").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Calcs tab sections and breakdowns
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_calcs_sections_and_breakdown() {
+    use pob_egui::data::calcs::{self, BreakdownSection};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let sections = calcs::extract_sections(lua).expect("failed to extract calc sections");
+    assert!(
+        sections.len() > 5,
+        "should have many calc sections, got {}",
+        sections.len()
+    );
+
+    // Both layout groups should be present (offence and defence)
+    assert!(sections.iter().any(|s| s.group == 1), "group 1 missing");
+    assert!(sections.iter().any(|s| s.group >= 2), "group 2+ missing");
+
+    // Cells should have formatted, non-placeholder text
+    let mut cell_count = 0;
+    let mut breakdown_cell = None;
+    for section in &sections {
+        for sub in &section.subsections {
+            assert!(!sub.label.is_empty(), "subsection should have a label");
+            for row in &sub.rows {
+                for cell in &row.cells {
+                    if !cell.text.is_empty() {
+                        cell_count += 1;
+                        assert!(
+                            !cell.text.contains("{output:"),
+                            "cell text should be fully formatted: {}",
+                            cell.text
+                        );
+                        assert_ne!(cell.text, "?", "cell formatting errored");
+                    }
+                    if cell.has_breakdown && breakdown_cell.is_none() && !cell.text.is_empty() {
+                        breakdown_cell = Some((section.si, sub.ui, row.ri, cell.ci));
+                    }
+                }
+            }
+        }
+    }
+    assert!(cell_count > 50, "expected many cells, got {cell_count}");
+
+    // Fetch a breakdown for the first clickable cell
+    let (si, ui, ri, ci) = breakdown_cell.expect("should find a breakdown cell");
+    let breakdown = calcs::fetch_breakdown(lua, si, ui, ri, ci).expect("failed to fetch breakdown");
+    for section in &breakdown {
+        match section {
+            BreakdownSection::Text { lines } => {
+                assert!(!lines.is_empty());
+                for line in lines {
+                    assert!(
+                        !line.starts_with("Breakdown error"),
+                        "breakdown errored: {line}"
+                    );
+                }
+            }
+            BreakdownSection::Table { columns, rows, .. } => {
+                assert!(!columns.is_empty());
+                for row in rows {
+                    assert!(row.len() <= columns.len());
+                }
+            }
+        }
+    }
+
+    // Breakdown of the Life stat specifically (find a Life cell)
+    let mut life_breakdowns = 0;
+    'outer: for section in &sections {
+        for sub in &section.subsections {
+            for row in &sub.rows {
+                for cell in &row.cells {
+                    if cell.has_breakdown {
+                        let bd = calcs::fetch_breakdown(lua, section.si, sub.ui, row.ri, cell.ci)
+                            .expect("breakdown fetch failed");
+                        if !bd.is_empty() {
+                            life_breakdowns += 1;
+                            if life_breakdowns > 10 {
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        life_breakdowns > 5,
+        "several cells should produce non-empty breakdowns, got {life_breakdowns}"
+    );
+
+    // Input state and mode switching
+    let input = calcs::get_input(lua).expect("failed to get input");
+    assert_eq!(input.buff_mode, "EFFECTIVE");
+
+    calcs::set_buff_mode(lua, "UNBUFFED").expect("failed to set mode");
+    let input = calcs::get_input(lua).expect("failed to get input");
+    assert_eq!(input.buff_mode, "UNBUFFED");
+
+    // Sections should still extract fine after a mode change
+    let sections2 = calcs::extract_sections(lua).expect("re-extract failed");
+    assert!(!sections2.is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // Items extraction
 // ---------------------------------------------------------------------------
 
@@ -163,6 +512,77 @@ fn test_items_extraction() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Skills editing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_skills_editing_roundtrip() {
+    use pob_egui::data::skills::{self, GemProperty};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let initial = skills::extract_skills(lua).expect("failed to extract skills");
+    let initial_count = initial.len();
+
+    // Create a new empty socket group
+    skills::new_socket_group(lua).expect("failed to create group");
+    let groups = skills::extract_skills(lua).expect("failed to re-extract");
+    assert_eq!(groups.len(), initial_count + 1, "group should be added");
+    let group_index = groups.last().unwrap().index;
+    assert!(groups.last().unwrap().gems.is_empty());
+    assert!(!groups.last().unwrap().from_item);
+
+    // Add a gem by exact name (resolved by Lua's FindSkillGem)
+    let err = skills::add_gem(lua, group_index, "Fireball").expect("add_gem call failed");
+    assert!(err.is_none(), "Fireball should resolve: {err:?}");
+
+    // Unknown names are rejected and the gem is not added
+    let err = skills::add_gem(lua, group_index, "Zzzzqqqx").expect("add_gem call failed");
+    assert!(err.is_some(), "nonsense gem name should error");
+
+    let groups = skills::extract_skills(lua).expect("failed to re-extract");
+    let group = groups.last().unwrap();
+    assert_eq!(group.gems.len(), 1, "only the valid gem should be added");
+    assert_eq!(group.gems[0].name, "Fireball");
+    assert!(group.gems[0].level >= 1);
+
+    // Edit level, quality, and enabled state
+    skills::set_gem_property(lua, group_index, 1, GemProperty::Level(15))
+        .expect("failed to set level");
+    skills::set_gem_property(lua, group_index, 1, GemProperty::Quality(20))
+        .expect("failed to set quality");
+    skills::set_gem_property(lua, group_index, 1, GemProperty::Enabled(false))
+        .expect("failed to disable gem");
+    let groups = skills::extract_skills(lua).expect("failed to re-extract");
+    let gem = &groups.last().unwrap().gems[0];
+    assert_eq!(gem.level, 15);
+    assert_eq!(gem.quality, 20);
+    assert!(!gem.enabled);
+
+    // Label and group enabled state
+    skills::set_group_label(lua, group_index, "Test Group").expect("failed to set label");
+    skills::set_group_enabled(lua, group_index, false).expect("failed to disable group");
+    let groups = skills::extract_skills(lua).expect("failed to re-extract");
+    let group = groups.last().unwrap();
+    assert_eq!(group.label, "Test Group");
+    assert!(!group.enabled);
+
+    // Remove the gem
+    skills::remove_gem(lua, group_index, 1).expect("failed to remove gem");
+    let groups = skills::extract_skills(lua).expect("failed to re-extract");
+    assert!(groups.last().unwrap().gems.is_empty());
+
+    // Delete the group; main socket group index must stay valid
+    skills::delete_socket_group(lua, group_index).expect("failed to delete group");
+    let groups = skills::extract_skills(lua).expect("failed to re-extract");
+    assert_eq!(groups.len(), initial_count, "group should be deleted");
+    let main_count = groups.iter().filter(|g| g.is_main).count();
+    assert_eq!(main_count, 1, "main socket group should still be valid");
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +673,11 @@ fn test_group_backgrounds_only_where_tree_data_defines_them() {
         .eval()
         .expect("failed to count Lua groups");
 
-    let rust_with_bg = tree.groups.iter().filter(|g| g.background.is_some()).count() as u32;
+    let rust_with_bg = tree
+        .groups
+        .iter()
+        .filter(|g| g.background.is_some())
+        .count() as u32;
     let rust_total = tree.groups.len() as u32;
 
     println!("Lua:  {lua_with_bg}/{lua_total} groups have backgrounds");
@@ -291,11 +715,7 @@ fn test_ascendancy_start_groups_extracted() {
 
     let tree = TreeData::extract(bridge.lua()).expect("failed to extract tree data");
 
-    let ascendancy_groups: Vec<_> = tree
-        .groups
-        .iter()
-        .filter(|g| g.is_ascendancy)
-        .collect();
+    let ascendancy_groups: Vec<_> = tree.groups.iter().filter(|g| g.is_ascendancy).collect();
     let start_groups: Vec<_> = tree
         .groups
         .iter()
@@ -347,13 +767,23 @@ fn test_sprite_atlas_loads_backgrounds() {
         .join("src")
         .join("TreeData")
         .join(&version);
-    assert!(tree_data_dir.is_dir(), "tree data dir should exist: {}", tree_data_dir.display());
+    assert!(
+        tree_data_dir.is_dir(),
+        "tree data dir should exist: {}",
+        tree_data_dir.display()
+    );
 
-    let atlas = TreeSpriteAtlas::load(bridge.lua(), &tree_data_dir)
-        .expect("failed to load sprite atlas");
+    let atlas =
+        TreeSpriteAtlas::load(bridge.lua(), &tree_data_dir).expect("failed to load sprite atlas");
 
-    println!("Ascendancy backgrounds: {:?}", atlas.ascendancy_backgrounds.keys().collect::<Vec<_>>());
-    println!("Class backgrounds: {:?}", atlas.class_backgrounds.keys().collect::<Vec<_>>());
+    println!(
+        "Ascendancy backgrounds: {:?}",
+        atlas.ascendancy_backgrounds.keys().collect::<Vec<_>>()
+    );
+    println!(
+        "Class backgrounds: {:?}",
+        atlas.class_backgrounds.keys().collect::<Vec<_>>()
+    );
 
     assert!(
         !atlas.ascendancy_backgrounds.is_empty(),

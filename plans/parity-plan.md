@@ -69,25 +69,25 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Pan and zoom with mouse
 - [x] Zoom-to-cursor
 - [x] Visibility culling
-- [ ] Connector state coloring (path preview, intermediate, dependent)
-- [ ] Red highlight for dependent nodes (nodes that would disconnect)
-- [ ] Path preview line (shortest path to unallocated node on hover)
+- [x] Connector state coloring (path preview, intermediate, dependent)
+- [x] Red highlight for dependent nodes (nodes that would disconnect)
+- [x] Path preview line (shortest path to unallocated node on hover)
 
 ### Interaction
 - [x] Click to allocate/deallocate node
 - [x] Hover tooltip with stats, name, type, recipe, flavour text
 - [ ] Right-click context menu (jump to items for jewel sockets, modify node for tattoos)
-- [ ] Mastery popup (select mastery effect on click)
+- [x] Mastery popup (select mastery effect on click; right-click allocated mastery to change effect)
 - [ ] Shift+drag path tracing mode
 - [ ] Ascendancy node click → class/ascendancy switching with confirmation
 
 ### Search
-- [ ] Tree search bar (text search across node names and stats)
-- [ ] Highlighted search results (colored rings on matching nodes)
+- [x] Tree search bar (text search across node names, stats, and type)
+- [x] Highlighted search results (colored rings on matching nodes)
 - [ ] Lua pattern matching support
-- [ ] "oil:" prefix for anoint recipe search
-- [ ] Multi-term search (OR matching)
-- [ ] Ctrl+F to focus search
+- [x] "oil:" prefix for anoint recipe search
+- [x] Multi-term search (all terms must match, like upstream; quoted phrases supported)
+- [x] Ctrl+F to focus search
 
 ### Node Power
 - [ ] Show node power heatmap toggle
@@ -143,41 +143,41 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Fallback weight mode
 
 ### Undo/Redo
-- [ ] Ctrl+Z to undo tree changes
-- [ ] Ctrl+Y to redo
-- [ ] Undo state snapshots (nodes, masteries, jewels, overrides)
+- [x] Ctrl+Z to undo tree changes
+- [x] Ctrl+Y to redo
+- [x] Undo state snapshots (handled by Lua's UndoHandler; AddUndoState called on every change)
 
 ---
 
 ## 4. Skills Tab
 
 ### Socket Group Management
-- [~] Display socket groups with gems (read-only)
+- [x] Display socket groups with gems
 - [x] Main skill selection ("Set Main" button)
-- [ ] Create new socket group
-- [ ] Delete socket group (with confirmation if gems exist)
+- [x] Create new socket group
+- [x] Delete socket group (with confirmation if gems exist; item-granted groups protected)
 - [ ] Delete all socket groups
 - [ ] Reorder socket groups (drag and drop)
 - [ ] Copy/paste socket groups (Ctrl+C/V)
-- [ ] Enable/disable socket group (Ctrl+Click)
+- [x] Enable/disable socket group (checkbox)
 - [ ] Include/exclude from FullDPS (Ctrl+Right-Click)
-- [ ] Socket group label editing
+- [x] Socket group label editing
 - [ ] Socket group slot assignment (socketed in dropdown)
 - [ ] Socket group count multiplier
 
 ### Gem Management
-- [~] Display gem name, level, quality (read-only)
-- [ ] Add gem to socket group
-- [ ] Remove gem from socket group
+- [x] Display gem name, level, quality
+- [x] Add gem to socket group (text entry, fuzzy-matched by Lua's FindSkillGem; e.g. "CtF")
+- [x] Remove gem from socket group
 - [ ] Gem search/autocomplete (GemSelectControl)
   - [ ] Name search, tag search (`:tag`), exclusion (`-tag`)
   - [ ] Sort by DPS impact
   - [ ] Color-coded gem types (Str/Dex/Int)
   - [ ] Support relationship indicators (check mark)
-- [ ] Edit gem level
-- [ ] Edit gem quality
+- [x] Edit gem level
+- [x] Edit gem quality
 - [ ] Quality variant selection (Default, Anomalous, Divergent, Phantasmal)
-- [ ] Enable/disable individual gem
+- [x] Enable/disable individual gem
 - [ ] Gem count (for totems, minions, traps, mines)
 - [ ] Vaal gem global effect toggles
 
@@ -271,16 +271,16 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 ## 6. Calcs Tab
 
-- [ ] Calcs tab (full calculation breakdown display)
-- [ ] Socket group / active skill / skill part selectors
-- [ ] Calculation mode dropdown (Unbuffed, Buffed, In Combat, Effective DPS)
-- [ ] Expandable stat sections (Offense, Defense, etc.)
-- [ ] Click stat to show detailed breakdown
-- [ ] Breakdown panel (right side) with formula/steps
-- [ ] Pin breakdown to keep visible
-- [ ] Search bar for stat filtering (Ctrl+F)
-- [ ] Buff/debuff lists (auras, combat buffs, curses)
-- [ ] Show minion stats toggle
+- [x] Calcs tab (full calculation breakdown display, driven by upstream's CalcSections data)
+- [~] Socket group / active skill / skill part selectors (socket group done; active skill/part pending)
+- [x] Calculation mode dropdown (Unbuffed, Buffed, In Combat, Effective DPS)
+- [x] Expandable stat sections (Offense, Defense, etc.)
+- [x] Click stat to show detailed breakdown
+- [x] Breakdown panel (right side) with formula/steps, tables, and mod lists
+- [x] Pin breakdown to keep visible (breakdown stays open until closed)
+- [x] Search bar for stat filtering (Ctrl+F)
+- [x] Buff/debuff lists (auras, combat buffs, curses - via the View Skill Details section)
+- [x] Show minion stats toggle
 - [ ] Minion selection and skill dropdowns
 
 ---
@@ -396,9 +396,9 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 - [ ] Ctrl+S: Save build
 - [ ] Ctrl+W: Close build (with save prompt)
-- [ ] Ctrl+Z: Undo (context-dependent: tree, items, config)
-- [ ] Ctrl+Y: Redo
-- [ ] Ctrl+F: Focus search (tree, calcs, config)
+- [~] Ctrl+Z: Undo (tree done; items, config pending)
+- [~] Ctrl+Y: Redo (tree done; items, config pending)
+- [~] Ctrl+F: Focus search (tree, calcs done; config pending)
 - [ ] Ctrl+I: Open Import/Export
 - [ ] Ctrl+1-7: Switch tabs (Tree, Skills, Items, Calcs, Config, Notes, Party)
 - [ ] Ctrl+V: Paste item (in items tab)

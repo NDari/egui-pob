@@ -129,128 +129,128 @@ impl ConfigPanel {
         changed
     }
 
-    fn show_option(
-        &mut self,
-        ui: &mut egui::Ui,
-        bridge: &LuaBridge,
-        index: usize,
-    ) -> bool {
+    fn show_option(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge, index: usize) -> bool {
         let mut changed = false;
         let option = &mut self.options[index];
 
         // Grey out when ineligible and the user opted to see them.
         let ineligible = !option.is_visible();
 
-        let draw = |ui: &mut egui::Ui, option: &mut ConfigOption, changed: &mut bool| {
-            match option {
-                ConfigOption::Section { .. } => {}
-                ConfigOption::Check {
-                    var, label, value, tooltip, ..
-                } => {
-                    let resp = ui.checkbox(value, label.as_str());
-                    if let Some(t) = tooltip { resp.clone().on_hover_text(t.as_str()); }
-                    if resp.changed() {
-                        if let Err(e) =
-                            config::set_config_value(bridge.lua(), var, LuaValue::Boolean(*value))
-                        {
+        let draw = |ui: &mut egui::Ui, option: &mut ConfigOption, changed: &mut bool| match option {
+            ConfigOption::Section { .. } => {}
+            ConfigOption::Check {
+                var,
+                label,
+                value,
+                tooltip,
+                ..
+            } => {
+                let resp = ui.checkbox(value, label.as_str());
+                if let Some(t) = tooltip {
+                    resp.clone().on_hover_text(t.as_str());
+                }
+                if resp.changed() {
+                    if let Err(e) =
+                        config::set_config_value(bridge.lua(), var, LuaValue::Boolean(*value))
+                    {
+                        log::error!("Failed to set config {var}: {e}");
+                    } else {
+                        *changed = true;
+                    }
+                }
+            }
+            ConfigOption::Count {
+                var,
+                label,
+                value,
+                tooltip,
+                ..
+            } => {
+                ui.horizontal(|ui| {
+                    let lbl = ui.label(label.as_str());
+                    if let Some(t) = tooltip {
+                        lbl.on_hover_text(t.as_str());
+                    }
+                    let response = ui.add(egui::TextEdit::singleline(value).desired_width(80.0));
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let lua_val = if let Ok(n) = value.parse::<f64>() {
+                            LuaValue::Number(n)
+                        } else {
+                            LuaValue::Number(0.0)
+                        };
+                        if let Err(e) = config::set_config_value(bridge.lua(), var, lua_val) {
                             log::error!("Failed to set config {var}: {e}");
                         } else {
                             *changed = true;
                         }
                     }
-                }
-                ConfigOption::Count {
-                    var, label, value, tooltip, ..
-                } => {
-                    ui.horizontal(|ui| {
-                        let lbl = ui.label(label.as_str());
-                        if let Some(t) = tooltip { lbl.on_hover_text(t.as_str()); }
-                        let response =
-                            ui.add(egui::TextEdit::singleline(value).desired_width(80.0));
-                        if response.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        {
-                            let lua_val = if let Ok(n) = value.parse::<f64>() {
-                                LuaValue::Number(n)
-                            } else {
-                                LuaValue::Number(0.0)
-                            };
-                            if let Err(e) =
-                                config::set_config_value(bridge.lua(), var, lua_val)
-                            {
-                                log::error!("Failed to set config {var}: {e}");
-                            } else {
-                                *changed = true;
-                            }
-                        }
-                    });
-                }
-                ConfigOption::List {
-                    var,
-                    label,
-                    options,
-                    selected_index,
-                    tooltip,
-                    ..
-                } => {
-                    ui.horizontal(|ui| {
-                        let lbl = ui.label(label.as_str());
-                        if let Some(t) = tooltip { lbl.on_hover_text(t.as_str()); }
-                        let current_label = options
-                            .get(*selected_index)
-                            .map(|e| e.label.as_str())
-                            .unwrap_or("—");
-                        egui::ComboBox::from_id_salt(var.as_str())
-                            .selected_text(current_label)
-                            .show_ui(ui, |ui| {
-                                for (i, entry) in options.iter().enumerate() {
-                                    if ui
-                                        .selectable_label(i == *selected_index, &entry.label)
-                                        .clicked()
+                });
+            }
+            ConfigOption::List {
+                var,
+                label,
+                options,
+                selected_index,
+                tooltip,
+                ..
+            } => {
+                ui.horizontal(|ui| {
+                    let lbl = ui.label(label.as_str());
+                    if let Some(t) = tooltip {
+                        lbl.on_hover_text(t.as_str());
+                    }
+                    let current_label = options
+                        .get(*selected_index)
+                        .map(|e| e.label.as_str())
+                        .unwrap_or("—");
+                    egui::ComboBox::from_id_salt(var.as_str())
+                        .selected_text(current_label)
+                        .show_ui(ui, |ui| {
+                            for (i, entry) in options.iter().enumerate() {
+                                if ui
+                                    .selectable_label(i == *selected_index, &entry.label)
+                                    .clicked()
+                                {
+                                    *selected_index = i;
+                                    let lua_val = kind_to_lua_value(bridge.lua(), &entry.val);
+                                    if let Err(e) =
+                                        config::set_config_value(bridge.lua(), var, lua_val)
                                     {
-                                        *selected_index = i;
-                                        let lua_val =
-                                            kind_to_lua_value(bridge.lua(), &entry.val);
-                                        if let Err(e) = config::set_config_value(
-                                            bridge.lua(),
-                                            var,
-                                            lua_val,
-                                        ) {
-                                            log::error!("Failed to set config {var}: {e}");
-                                        } else {
-                                            *changed = true;
-                                        }
+                                        log::error!("Failed to set config {var}: {e}");
+                                    } else {
+                                        *changed = true;
                                     }
                                 }
-                            });
-                    });
-                }
-                ConfigOption::Text {
-                    var, label, value, tooltip, ..
-                } => {
-                    ui.horizontal(|ui| {
-                        let lbl = ui.label(label.as_str());
-                        if let Some(t) = tooltip { lbl.on_hover_text(t.as_str()); }
-                        let response =
-                            ui.add(egui::TextEdit::singleline(value).desired_width(200.0));
-                        if response.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        {
-                            let lua_val = bridge
-                                .lua()
-                                .create_string(value.as_str())
-                                .map(LuaValue::String)
-                                .unwrap_or(LuaValue::Nil);
-                            if let Err(e) =
-                                config::set_config_value(bridge.lua(), var, lua_val)
-                            {
-                                log::error!("Failed to set config {var}: {e}");
-                            } else {
-                                *changed = true;
                             }
+                        });
+                });
+            }
+            ConfigOption::Text {
+                var,
+                label,
+                value,
+                tooltip,
+                ..
+            } => {
+                ui.horizontal(|ui| {
+                    let lbl = ui.label(label.as_str());
+                    if let Some(t) = tooltip {
+                        lbl.on_hover_text(t.as_str());
+                    }
+                    let response = ui.add(egui::TextEdit::singleline(value).desired_width(200.0));
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let lua_val = bridge
+                            .lua()
+                            .create_string(value.as_str())
+                            .map(LuaValue::String)
+                            .unwrap_or(LuaValue::Nil);
+                        if let Err(e) = config::set_config_value(bridge.lua(), var, lua_val) {
+                            log::error!("Failed to set config {var}: {e}");
+                        } else {
+                            *changed = true;
                         }
-                    });
-                }
+                    }
+                });
             }
         };
 
@@ -274,7 +274,10 @@ fn group_by_section(options: &[ConfigOption]) -> Vec<(String, Vec<usize>)> {
     for (i, option) in options.iter().enumerate() {
         if let ConfigOption::Section { label } = option {
             if !current_indices.is_empty() || !current_section.is_empty() {
-                groups.push((current_section.clone(), std::mem::take(&mut current_indices)));
+                groups.push((
+                    current_section.clone(),
+                    std::mem::take(&mut current_indices),
+                ));
             }
             current_section = label.clone();
         } else {

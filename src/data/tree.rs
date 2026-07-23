@@ -107,12 +107,12 @@ impl NodeType {
     pub fn radius(self) -> f32 {
         // Half of artWidth * 1.33, matching upstream PoB's nodeOverlay sizes
         match self {
-            NodeType::Normal => 26.6,        // 40 * 1.33 / 2
-            NodeType::Notable => 38.6,       // 58 * 1.33 / 2
-            NodeType::Keystone => 55.9,      // 84 * 1.33 / 2
-            NodeType::Socket => 38.6,        // 58 * 1.33 / 2
-            NodeType::Mastery => 43.2,       // 65 * 1.33 / 2
-            NodeType::ClassStart => 55.9,    // same as Keystone
+            NodeType::Normal => 26.6,           // 40 * 1.33 / 2
+            NodeType::Notable => 38.6,          // 58 * 1.33 / 2
+            NodeType::Keystone => 55.9,         // 84 * 1.33 / 2
+            NodeType::Socket => 38.6,           // 58 * 1.33 / 2
+            NodeType::Mastery => 43.2,          // 65 * 1.33 / 2
+            NodeType::ClassStart => 55.9,       // same as Keystone
             NodeType::AscendClassStart => 38.6, // same as Notable
         }
     }
@@ -403,6 +403,67 @@ impl TreeData {
         })
     }
 
+    /// Refresh stats and reminder text for mastery nodes. Their `sd` changes
+    /// when an effect is selected or the node is deallocated (Lua resets it
+    /// to the full option list).
+    pub fn refresh_mastery_stats(&mut self, lua: &Lua) -> Result<(), mlua::Error> {
+        let table: LuaTable = lua
+            .load(
+                r#"
+                local result = {}
+                for id, node in pairs(mainObject_ref.main.modes['BUILD'].spec.nodes) do
+                    if node.type == "Mastery" then
+                        result[id] = { sd = node.sd, reminderText = node.reminderText }
+                    end
+                end
+                return result
+            "#,
+            )
+            .eval()?;
+        for pair in table.pairs::<LuaValue, LuaTable>() {
+            let (key, t) = pair?;
+            let Some(id) = lua_value_to_u32(&key) else {
+                continue;
+            };
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.stats = read_string_list(&t, "sd");
+                node.reminder_text = read_string_list(&t, "reminderText");
+            }
+        }
+        Ok(())
+    }
+
+    /// Find nodes matching a search query, mirroring upstream's search semantics:
+    /// terms are split on whitespace (quoted phrases stay together) and a node
+    /// matches when every term matches its name, a stat line, or its type.
+    /// An `oil:` first term switches to anoint-recipe matching.
+    pub fn search_matches(&self, query: &str) -> HashSet<u32> {
+        let query = query.to_lowercase();
+        let terms = parse_search_terms(&query);
+        let mut out = HashSet::new();
+        if terms.is_empty() {
+            return out;
+        }
+        let oil_mode = terms[0] == "oil:";
+        for node in self.nodes.values() {
+            if matches!(
+                node.node_type,
+                NodeType::ClassStart | NodeType::AscendClassStart
+            ) {
+                continue;
+            }
+            let matched = if oil_mode {
+                node_matches_oil(node, &terms[1..])
+            } else {
+                node_matches(node, &terms)
+            };
+            if matched {
+                out.insert(node.id);
+            }
+        }
+        out
+    }
+
     /// Refresh allocation state from Lua (after a node toggle).
     pub fn refresh_allocation(&mut self, lua: &Lua) -> Result<(), mlua::Error> {
         let alloc_nodes: LuaTable = lua
@@ -424,6 +485,194 @@ impl TreeData {
 
         Ok(())
     }
+}
+
+/// Hover pathing info for one node: the shortest path to reach it (if
+/// unallocated) and the nodes that depend on it (if allocated). Kept current
+/// by Lua's BuildAllDependsAndPaths, which runs on every alloc change.
+#[derive(Debug, Clone, Default)]
+pub struct HoverInfo {
+    /// Nodes on the shortest path from the allocated tree to this node.
+    pub path: HashSet<u32>,
+    /// Allocated nodes that would disconnect if this node were deallocated.
+    pub depends: HashSet<u32>,
+}
+
+/// Fetch path and dependency info for a node from Lua.
+pub fn fetch_hover_info(lua: &Lua, node_id: u32) -> Result<HoverInfo, mlua::Error> {
+    let result: LuaTable = lua
+        .load(format!(
+            r#"
+            local node = mainObject_ref.main.modes['BUILD'].spec.nodes[{node_id}]
+            local path, depends = {{}}, {{}}
+            if node then
+                local leap = node.intuitiveLeapLikesAffecting
+                if node.path and (leap == nil or #leap == 0) then
+                    for _, p in ipairs(node.path) do
+                        table.insert(path, p.id)
+                    end
+                end
+                if node.depends then
+                    for _, d in ipairs(node.depends) do
+                        table.insert(depends, d.id)
+                    end
+                end
+            end
+            return {{ path = path, depends = depends }}
+        "#
+        ))
+        .eval()?;
+
+    let read_ids = |key: &str| -> Result<HashSet<u32>, mlua::Error> {
+        let list: LuaTable = result.get(key)?;
+        Ok(list.sequence_values::<u32>().flatten().collect())
+    };
+    Ok(HoverInfo {
+        path: read_ids("path")?,
+        depends: read_ids("depends")?,
+    })
+}
+
+/// Undo the last tree change (Ctrl+Z).
+pub fn undo(lua: &Lua) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.spec:Undo()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .exec()
+}
+
+/// Redo the last undone tree change (Ctrl+Y).
+pub fn redo(lua: &Lua) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.spec:Redo()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .exec()
+}
+
+/// One selectable mastery effect.
+#[derive(Debug, Clone)]
+pub struct MasteryEffect {
+    pub id: u32,
+    pub label: String,
+}
+
+/// The selectable mastery effects for a node, plus the currently assigned one.
+#[derive(Debug, Clone)]
+pub struct MasteryEffectList {
+    pub node_name: String,
+    pub effects: Vec<MasteryEffect>,
+    /// Effect currently selected on this node, if any.
+    pub current: Option<u32>,
+}
+
+/// Toggle a node allocation in Lua and trigger recalc.
+pub fn toggle_node(lua: &Lua, node_id: u32) -> Result<(), mlua::Error> {
+    lua.load(format!(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        local spec = build.spec
+        local node = spec.nodes[{node_id}]
+        if node then
+            if spec.allocNodes[{node_id}] then
+                spec:DeallocNode(node)
+            else
+                spec:AllocNode(node)
+            end
+            spec:AddUndoState()
+            build.buildFlag = true
+            _runCallback('OnFrame')
+        end
+    "#
+    ))
+    .exec()
+}
+
+/// Fetch the selectable mastery effects for a node. Effects already assigned
+/// to a different mastery node are excluded (matching upstream's
+/// OpenMasteryPopup). Returns None if the node has no selectable effects.
+pub fn fetch_mastery_effects(
+    lua: &Lua,
+    node_id: u32,
+) -> Result<Option<MasteryEffectList>, mlua::Error> {
+    let result: LuaTable = lua
+        .load(format!(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            local node = spec.nodes[{node_id}]
+            local result = {{ effects = {{}} }}
+            if node and node.masteryEffects then
+                result.name = node.name
+                result.current = spec.masterySelections[{node_id}]
+                for _, effect in pairs(node.masteryEffects) do
+                    local assigned = isValueInTable(spec.masterySelections, effect.effect)
+                    if not assigned or assigned == {node_id} then
+                        table.insert(result.effects, {{
+                            id = effect.effect,
+                            label = table.concat(effect.stats, " / "),
+                        }})
+                    end
+                end
+            end
+            return result
+        "#
+        ))
+        .eval()?;
+
+    let effects_table: LuaTable = result.get("effects")?;
+    let mut effects = Vec::new();
+    for entry in effects_table.sequence_values::<LuaTable>() {
+        let t = entry?;
+        effects.push(MasteryEffect {
+            id: t.get("id")?,
+            label: t.get("label")?,
+        });
+    }
+    if effects.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(MasteryEffectList {
+        node_name: result.get::<String>("name").unwrap_or_default(),
+        effects,
+        current: result.get("current").ok(),
+    }))
+}
+
+/// Apply a mastery effect selection and allocate the node - a port of
+/// upstream's TreeTab:SaveMasteryPopup.
+pub fn select_mastery_effect(lua: &Lua, node_id: u32, effect_id: u32) -> Result<(), mlua::Error> {
+    lua.load(format!(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        local spec = build.spec
+        local node = spec.nodes[{node_id}]
+        local effect = spec.tree.masteryEffects[{effect_id}]
+        if node and effect then
+            node.sd = effect.sd
+            node.allMasteryOptions = false
+            node.reminderText = {{ "Tip: Right click to select a different effect" }}
+            spec.tree:ProcessStats(node)
+            spec.masterySelections[{node_id}] = effect.id
+            if not node.alloc then
+                spec:AllocNode(node)
+            end
+            spec:AddUndoState()
+            build.buildFlag = true
+            _runCallback('OnFrame')
+        end
+    "#
+    ))
+    .exec()
 }
 
 fn lua_value_to_u32(val: &LuaValue) -> Option<u32> {
@@ -454,4 +703,145 @@ fn read_string_list(table: &LuaTable, key: &str) -> Vec<String> {
     list.sequence_values::<String>()
         .filter_map(|r| r.ok())
         .collect()
+}
+
+/// Split a (lowercased) search query into terms: quoted phrases first, then
+/// bare whitespace-separated words.
+fn parse_search_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut rest = String::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    for c in query.chars() {
+        if c == '"' {
+            if in_quote {
+                if !cur.is_empty() {
+                    terms.push(std::mem::take(&mut cur));
+                }
+                in_quote = false;
+            } else {
+                in_quote = true;
+            }
+        } else if in_quote {
+            cur.push(c);
+        } else {
+            rest.push(c);
+        }
+    }
+    if in_quote && !cur.is_empty() {
+        terms.push(cur);
+    }
+    terms.extend(rest.split_whitespace().map(str::to_string));
+    terms
+}
+
+fn node_search_type(node_type: NodeType) -> &'static str {
+    match node_type {
+        NodeType::Normal => "normal",
+        NodeType::Notable => "notable",
+        NodeType::Keystone => "keystone",
+        NodeType::Socket => "socket",
+        NodeType::Mastery => "mastery",
+        NodeType::ClassStart | NodeType::AscendClassStart => "",
+    }
+}
+
+fn node_matches(node: &TreeNode, terms: &[String]) -> bool {
+    let name = node.name.to_lowercase();
+    let type_str = node_search_type(node.node_type);
+    terms.iter().all(|t| {
+        name.contains(t.as_str())
+            || type_str.contains(t.as_str())
+            || node
+                .stats
+                .iter()
+                .any(|s| s.to_lowercase().contains(t.as_str()))
+    })
+}
+
+fn node_matches_oil(node: &TreeNode, terms: &[String]) -> bool {
+    if node.recipe.is_empty() {
+        return false;
+    }
+    let oils: Vec<String> = node
+        .recipe
+        .iter()
+        .map(|r| r.replace("Oil", "").to_lowercase())
+        .collect();
+    terms
+        .iter()
+        .all(|t| oils.iter().any(|o| o.contains(t.as_str())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_node(name: &str, node_type: NodeType, stats: &[&str], recipe: &[&str]) -> TreeNode {
+        TreeNode {
+            id: 1,
+            name: name.to_string(),
+            x: 0.0,
+            y: 0.0,
+            node_type,
+            icon: String::new(),
+            inactive_icon: None,
+            active_icon: None,
+            active_effect_image: None,
+            group_x: 0.0,
+            group_y: 0.0,
+            orbit: 0,
+            group_max_orbit: 0,
+            stats: stats.iter().map(|s| s.to_string()).collect(),
+            ascendancy_name: None,
+            is_allocated: false,
+            start_art: None,
+            reminder_text: Vec::new(),
+            recipe: recipe.iter().map(|s| s.to_string()).collect(),
+            flavour_text: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn parse_terms_words_and_phrases() {
+        assert_eq!(parse_search_terms("fire damage"), vec!["fire", "damage"]);
+        assert_eq!(
+            parse_search_terms("\"maximum life\" fire"),
+            vec!["maximum life", "fire"]
+        );
+        assert!(parse_search_terms("  ").is_empty());
+    }
+
+    #[test]
+    fn match_requires_all_terms() {
+        let node = make_node(
+            "Heart of Flame",
+            NodeType::Notable,
+            &["10% increased Fire Damage", "+10 to maximum Life"],
+            &[],
+        );
+        let terms = |q: &str| parse_search_terms(&q.to_lowercase());
+        assert!(node_matches(&node, &terms("fire life")));
+        assert!(node_matches(&node, &terms("heart notable")));
+        assert!(!node_matches(&node, &terms("fire cold")));
+        assert!(node_matches(&node, &terms("\"maximum life\"")));
+        assert!(!node_matches(&node, &terms("\"maximum fire\"")));
+    }
+
+    #[test]
+    fn oil_prefix_matches_recipe() {
+        let node = make_node(
+            "Heart of Flame",
+            NodeType::Notable,
+            &[],
+            &["CrimsonOil", "GoldenOil"],
+        );
+        let terms = |q: &str| parse_search_terms(&q.to_lowercase());
+        // "oil:" alone matches any node with a recipe
+        assert!(node_matches_oil(&node, &terms("oil:")[1..]));
+        assert!(node_matches_oil(&node, &terms("oil: golden")[1..]));
+        assert!(!node_matches_oil(&node, &terms("oil: silver")[1..]));
+        let no_recipe = make_node("Other", NodeType::Notable, &[], &[]);
+        assert!(!node_matches_oil(&no_recipe, &terms("oil:")[1..]));
+    }
 }

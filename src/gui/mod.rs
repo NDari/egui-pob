@@ -2,6 +2,7 @@
 
 mod build_list;
 mod build_view;
+mod calcs_tab;
 mod config_tab;
 mod import_tab;
 mod items_tab;
@@ -222,10 +223,7 @@ pub fn show_stat_table(ui: &mut egui::Ui, output: &CalcOutput) {
                     let text = format_stat_value(stat, *value);
                     let color = stat_value_color(stat);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(text).color(color))
-                                .truncate(),
-                        );
+                        ui.add(egui::Label::new(egui::RichText::new(text).color(color)).truncate());
                     });
                     ui.end_row();
                 }
