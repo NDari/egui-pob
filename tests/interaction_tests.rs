@@ -36,11 +36,11 @@ fn test_config_change_triggers_recalc() {
     // Compare all stats — at least one should change when removing resistance penalty
     let mut any_changed = false;
     for (stat, before_val) in &before.stats {
-        if let Some(after_val) = after.stats.get(stat) {
-            if (after_val - before_val).abs() > 0.001 {
-                println!("  {stat}: {before_val} -> {after_val}");
-                any_changed = true;
-            }
+        if let Some(after_val) = after.stats.get(stat)
+            && (after_val - before_val).abs() > 0.001
+        {
+            println!("  {stat}: {before_val} -> {after_val}");
+            any_changed = true;
         }
     }
 
@@ -100,11 +100,11 @@ fn test_node_allocation_changes_stats() {
     // Compare all stats — at least one should change
     let mut any_changed = false;
     for (stat, before_val) in &before.stats {
-        if let Some(after_val) = after.stats.get(stat) {
-            if (after_val - before_val).abs() > 0.001 {
-                println!("  {stat}: {before_val} -> {after_val}");
-                any_changed = true;
-            }
+        if let Some(after_val) = after.stats.get(stat)
+            && (after_val - before_val).abs() > 0.001
+        {
+            println!("  {stat}: {before_val} -> {after_val}");
+            any_changed = true;
         }
     }
 
@@ -801,4 +801,180 @@ fn test_sprite_atlas_loads_backgrounds() {
         atlas.class_backgrounds.contains_key("Str"),
         "should have Str (Marauder) class background"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Item management: parse raw, add, equip, tooltip, delete
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_item_management_roundtrip() {
+    use pob_egui::data::items;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Item list extraction
+    let initial_list = items::extract_item_list(lua).expect("failed to extract item list");
+    assert!(!initial_list.is_empty(), "test build should have items");
+    let initial_count = initial_list.len();
+    for entry in &initial_list {
+        assert!(entry.id > 0);
+        assert!(!entry.name.is_empty());
+    }
+
+    // Equipped slots should expose valid-item choices including the equipped item
+    let equipped = items::extract_equipped_items(lua).expect("failed to extract equipped");
+    let slot = equipped
+        .iter()
+        .find(|s| s.sel_item_id > 0 && !s.valid_items.is_empty())
+        .expect("an equipped slot with choices");
+    assert!(
+        slot.valid_items.iter().any(|c| c.id == slot.sel_item_id),
+        "equipped item should be a valid choice for its own slot"
+    );
+
+    // Full upstream tooltip for an equipped item
+    let tooltip = items::item_tooltip_lines(lua, slot.sel_item_id, Some(&slot.slot_name))
+        .expect("tooltip generation failed");
+    assert!(
+        tooltip.iter().filter(|l| !l.text.is_empty()).count() >= 2,
+        "tooltip should have several text lines, got {tooltip:?}"
+    );
+
+    // Nonsense text is rejected
+    let err = items::add_item_from_raw(lua, "not an item at all").expect("call failed");
+    assert!(err.is_some(), "nonsense item text should be rejected");
+    let list = items::extract_item_list(lua).expect("re-extract failed");
+    assert_eq!(list.len(), initial_count, "rejected item must not be added");
+
+    // Add a rare ring via upstream's Item:ParseRaw
+    let raw =
+        "Rarity: RARE\nParity Test Ring\nRuby Ring\n+50 to maximum Life\n+30% to Fire Resistance";
+    let err = items::add_item_from_raw(lua, raw).expect("call failed");
+    assert!(err.is_none(), "valid item should parse: {err:?}");
+    let list = items::extract_item_list(lua).expect("re-extract failed");
+    assert_eq!(list.len(), initial_count + 1, "item should be added");
+    let new_item = list
+        .iter()
+        .find(|e| e.name.contains("Parity Test Ring"))
+        .expect("new item should be in the list");
+    assert_eq!(new_item.rarity, "RARE");
+
+    // Make the comparison deterministic: unequip the new ring from wherever
+    // auto-equip put it, and empty Ring 1
+    let equipped = items::extract_equipped_items(lua).expect("re-extract equipped failed");
+    for slot in &equipped {
+        if slot.sel_item_id == new_item.id {
+            items::equip_item(lua, &slot.slot_name, 0).expect("clear auto-equip failed");
+        }
+    }
+    items::equip_item(lua, "Ring 1", 0).expect("clear Ring 1 failed");
+
+    // Equip it in Ring 1 and verify the stat change shows up
+    let life_before = pob_egui::data::CalcOutput::extract(lua)
+        .expect("calc extract failed")
+        .stats
+        .get("Life")
+        .copied()
+        .unwrap_or(0.0);
+    items::equip_item(lua, "Ring 1", new_item.id).expect("equip failed");
+    let equipped = items::extract_equipped_items(lua).expect("re-extract equipped failed");
+    let ring1 = equipped
+        .iter()
+        .find(|s| s.slot_name == "Ring 1")
+        .expect("Ring 1 slot");
+    assert_eq!(ring1.sel_item_id, new_item.id, "ring should be equipped");
+    let life_after = pob_egui::data::CalcOutput::extract(lua)
+        .expect("calc extract failed")
+        .stats
+        .get("Life")
+        .copied()
+        .unwrap_or(0.0);
+    assert!(
+        life_after > life_before,
+        "+50 life ring should raise Life ({life_before} -> {life_after})"
+    );
+
+    // Unequip
+    items::equip_item(lua, "Ring 1", 0).expect("unequip failed");
+    let equipped = items::extract_equipped_items(lua).expect("re-extract equipped failed");
+    let ring1 = equipped
+        .iter()
+        .find(|s| s.slot_name == "Ring 1")
+        .expect("Ring 1 slot");
+    assert_eq!(ring1.sel_item_id, 0, "ring should be unequipped");
+
+    // Delete removes it from the list
+    items::delete_item(lua, new_item.id).expect("delete failed");
+    let list = items::extract_item_list(lua).expect("re-extract failed");
+    assert_eq!(list.len(), initial_count, "item should be deleted");
+    assert!(
+        !list.iter().any(|e| e.id == new_item.id),
+        "deleted item id should be gone"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Save / Save As write to the build path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_save_as_writes_to_build_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Redirect buildPath to a scratch dir so the test doesn't touch real builds
+    let tmp_dir = std::env::temp_dir().join(format!("egui-pob-save-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let mut build_path = tmp_dir.to_string_lossy().to_string();
+    build_path.push('/');
+    lua.load("mainObject_ref.main.buildPath = ...")
+        .call::<()>(build_path.as_str())
+        .expect("failed to redirect buildPath");
+
+    // A build loaded without a file has no dbFileName — plain Save must fail
+    let err = bridge.save_build();
+    assert!(err.is_err(), "Save without a filename should fail");
+
+    // Save As sanitises the name and writes <buildPath><name>.xml
+    bridge
+        .save_build_as("My: Save/Test?")
+        .expect("Save As failed");
+    let expected = tmp_dir.join("My- Save-Test-.xml");
+    assert!(
+        expected.is_file(),
+        "expected {} to exist",
+        expected.display()
+    );
+    let contents = std::fs::read_to_string(&expected).expect("failed to read saved file");
+    assert!(
+        contents.starts_with("<?xml"),
+        "saved file should be XML, got: {}",
+        &contents[..contents.len().min(40)]
+    );
+
+    // dbFileName is now set, so plain Save writes to the same file
+    std::fs::remove_file(&expected).expect("failed to remove file");
+    bridge.save_build().expect("Save failed");
+    assert!(expected.is_file(), "Save should rewrite the same file");
+
+    // The saved file must round-trip: load it back and check the build name
+    let xml_text = std::fs::read_to_string(&expected).expect("failed to re-read");
+    bridge
+        .load_build_from_xml(&xml_text, "My- Save-Test-", expected.to_str())
+        .expect("failed to reload saved build");
+    let db_file_name: String = lua
+        .load("return mainObject_ref.main.modes['BUILD'].dbFileName")
+        .eval()
+        .expect("failed to read dbFileName");
+    assert_eq!(
+        db_file_name,
+        expected.to_string_lossy(),
+        "reloaded build should keep its file path"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

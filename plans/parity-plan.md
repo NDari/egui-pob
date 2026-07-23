@@ -199,20 +199,20 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 ## 5. Items Tab
 
 ### Equipment Display
-- [~] Display equipped items by slot (read-only, basic info)
-- [ ] Full item tooltip (matching upstream format with rarity headers, DPS, armor stats)
-- [ ] Item rarity styling (borders, headers matching upstream)
-- [ ] Socket and link display
+- [x] Display equipped items by slot (slot list with equip dropdowns)
+- [x] Full item tooltip (upstream's AddItemTooltip rendered via Tooltip lines, incl. stat diff)
+- [~] Item rarity styling (colored names + tooltip color codes; no borders/separator art)
+- [~] Socket and link display (text line in tooltip; no dedicated socket widget)
 - [ ] Influence icons display
-- [ ] Flask display with charges/duration
-- [ ] Weapon DPS breakdown in tooltip (Physical, Elemental, Chaos, Total)
-- [ ] Armor stats breakdown (Armour, Evasion, Energy Shield, Ward)
+- [~] Flask display with charges/duration (via tooltip)
+- [x] Weapon DPS breakdown in tooltip (Physical, Elemental, Chaos, Total)
+- [x] Armor stats breakdown (Armour, Evasion, Energy Shield, Ward)
 
 ### Item Management
-- [ ] Item list panel (all owned items)
-- [ ] Equip item to slot
-- [ ] Unequip item from slot
-- [ ] Delete item
+- [x] Item list panel (all owned items)
+- [x] Equip item to slot (dropdown per slot)
+- [x] Unequip item from slot
+- [x] Delete item (with confirmation)
 - [ ] Sort item list
 - [ ] Drag items between slots
 
@@ -231,7 +231,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Affix selection (prefix/suffix dropdowns with tier selection)
 - [ ] Affix range sliders
 - [ ] Custom modifier popup (Crafting Bench, Essence, Veiled, Beastcraft, etc.)
-- [ ] Paste item from clipboard (Ctrl+V)
+- [x] Paste item from clipboard (button + Ctrl+V, parsed by upstream Item:ParseRaw)
 
 ### Enchanting & Anointing
 - [ ] Apply enchantment popup (helmet/gloves/boots)
@@ -250,7 +250,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Craft cluster jewel mods
 
 ### Item Comparison
-- [ ] Stat diff tooltip when hovering unequipped items
+- [x] Stat diff tooltip when hovering unequipped items (in slot dropdowns, via upstream tooltip)
 - [ ] Side-by-side comparison view
 
 ### Item Database
@@ -401,7 +401,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [~] Ctrl+F: Focus search (tree, calcs done; config pending)
 - [ ] Ctrl+I: Open Import/Export
 - [ ] Ctrl+1-7: Switch tabs (Tree, Skills, Items, Calcs, Config, Notes, Party)
-- [ ] Ctrl+V: Paste item (in items tab)
+- [x] Ctrl+V: Paste item (in items tab)
 - [ ] Ctrl+C: Copy (context-dependent)
 - [ ] Ctrl+E: Edit equipped item
 - [ ] Ctrl+D: Toggle stat differences
@@ -430,7 +430,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 ## 15. Data & Infrastructure
 
-- [ ] Full item text parsing (Item.lua equivalent in Rust or via Lua)
+- [x] Full item text parsing (via Lua's Item:ParseRaw, per the recommendation below)
 - [ ] Modifier evaluation and spawn weight calculation
 - [ ] Item modifier list building (local mods, quality scaling, DPS calc)
 - [ ] Gem data access (tags, requirements, stats, descriptions)

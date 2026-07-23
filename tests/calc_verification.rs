@@ -9,14 +9,12 @@ fn parse_expected_stats(xml: &str) -> HashMap<String, f64> {
     let mut stats = HashMap::new();
     for line in xml.lines() {
         let line = line.trim();
-        if line.starts_with("<PlayerStat ") {
-            if let (Some(val), Some(stat)) =
+        if line.starts_with("<PlayerStat ")
+            && let (Some(val), Some(stat)) =
                 (extract_attr(line, "value"), extract_attr(line, "stat"))
-            {
-                if let Ok(v) = val.parse::<f64>() {
-                    stats.insert(stat.to_string(), v);
-                }
-            }
+            && let Ok(v) = val.parse::<f64>()
+        {
+            stats.insert(stat.to_string(), v);
         }
     }
     stats
@@ -75,7 +73,7 @@ fn test_calc_output_matches_xml_reference() {
         .expect("failed to init Lua bridge");
     bridge.verify_boot().expect("boot verification failed");
     bridge
-        .load_build_from_xml(&xml_text, "Test Build")
+        .load_build_from_xml(&xml_text, "Test Build", None)
         .expect("failed to load build");
 
     // Extract calc output

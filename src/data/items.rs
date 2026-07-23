@@ -1,4 +1,6 @@
-//! Item data: equipped items extracted from Lua's build.itemsTab.
+//! Item data: equipped items, the item list, and item mutations, all backed
+//! by Lua's build.itemsTab. Item text parsing uses upstream's Item:ParseRaw
+//! (via the Item constructor) so mod parsing stays in sync with upstream.
 
 use mlua::prelude::*;
 
@@ -6,7 +8,39 @@ use mlua::prelude::*;
 #[derive(Debug, Clone)]
 pub struct EquippedItem {
     pub slot_name: String,
+    pub label: String,
+    pub sel_item_id: i64,
     pub item: Option<ItemInfo>,
+    /// Items from the build's item list that can be equipped in this slot.
+    pub valid_items: Vec<SlotChoice>,
+}
+
+/// An item that can be selected in a slot's dropdown.
+#[derive(Debug, Clone)]
+pub struct SlotChoice {
+    pub id: i64,
+    pub name: String,
+    pub rarity: String,
+}
+
+/// An entry in the build's full item list.
+#[derive(Debug, Clone)]
+pub struct ItemListEntry {
+    pub id: i64,
+    pub name: String,
+    pub rarity: String,
+    /// Slot label if the item is currently equipped in the active item set.
+    pub equipped_slot: Option<String>,
+}
+
+/// One line of an item tooltip, produced by upstream's AddItemTooltip.
+#[derive(Debug, Clone)]
+pub struct TooltipLine {
+    /// Text with PoB colour codes; empty for separator lines.
+    pub text: String,
+    /// Upstream font size (typically 14-24).
+    pub size: f32,
+    pub is_separator: bool,
 }
 
 /// Item details.
@@ -23,17 +57,22 @@ pub struct ItemInfo {
     pub explicit_mods: Vec<String>,
 }
 
+/// Colour for an item name based on rarity (matches upstream colorCodes).
+pub fn rarity_color(rarity: &str) -> egui::Color32 {
+    match rarity {
+        "NORMAL" => egui::Color32::from_rgb(200, 200, 200),
+        "MAGIC" => egui::Color32::from_rgb(136, 136, 255),
+        "RARE" => egui::Color32::from_rgb(255, 255, 119),
+        "UNIQUE" => egui::Color32::from_rgb(175, 96, 37),
+        "RELIC" => egui::Color32::from_rgb(82, 217, 127),
+        _ => egui::Color32::from_rgb(200, 200, 200),
+    }
+}
+
 impl ItemInfo {
     /// Color for the item name based on rarity.
     pub fn rarity_color(&self) -> egui::Color32 {
-        match self.rarity.as_str() {
-            "NORMAL" => egui::Color32::from_rgb(200, 200, 200),
-            "MAGIC" => egui::Color32::from_rgb(136, 136, 255),
-            "RARE" => egui::Color32::from_rgb(255, 255, 119),
-            "UNIQUE" => egui::Color32::from_rgb(175, 96, 37),
-            "RELIC" => egui::Color32::from_rgb(82, 217, 127),
-            _ => egui::Color32::from_rgb(200, 200, 200),
-        }
+        rarity_color(&self.rarity)
     }
 }
 
@@ -91,12 +130,25 @@ pub fn extract_equipped_items(lua: &Lua) -> Result<Vec<EquippedItem>, mlua::Erro
                     end
                 end
                 local slotName = slot.slotName
-                local entry = { slotName = slotName }
+                local entry = { slotName = slotName, label = slot.label or slotName }
                 local selItemId = 0
-                if itemsTab.activeItemSet and itemsTab.activeItemSet[slotName] then
+                if not slot.nodeId and itemsTab.activeItemSet and itemsTab.activeItemSet[slotName] then
                     selItemId = itemsTab.activeItemSet[slotName].selItemId or 0
                 elseif slot.selItemId then
                     selItemId = slot.selItemId
+                end
+                entry.selItemId = selItemId
+                -- Items that could be equipped in this slot
+                entry.validItems = {}
+                for _, id in ipairs(itemsTab.itemOrderList) do
+                    local it = itemsTab.items[id]
+                    if it and itemsTab:IsItemValidForSlot(it, slotName) then
+                        table.insert(entry.validItems, {
+                            id = id,
+                            name = it.name or "",
+                            rarity = it.rarity or "NORMAL",
+                        })
+                    end
                 end
                 if selItemId > 0 and itemsTab.items[selItemId] then
                     local item = itemsTab.items[selItemId]
@@ -139,6 +191,7 @@ pub fn extract_equipped_items(lua: &Lua) -> Result<Vec<EquippedItem>, mlua::Erro
             for pair in table.sequence_values::<LuaTable>() {
                 let entry = pair?;
                 let slot_name: String = entry.get("slotName")?;
+                let label: String = entry.get("label").unwrap_or_else(|_| slot_name.clone());
                 let item = if entry.contains_key("id")? {
                     Some(ItemInfo {
                         id: entry.get("id")?,
@@ -154,12 +207,197 @@ pub fn extract_equipped_items(lua: &Lua) -> Result<Vec<EquippedItem>, mlua::Erro
                 } else {
                     None
                 };
-                items.push(EquippedItem { slot_name, item });
+                let mut valid_items = Vec::new();
+                if let Ok(choices) = entry.get::<LuaTable>("validItems") {
+                    for choice in choices.sequence_values::<LuaTable>() {
+                        let choice = choice?;
+                        valid_items.push(SlotChoice {
+                            id: choice.get("id")?,
+                            name: choice.get("name").unwrap_or_default(),
+                            rarity: choice.get("rarity").unwrap_or_default(),
+                        });
+                    }
+                }
+                items.push(EquippedItem {
+                    slot_name,
+                    label,
+                    sel_item_id: entry.get("selItemId").unwrap_or(0),
+                    item,
+                    valid_items,
+                });
             }
             Ok(items)
         })?;
 
     Ok(items)
+}
+
+/// Extract the build's full item list in display order.
+pub fn extract_item_list(lua: &Lua) -> Result<Vec<ItemListEntry>, mlua::Error> {
+    let result: LuaTable = lua
+        .load(
+            r#"
+            local build = mainObject_ref.main.modes['BUILD']
+            local itemsTab = build.itemsTab
+            local equipped = {}
+            for slotName, slot in pairs(itemsTab.slots) do
+                local selItemId = 0
+                if not slot.nodeId and itemsTab.activeItemSet and itemsTab.activeItemSet[slotName] then
+                    selItemId = itemsTab.activeItemSet[slotName].selItemId or 0
+                elseif slot.selItemId then
+                    selItemId = slot.selItemId
+                end
+                if selItemId > 0 and not equipped[selItemId] then
+                    equipped[selItemId] = slot.label or slotName
+                end
+            end
+            local result = {}
+            for _, id in ipairs(itemsTab.itemOrderList) do
+                local item = itemsTab.items[id]
+                if item then
+                    table.insert(result, {
+                        id = id,
+                        name = item.name or "",
+                        rarity = item.rarity or "NORMAL",
+                        slot = equipped[id],
+                    })
+                end
+            end
+            return result
+        "#,
+        )
+        .eval()?;
+
+    let mut entries = Vec::new();
+    for pair in result.sequence_values::<LuaTable>() {
+        let entry = pair?;
+        entries.push(ItemListEntry {
+            id: entry.get("id")?,
+            name: entry.get("name").unwrap_or_default(),
+            rarity: entry.get("rarity").unwrap_or_default(),
+            equipped_slot: entry.get("slot").ok(),
+        });
+    }
+    Ok(entries)
+}
+
+/// Equip an item in a slot (item_id 0 unequips). Uses upstream's
+/// ItemSlot:SetSelItemId so jewel sockets and item sets stay consistent.
+pub fn equip_item(lua: &Lua, slot_name: &str, item_id: i64) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local slotName, itemId = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local slot = itemsTab.slots[slotName]
+        if slot and (itemId == 0 or itemsTab.items[itemId]) then
+            slot:SetSelItemId(itemId)
+            itemsTab:PopulateSlots()
+            itemsTab:AddUndoState()
+            build.buildFlag = true
+            _runCallback('OnFrame')
+        end
+    "#,
+    )
+    .call((slot_name, item_id))
+}
+
+/// Delete an item from the build. Upstream's DeleteItem also unequips it
+/// from all item sets and jewel sockets.
+pub fn delete_item(lua: &Lua, item_id: i64) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local itemId = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if item then
+            itemsTab:DeleteItem(item)
+            build.buildFlag = true
+            _runCallback('OnFrame')
+        end
+    "#,
+    )
+    .call(item_id)
+}
+
+/// Parse raw item text (as copied from the game or trade site) with
+/// upstream's Item:ParseRaw and add it to the build, auto-equipping into a
+/// free valid slot. Returns Some(error) if the text is not a valid item.
+pub fn add_item_from_raw(lua: &Lua, raw: &str) -> Result<Option<String>, mlua::Error> {
+    lua.load(
+        r#"
+        local raw = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local newItem = new("Item", raw)
+        if not newItem or not newItem.base then
+            return "Unrecognised item text"
+        end
+        newItem:NormaliseQuality()
+        newItem:BuildModList()
+        itemsTab:AddItem(newItem, false)
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+        return nil
+    "#,
+    )
+    .call(raw)
+}
+
+/// Build the full upstream tooltip for an item using ItemsTab:AddItemTooltip.
+/// Pass a slot name to include the "Equipping this item will..." stat diff
+/// for that slot; pass None for the plain item tooltip.
+pub fn item_tooltip_lines(
+    lua: &Lua,
+    item_id: i64,
+    slot_name: Option<&str>,
+) -> Result<Vec<TooltipLine>, mlua::Error> {
+    let result: LuaTable = lua
+        .load(
+            r#"
+            local itemId, slotName = ...
+            local build = mainObject_ref.main.modes['BUILD']
+            local itemsTab = build.itemsTab
+            local item = itemsTab.items[itemId]
+            if not item then
+                return { lines = {} }
+            end
+            local slot = slotName and itemsTab.slots[slotName] or nil
+            local tt = new("Tooltip")
+            local ok, err = pcall(function()
+                itemsTab:AddItemTooltip(tt, item, slot)
+            end)
+            local lines = {}
+            for _, line in ipairs(tt.lines) do
+                table.insert(lines, {
+                    text = line.text or "",
+                    size = line.size or 16,
+                    sep = line.text == nil,
+                })
+            end
+            return { lines = lines, err = not ok and tostring(err) or nil }
+        "#,
+        )
+        .call((item_id, slot_name))?;
+
+    if let Ok(err) = result.get::<String>("err") {
+        log::warn!("AddItemTooltip failed for item {item_id}: {err}");
+    }
+
+    let lines_table: LuaTable = result.get("lines")?;
+    let mut lines = Vec::new();
+    for pair in lines_table.sequence_values::<LuaTable>() {
+        let line = pair?;
+        lines.push(TooltipLine {
+            text: line.get("text").unwrap_or_default(),
+            size: line.get("size").unwrap_or(16.0),
+            is_separator: line.get("sep").unwrap_or(false),
+        });
+    }
+    Ok(lines)
 }
 
 fn lua_string_list(table: &LuaTable, key: &str) -> Vec<String> {

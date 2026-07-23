@@ -308,6 +308,13 @@ pub fn register(lua: &Lua, src_path: &Path, base_dir: &Path) -> LuaResult<()> {
     Ok(())
 }
 
+/// Directory where user builds are stored: `<user data dir>/Builds/`.
+/// Upstream's dev mode would put builds inside upstream/src/Builds/; the
+/// bridge overrides main.buildPath with this at boot instead.
+pub fn user_builds_path() -> String {
+    format!("{}Builds/", get_user_path())
+}
+
 /// Determine user data path (XDG on Linux, AppData on Windows).
 fn get_user_path() -> String {
     if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "PathOfBuilding") {

@@ -106,15 +106,15 @@ impl TreePanel {
                 atlas.upload_textures(ui.ctx());
             }
             // Load tooltip header images and oil icons
-            if self.tooltip_headers.is_none() {
-                if let Some(dir) = find_assets_dir() {
-                    log::info!("Loading tooltip headers from: {}", dir.display());
-                    self.tooltip_headers = Some(TooltipHeaders::load(
-                        ui.ctx(),
-                        &dir,
-                        self.tree_data_dir.as_deref(),
-                    ));
-                }
+            if self.tooltip_headers.is_none()
+                && let Some(dir) = find_assets_dir()
+            {
+                log::info!("Loading tooltip headers from: {}", dir.display());
+                self.tooltip_headers = Some(TooltipHeaders::load(
+                    ui.ctx(),
+                    &dir,
+                    self.tree_data_dir.as_deref(),
+                ));
             }
             self.textures_uploaded = true;
         }

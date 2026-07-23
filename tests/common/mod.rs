@@ -33,7 +33,7 @@ pub fn boot_and_load_test_build() -> pob_egui::lua_bridge::LuaBridge {
     let xml_text = std::fs::read_to_string(&xml_path).expect("failed to read test build XML");
 
     bridge
-        .load_build_from_xml(&xml_text, "Test Build")
+        .load_build_from_xml(&xml_text, "Test Build", None)
         .expect("failed to load build");
 
     bridge

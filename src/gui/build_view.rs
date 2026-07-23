@@ -163,7 +163,7 @@ impl BuildView {
                 if name.is_empty() {
                     dialog.error = Some("Name cannot be empty.".to_string());
                 } else {
-                    match save_build_as(bridge, &name) {
+                    match bridge.save_build_as(&name) {
                         Ok(()) => {
                             self.build_name = name;
                             self.is_unsaved_new = false;
@@ -216,7 +216,7 @@ impl BuildView {
                         error: None,
                     });
                 } else {
-                    match super::import_tab::save_build(bridge) {
+                    match bridge.save_build() {
                         Ok(()) => log::info!("Build saved"),
                         Err(e) => log::error!("Save failed: {e}"),
                     }
@@ -404,8 +404,13 @@ impl BuildView {
                     }
                 }
                 BuildTab::Items => {
-                    if let Some(ref items) = self.items_panel {
-                        items.show(ui, bridge);
+                    if let Some(ref mut items) = self.items_panel
+                        && items.show(ui, bridge)
+                    {
+                        self.refresh_calc_output(bridge);
+                        self.items_panel = Some(ItemsPanel::new(bridge.lua()));
+                        // Items can grant skills and socket jewels into the tree
+                        self.skills_panel = Some(SkillsPanel::new(bridge.lua()));
                     }
                 }
                 BuildTab::Calcs => {
@@ -1315,23 +1320,4 @@ fn set_minion_skill(lua: &mlua::Lua, index: usize) -> Result<(), mlua::Error> {
     "#
     ))
     .exec()
-}
-
-/// Save the current build to disk with a given name (Save As).
-fn save_build_as(bridge: &LuaBridge, name: &str) -> anyhow::Result<()> {
-    bridge
-        .lua()
-        .load(format!(
-            r#"
-            local build = mainObject_ref.main.modes['BUILD']
-            build.dbFileName = "{}"
-            build.dbFileSubPath = ""
-            build:SaveDBFile()
-        "#,
-            name.replace('\\', "\\\\").replace('"', "\\\"")
-        ))
-        .exec()
-        .map_err(|e| anyhow::anyhow!("Lua error: {e}"))?;
-
-    Ok(())
 }

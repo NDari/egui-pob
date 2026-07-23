@@ -411,7 +411,7 @@ pub fn draw_tree(
             painter.circle_stroke(
                 screen_pos,
                 radius + 2.0,
-                egui::Stroke::new(2.0, Palette::HOVER_OUTLINE),
+                egui::Stroke::new(2.0_f32, Palette::HOVER_OUTLINE),
             );
         }
 
@@ -917,22 +917,19 @@ fn draw_group_backgrounds(
                     let h = bg.height * 1.33 * camera.zoom;
                     let img_rect =
                         egui::Rect::from_center_size(screen_pos, egui::vec2(w * 2.0, h * 2.0));
-                    if img_rect.intersects(*visible_rect) {
-                        if let Some(tex) = atlas.texture_id(bg.sheet_index) {
-                            let uv = egui::Rect::from_min_max(
-                                egui::pos2(0.0, 0.0),
-                                egui::pos2(1.0, 1.0),
-                            );
-                            // Dim non-selected ascendancies (upstream uses alpha 0.25)
-                            let is_selected =
-                                tree.ascendancy_name.as_deref() == Some(name.as_str());
-                            let tint = if is_selected {
-                                egui::Color32::WHITE
-                            } else {
-                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 64)
-                            };
-                            painter.image(tex, img_rect, uv, tint);
-                        }
+                    if img_rect.intersects(*visible_rect)
+                        && let Some(tex) = atlas.texture_id(bg.sheet_index)
+                    {
+                        let uv =
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                        // Dim non-selected ascendancies (upstream uses alpha 0.25)
+                        let is_selected = tree.ascendancy_name.as_deref() == Some(name.as_str());
+                        let tint = if is_selected {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 64)
+                        };
+                        painter.image(tex, img_rect, uv, tint);
                     }
                 }
             }

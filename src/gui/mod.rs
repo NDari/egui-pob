@@ -99,10 +99,11 @@ impl PobApp {
             }
         };
 
-        if let Err(e) = self
-            .bridge
-            .load_build_from_xml(&xml_text, &build_info.build_name)
-        {
+        if let Err(e) = self.bridge.load_build_from_xml(
+            &xml_text,
+            &build_info.build_name,
+            build_info.full_path.to_str(),
+        ) {
             log::error!("Failed to load build: {e}");
             self.status = AppStatus::Error(format!("Failed to load build: {e}"));
             return;

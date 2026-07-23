@@ -67,11 +67,22 @@ impl LuaBridge {
 
         // Disable upstream's dev-mode auto-save on Shutdown. When running from
         // source, upstream detects devMode=true and writes `~~temp~~.xml` on
-        // every BUILD mode transition — we manage saves explicitly via Save /
+        // every BUILD mode transition - we manage saves explicitly via Save /
         // Save As, so this would resurrect discarded new builds.
         lua.load("mainObject_ref.main.disableDevAutoSave = true")
             .exec()
             .map_err(lua_err("Failed to set disableDevAutoSave"))?;
+
+        // Upstream's dev mode puts the build directory inside upstream/src/,
+        // which is our read-only submodule. Point it at the user data
+        // directory instead (~/.local/share/pathofbuilding/Builds/ on Linux).
+        let builds_dir = system::user_builds_path();
+        std::fs::create_dir_all(&builds_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to create build dir {builds_dir}: {e}"))?;
+        lua.load("mainObject_ref.main.buildPath = ...")
+            .call::<()>(builds_dir.as_str())
+            .map_err(lua_err("Failed to set buildPath"))?;
+        log::info!("Build directory: {builds_dir}");
 
         log::info!("Lua bridge initialized successfully");
 
@@ -98,7 +109,17 @@ impl LuaBridge {
 
     /// Load a build from XML text. This calls upstream's SetMode("BUILD", ...)
     /// and runs a frame to trigger the initial calculation.
-    pub fn load_build_from_xml(&self, xml_text: &str, name: &str) -> Result<()> {
+    ///
+    /// `db_file_name` is the full path of the build's XML file on disk, if it
+    /// has one - upstream stores it as build.dbFileName so Save writes back to
+    /// the same file. Pass None for builds that don't exist on disk yet
+    /// (imports, pasted codes).
+    pub fn load_build_from_xml(
+        &self,
+        xml_text: &str,
+        name: &str,
+        db_file_name: Option<&str>,
+    ) -> Result<()> {
         let main_obj: LuaTable = self
             .lua
             .load("return mainObject_ref.main")
@@ -106,7 +127,7 @@ impl LuaBridge {
             .map_err(lua_err("Failed to get mainObject.main"))?;
 
         main_obj
-            .call_method::<()>("SetMode", ("BUILD", false, name, xml_text))
+            .call_method::<()>("SetMode", ("BUILD", db_file_name, name, xml_text))
             .map_err(lua_err("SetMode('BUILD') failed"))?;
 
         Self::run_callback_static(&self.lua, "OnFrame")?;
@@ -141,6 +162,70 @@ impl LuaBridge {
             .load("return mainObject_ref.main.buildPath")
             .eval()
             .map_err(lua_err("Failed to get buildPath"))
+    }
+
+    /// Save the current build to its existing file (build.dbFileName).
+    /// Fails if the build has never been saved - use save_build_as first.
+    pub fn save_build(&self) -> Result<()> {
+        let err: Option<String> = self
+            .lua
+            .load(
+                r#"
+                local build = mainObject_ref.main.modes['BUILD']
+                if not build.dbFileName or build.dbFileName == "" then
+                    return "No filename set - use Save As first"
+                end
+                -- SaveDBFile returns true on failure (unwritable path, etc.)
+                if build:SaveDBFile() then
+                    return "Couldn't write " .. build.dbFileName
+                end
+                return nil
+            "#,
+            )
+            .call(())
+            .map_err(lua_err("Save failed"))?;
+
+        if let Some(err) = err {
+            anyhow::bail!("{err}");
+        }
+        Ok(())
+    }
+
+    /// Save the current build to disk with a given name (Save As).
+    /// Mirrors upstream's OpenSaveAsPopup: the file goes to
+    /// main.buildPath .. name .. ".xml" with illegal filename characters
+    /// replaced, and build.dbFileName/buildName are updated so subsequent
+    /// saves write to the same file.
+    pub fn save_build_as(&self, name: &str) -> Result<()> {
+        let err: Option<String> = self
+            .lua
+            .load(
+                r#"
+                local name = ...
+                local main = mainObject_ref.main
+                local build = main.modes['BUILD']
+                name = name:gsub("[\\/:%*%?\"<>|%c]", "-")
+                if not name:match("%S") then
+                    return "Build name cannot be empty"
+                end
+                MakeDir(main.buildPath)
+                build.dbFileName = main.buildPath .. name .. ".xml"
+                build.dbFileSubPath = ""
+                build.buildName = name
+                -- SaveDBFile returns true on failure (unwritable path, etc.)
+                if build:SaveDBFile() then
+                    return "Couldn't write " .. build.dbFileName
+                end
+                return nil
+            "#,
+            )
+            .call(name)
+            .map_err(lua_err("Save As failed"))?;
+
+        if let Some(err) = err {
+            anyhow::bail!("{err}");
+        }
+        Ok(())
     }
 
     /// Switch to the build list mode.

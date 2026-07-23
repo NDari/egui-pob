@@ -51,4 +51,20 @@ fn test_lua_vm_boots_and_main_object_exists() {
         "unexpected startup error: {}",
         prompt_msg.unwrap_or_default()
     );
+
+    // The build directory must live in the user data dir, not inside the
+    // read-only upstream submodule (upstream's dev mode would put it there).
+    let build_path = bridge.build_path().expect("failed to get buildPath");
+    assert!(
+        build_path.ends_with("Builds/"),
+        "buildPath should end with Builds/: {build_path}"
+    );
+    assert!(
+        !build_path.contains("upstream"),
+        "buildPath must not point into the upstream submodule: {build_path}"
+    );
+    assert!(
+        std::path::Path::new(&build_path).is_dir(),
+        "buildPath should exist: {build_path}"
+    );
 }

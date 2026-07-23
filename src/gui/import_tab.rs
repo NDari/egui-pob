@@ -104,7 +104,7 @@ impl ImportPanel {
         // Save section
         ui.heading("Save");
         if ui.button("Save Build").clicked() {
-            match save_build(bridge) {
+            match bridge.save_build() {
                 Ok(()) => {
                     self.status_message = Some(("Build saved.".to_string(), false));
                 }
@@ -166,7 +166,7 @@ fn import_build_code(bridge: &LuaBridge, code: &str) -> anyhow::Result<()> {
         anyhow::bail!("Failed to decode build code — invalid or corrupted");
     }
 
-    bridge.load_build_from_xml(&xml_text, "Imported Build")?;
+    bridge.load_build_from_xml(&xml_text, "Imported Build", None)?;
     Ok(())
 }
 
@@ -285,23 +285,4 @@ fn looks_like_url(input: &str) -> bool {
     trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
         || BUILD_SITES.iter().any(|s| trimmed.starts_with(s.pattern))
-}
-
-/// Save the current build to disk.
-pub fn save_build(bridge: &LuaBridge) -> anyhow::Result<()> {
-    bridge
-        .lua()
-        .load(
-            r#"
-            local build = mainObject_ref.main.modes['BUILD']
-            if not build.dbFileName or build.dbFileName == "" then
-                error("No filename set — use Save As first")
-            end
-            build:SaveDBFile()
-        "#,
-        )
-        .exec()
-        .map_err(|e| anyhow::anyhow!("Lua error: {e}"))?;
-
-    Ok(())
 }
