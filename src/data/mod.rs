@@ -6,6 +6,7 @@ pub mod char_import;
 pub mod config;
 pub mod gems;
 pub mod items;
+pub mod jewels;
 pub mod skills;
 pub mod tree;
 pub mod tree_specs;

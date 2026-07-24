@@ -147,7 +147,7 @@ impl eframe::App for PobApp {
                                 BuildListAction::OpenBuild(build_info) => {
                                     transition = Some(build_info);
                                 }
-                                BuildListAction::EnterFolder(_) => {
+                                BuildListAction::EnterFolder => {
                                     // Already handled inside panel.show()
                                 }
                                 BuildListAction::NewBuild => {

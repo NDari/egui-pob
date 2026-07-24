@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use pob_egui::data::jewels::{self, RadiusDef, SocketInfo};
 use pob_egui::data::tree::{self, HoverInfo, MasteryEffectList, NodeType, TreeData};
 use pob_egui::data::tree_specs::{self, CompareDiff, SpecAllocation, SpecInfo, TreeVersion};
 use pob_egui::data::tree_sprites::TreeSpriteAtlas;
@@ -70,6 +71,12 @@ pub struct TreePanel {
     /// Set when the active spec changed: the whole panel (tree data, atlas)
     /// must be rebuilt by the parent.
     pub request_rebuild: bool,
+    /// Set when the user right-clicked a jewel socket: the parent should
+    /// switch to the Items tab.
+    pub request_items_tab: bool,
+    // Jewel radius overlays
+    jewel_radii: Vec<RadiusDef>,
+    jewel_sockets: Vec<SocketInfo>,
     // Tree version conversion
     tree_versions: Vec<TreeVersion>,
     convert_popup: Option<ConvertPopup>,
@@ -119,6 +126,9 @@ impl TreePanel {
                     import_error: None,
                     export_url: None,
                     request_rebuild: false,
+                    request_items_tab: false,
+                    jewel_radii: Vec::new(),
+                    jewel_sockets: Vec::new(),
                     tree_versions: Vec::new(),
                     convert_popup: None,
                     compare_enabled: false,
@@ -167,6 +177,15 @@ impl TreePanel {
             import_error: None,
             export_url: None,
             request_rebuild: false,
+            request_items_tab: false,
+            jewel_radii: jewels::radius_defs(lua).unwrap_or_else(|e| {
+                log::error!("Failed to load jewel radii: {e}");
+                Vec::new()
+            }),
+            jewel_sockets: jewels::socket_jewels(lua).unwrap_or_else(|e| {
+                log::error!("Failed to load jewel sockets: {e}");
+                Vec::new()
+            }),
             tree_versions: tree_specs::list_tree_versions(lua).unwrap_or_else(|e| {
                 log::error!("Failed to list tree versions: {e}");
                 Vec::new()
@@ -269,7 +288,7 @@ impl TreePanel {
                         .selected_text(current_display)
                         .width(70.0)
                         .show_ui(ui, |ui| {
-                            for version in &self.tree_versions {
+                            for version in self.tree_versions.iter().rev() {
                                 if ui
                                     .selectable_label(
                                         version.id == active_version,
@@ -533,19 +552,25 @@ impl TreePanel {
                 hover_path,
                 hover_depends,
                 compare,
+                jewel_radii: &self.jewel_radii,
+                jewel_sockets: &self.jewel_sockets,
             },
         );
 
-        // Route clicks: masteries get the effect-selection popup, everything
-        // else toggles allocation directly.
+        // Route clicks: masteries get the effect-selection popup, right-
+        // clicking a jewel socket jumps to the Items tab, everything else
+        // toggles allocation directly.
         if let Some(click) = view.clicked
             && self.mastery_popup.is_none()
         {
             let node = tree_data.nodes.get(&click.node_id);
             let is_mastery = node.is_some_and(|n| n.node_type == NodeType::Mastery);
+            let is_socket = node.is_some_and(|n| n.node_type == NodeType::Socket);
             let is_allocated = node.is_some_and(|n| n.is_allocated);
 
-            if is_mastery && (!is_allocated || click.is_right) {
+            if is_socket && click.is_right {
+                self.request_items_tab = true;
+            } else if is_mastery && (!is_allocated || click.is_right) {
                 // Unallocated mastery click, or right-click to change the
                 // effect on an allocated one: open the popup.
                 match tree::fetch_mastery_effects(bridge.lua(), click.node_id) {
@@ -644,13 +669,24 @@ impl TreePanel {
                     });
         }
 
-        // Any tree change invalidates the comparison snapshot of the active spec
+        // Any tree change invalidates the comparison snapshot of the active
+        // spec and the jewel socket info (allocating a socket changes it)
         if changed {
             self.current_cache = None;
             self.compare_diff = None;
+            self.refresh_jewels(bridge);
         }
 
         changed
+    }
+
+    /// Re-read jewel socket contents from Lua. Called after tree changes and
+    /// by the parent after item changes (equipping jewels).
+    pub fn refresh_jewels(&mut self, bridge: &LuaBridge) {
+        match jewels::socket_jewels(bridge.lua()) {
+            Ok(sockets) => self.jewel_sockets = sockets,
+            Err(e) => log::error!("Failed to refresh jewel sockets: {e}"),
+        }
     }
 
     /// Draw the "Manage Passive Trees" dialog. Returns true if the build

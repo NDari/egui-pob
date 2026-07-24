@@ -14,12 +14,12 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Refresh build list
 - [x] Open build by clicking
 - [x] New build creation
-- [ ] Delete build
-- [ ] Rename build
-- [ ] Move build to folder
-- [ ] Create new folder
-- [ ] Sort builds (by name, date modified)
-- [ ] Build search/filter by name
+- [x] Delete build (right-click menu, confirmation popup; folders too, recursive)
+- [x] Rename build (right-click menu; folders too)
+- [x] Move build to folder (right-click "Move to" submenu: subfolders + parent)
+- [x] Create new folder
+- [x] Sort builds (by name, date modified)
+- [x] Build search/filter by name
 - [ ] Recent builds list
 - [ ] Build preview tooltip on hover (class, level, DPS summary)
 
@@ -98,12 +98,12 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Color-coded power visualization (red=offense, blue=defense)
 
 ### Jewel Sockets
-- [ ] Jewel radius display (ring overlay on allocated sockets)
-- [ ] Thread of Hope annular display (inner + outer ring)
-- [ ] Impossible Escape keystone radius display
-- [ ] Named jewel overlays (Brutal Restraint, Elegant Hubris, etc.)
+- [x] Jewel radius display (ring overlay on allocated sockets; hover previews all radii)
+- [x] Thread of Hope annular display (inner + outer ring)
+- [x] Impossible Escape keystone radius display
+- [~] Named jewel overlays (radius ring shown; themed rotating art not implemented)
 - [ ] Cluster jewel subgraph rendering
-- [ ] Right-click jewel socket → jump to items tab
+- [x] Right-click jewel socket → jump to items tab
 
 ### Comparison
 - [x] Compare checkbox to enable comparison mode

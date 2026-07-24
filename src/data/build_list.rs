@@ -105,6 +105,81 @@ pub fn scan_builds(build_path: &str, sub_path: &str) -> Vec<BuildEntry> {
     entries
 }
 
+/// Validate a user-supplied build or folder name: non-empty, no path
+/// separators, no leading/trailing whitespace surprises.
+pub fn validate_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err("Name cannot contain / or \\".to_string());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("Invalid name".to_string());
+    }
+    Ok(())
+}
+
+/// Delete a build file.
+pub fn delete_build(path: &Path) -> Result<(), String> {
+    std::fs::remove_file(path).map_err(|e| format!("Failed to delete build: {e}"))
+}
+
+/// Delete a folder and everything in it.
+pub fn delete_folder(path: &Path) -> Result<(), String> {
+    std::fs::remove_dir_all(path).map_err(|e| format!("Failed to delete folder: {e}"))
+}
+
+/// Rename a build file (new_name is the build name without extension) or a
+/// folder. Fails if the target already exists.
+pub fn rename_entry(path: &Path, new_name: &str, is_folder: bool) -> Result<PathBuf, String> {
+    validate_name(new_name)?;
+    let new_name = new_name.trim();
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Cannot determine parent directory".to_string())?;
+    let target = if is_folder {
+        parent.join(new_name)
+    } else {
+        parent.join(format!("{new_name}.xml"))
+    };
+    if target == path {
+        return Ok(target);
+    }
+    if target.exists() {
+        return Err(format!("\"{new_name}\" already exists"));
+    }
+    std::fs::rename(path, &target).map_err(|e| format!("Failed to rename: {e}"))?;
+    Ok(target)
+}
+
+/// Create a new subfolder in the given directory.
+pub fn create_folder(build_path: &str, sub_path: &str, name: &str) -> Result<(), String> {
+    validate_name(name)?;
+    let target = Path::new(build_path).join(sub_path).join(name.trim());
+    if target.exists() {
+        return Err(format!("\"{}\" already exists", name.trim()));
+    }
+    std::fs::create_dir(&target).map_err(|e| format!("Failed to create folder: {e}"))
+}
+
+/// Move a build file into another directory. Fails if a file with the same
+/// name already exists there.
+pub fn move_build(path: &Path, dest_dir: &Path) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "Invalid build path".to_string())?;
+    let target = dest_dir.join(file_name);
+    if target.exists() {
+        return Err(format!(
+            "\"{}\" already exists in the target folder",
+            file_name.to_string_lossy()
+        ));
+    }
+    std::fs::rename(path, &target).map_err(|e| format!("Failed to move build: {e}"))
+}
+
 fn entry_name(entry: &BuildEntry) -> &str {
     match entry {
         BuildEntry::Build(b) => &b.build_name,
@@ -145,4 +220,147 @@ fn extract_attr<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
     let start = tag.find(&needle)? + needle.len();
     let end = tag[start..].find('"')? + start;
     Some(&tag[start..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch(path: &Path) {
+        std::fs::write(path, "<PathOfBuilding></PathOfBuilding>").unwrap();
+    }
+
+    #[test]
+    fn validate_name_rejects_bad_names() {
+        assert!(validate_name("").is_err());
+        assert!(validate_name("   ").is_err());
+        assert!(validate_name("a/b").is_err());
+        assert!(validate_name("a\\b").is_err());
+        assert!(validate_name(".").is_err());
+        assert!(validate_name("..").is_err());
+        assert!(validate_name("My Build").is_ok());
+    }
+
+    #[test]
+    fn delete_build_removes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.xml");
+        touch(&file);
+        delete_build(&file).unwrap();
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn delete_folder_removes_recursively() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("folder");
+        std::fs::create_dir(&sub).unwrap();
+        touch(&sub.join("a.xml"));
+        delete_folder(&sub).unwrap();
+        assert!(!sub.exists());
+    }
+
+    #[test]
+    fn rename_build_appends_xml_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("old.xml");
+        touch(&file);
+        let new_path = rename_entry(&file, "new", false).unwrap();
+        assert_eq!(new_path, dir.path().join("new.xml"));
+        assert!(new_path.exists());
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn rename_folder_keeps_plain_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("old");
+        std::fs::create_dir(&sub).unwrap();
+        let new_path = rename_entry(&sub, "new", true).unwrap();
+        assert_eq!(new_path, dir.path().join("new"));
+        assert!(new_path.is_dir());
+    }
+
+    #[test]
+    fn rename_refuses_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.xml");
+        let b = dir.path().join("b.xml");
+        touch(&a);
+        touch(&b);
+        assert!(rename_entry(&a, "b", false).is_err());
+        assert!(a.exists());
+    }
+
+    #[test]
+    fn rename_to_same_name_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.xml");
+        touch(&a);
+        let result = rename_entry(&a, "a", false).unwrap();
+        assert_eq!(result, a);
+        assert!(a.exists());
+    }
+
+    #[test]
+    fn create_folder_and_reject_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_str().unwrap();
+        create_folder(base, "", "sub").unwrap();
+        assert!(dir.path().join("sub").is_dir());
+        assert!(create_folder(base, "", "sub").is_err());
+    }
+
+    #[test]
+    fn move_build_between_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let file = dir.path().join("a.xml");
+        touch(&file);
+        move_build(&file, &sub).unwrap();
+        assert!(sub.join("a.xml").exists());
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn move_build_refuses_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let file = dir.path().join("a.xml");
+        touch(&file);
+        touch(&sub.join("a.xml"));
+        assert!(move_build(&file, &sub).is_err());
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn scan_finds_builds_and_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("folder")).unwrap();
+        std::fs::write(
+            dir.path().join("hero.xml"),
+            "<PathOfBuilding><Build level=\"92\" className=\"Witch\" \
+             ascendClassName=\"Necromancer\"></Build></PathOfBuilding>",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not a build").unwrap();
+
+        let entries = scan_builds(dir.path().to_str().unwrap(), "");
+        assert_eq!(entries.len(), 2);
+        match &entries[0] {
+            BuildEntry::Folder(f) => assert_eq!(f.folder_name, "folder"),
+            BuildEntry::Build(_) => panic!("expected folder first"),
+        }
+        match &entries[1] {
+            BuildEntry::Build(b) => {
+                assert_eq!(b.build_name, "hero");
+                assert_eq!(b.level, Some(92));
+                assert_eq!(b.class_name.as_deref(), Some("Witch"));
+                assert_eq!(b.ascend_class_name.as_deref(), Some("Necromancer"));
+            }
+            BuildEntry::Folder(_) => panic!("expected build second"),
+        }
+    }
 }

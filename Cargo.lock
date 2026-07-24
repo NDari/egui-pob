@@ -3358,6 +3358,7 @@ dependencies = [
  "mlua",
  "open",
  "reqwest",
+ "tempfile",
  "walkdir",
 ]
 

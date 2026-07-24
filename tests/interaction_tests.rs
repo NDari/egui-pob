@@ -1445,3 +1445,75 @@ fn test_tree_version_conversion() {
         "all specs should be on the latest version: {specs:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Jewel socket radius data
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_jewel_socket_radii() {
+    use pob_egui::data::{items, jewels};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Radius table for 3.16+: Small/Medium/Large plain circles plus
+    // Variable annuli for Thread of Hope
+    let defs = jewels::radius_defs(lua).expect("radius defs failed");
+    for label in ["Small", "Medium", "Large"] {
+        let def = defs
+            .iter()
+            .find(|d| d.label == label)
+            .unwrap_or_else(|| panic!("{label} radius should exist"));
+        assert_eq!(def.inner, 0.0, "{label} is a plain circle");
+        assert!(def.outer > 0.0);
+    }
+    assert!(
+        defs.iter().any(|d| d.label == "Variable" && d.inner > 0.0),
+        "Variable annuli should exist"
+    );
+
+    // Socket extraction: the tree has many sockets, none is a charm socket
+    let sockets = jewels::socket_jewels(lua).expect("socket extraction failed");
+    assert!(sockets.len() > 10, "the tree has many jewel sockets");
+    let allocated: Vec<_> = sockets.iter().filter(|s| s.allocated).collect();
+    assert!(
+        !allocated.is_empty(),
+        "test build should have allocated sockets"
+    );
+
+    // Equip a radius jewel into an allocated socket and see it reflected.
+    // "Might in All Forms" style rare with a radius mod: use a magic jewel
+    // with "in Radius" to get a jewelRadiusIndex... simplest reliable radius
+    // jewel is a unique with fixed radius; craft a rare with a radius mod:
+    let raw = "Rarity: RARE\nParity Test Jewel\nCobalt Jewel\nAdds 1 to 2 Cold Damage to Spells";
+    let err = items::add_item_from_raw(lua, raw).expect("add jewel failed");
+    assert!(err.is_none(), "jewel should parse: {err:?}");
+    let list = items::extract_item_list(lua).expect("list failed");
+    let jewel = list
+        .iter()
+        .find(|e| e.name.contains("Parity Test Jewel"))
+        .expect("jewel in list");
+
+    // Find an allocated socket slot (they appear as equipment slots); free
+    // it if occupied, then socket the test jewel
+    let equipped = items::extract_equipped_items(lua).expect("equipped failed");
+    let socket_slot = equipped
+        .iter()
+        .find(|s| s.slot_name.starts_with("Jewel"))
+        .expect("an allocated jewel slot")
+        .slot_name
+        .clone();
+    items::equip_item(lua, &socket_slot, 0).expect("unequip failed");
+    items::equip_item(lua, &socket_slot, jewel.id).expect("equip failed");
+
+    let sockets = jewels::socket_jewels(lua).expect("socket re-extraction failed");
+    let filled: Vec<_> = sockets
+        .iter()
+        .filter(|s| s.has_jewel && s.jewel_title.contains("Parity Test Jewel"))
+        .collect();
+    assert_eq!(filled.len(), 1, "the jewel should appear in its socket");
+    assert!(filled[0].allocated);
+    assert!(!filled[0].is_variable, "plain jewel is not Thread of Hope");
+}

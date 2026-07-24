@@ -65,6 +65,10 @@ pub struct TreeOverlays<'a> {
     pub hover_depends: &'a HashSet<u32>,
     /// Spec comparison diff (None when compare mode is off).
     pub compare: Option<&'a pob_egui::data::tree_specs::CompareDiff>,
+    /// Jewel radius definitions for the active tree version.
+    pub jewel_radii: &'a [pob_egui::data::jewels::RadiusDef],
+    /// Jewel sockets with socketed-jewel info.
+    pub jewel_sockets: &'a [pob_egui::data::jewels::SocketInfo],
 }
 
 /// Border color for passive tooltips (upstream default: rgb(128, 77, 0)).
@@ -453,7 +457,54 @@ pub fn draw_tree(
         }
     }
 
-    // Tooltip — temporarily override popup frame to be transparent
+    // Jewel radius rings, mirroring upstream's ring overlay pass:
+    // - hovering any socket previews the standard radii (or the annuli for
+    //   Thread of Hope-like jewels)
+    // - allocated sockets with a radius jewel show that jewel's radius;
+    //   Impossible Escape draws on its keystones instead
+    for socket in overlays.jewel_sockets {
+        let Some(node) = tree.nodes.get(&socket.node_id) else {
+            continue;
+        };
+        let screen_pos = camera.tree_to_screen(node.x, node.y, &rect);
+        let is_hovered = hovered_node.is_some_and(|n| n.id == socket.node_id);
+        if is_hovered {
+            for def in overlays.jewel_radii {
+                let is_annulus = def.inner > 0.0;
+                if is_annulus != socket.is_variable {
+                    continue;
+                }
+                let stroke = egui::Stroke::new(2.0_f32, def.color);
+                painter.circle_stroke(screen_pos, def.outer * camera.zoom, stroke);
+                if is_annulus {
+                    painter.circle_stroke(screen_pos, def.inner * camera.zoom, stroke);
+                }
+            }
+        } else if socket.allocated
+            && let Some(def) = socket
+                .radius_index
+                .and_then(|i| overlays.jewel_radii.get(i))
+        {
+            let stroke = egui::Stroke::new(
+                2.0_f32,
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+            );
+            if socket.keystone_positions.is_empty() {
+                painter.circle_stroke(screen_pos, def.outer * camera.zoom, stroke);
+                if def.inner > 0.0 {
+                    painter.circle_stroke(screen_pos, def.inner * camera.zoom, stroke);
+                }
+            } else {
+                // Impossible Escape: ring around each affected keystone
+                for &(kx, ky) in &socket.keystone_positions {
+                    let key_pos = camera.tree_to_screen(kx, ky, &rect);
+                    painter.circle_stroke(key_pos, def.outer * camera.zoom, stroke);
+                }
+            }
+        }
+    }
+
+    // Tooltip - temporarily override popup frame to be transparent
     if let Some(node) = hovered_node {
         let saved = ui.ctx().style().visuals.clone();
         ui.ctx().style_mut(|s| {

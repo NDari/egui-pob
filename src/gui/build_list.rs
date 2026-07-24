@@ -1,12 +1,65 @@
-//! Build list panel: displays saved builds, allows opening them.
+//! Build list panel: displays saved builds, allows opening and managing them
+//! (delete, rename, move to folder, new folder, sort, search).
+
+use std::path::{Path, PathBuf};
 
 use pob_egui::data::build_list::{self, BuildEntry, BuildInfo, FolderInfo};
+
+/// How the build list is sorted. Folders always sort before builds.
+#[derive(Clone, Copy, PartialEq)]
+enum SortMode {
+    Name,
+    Modified,
+}
+
+/// Modal popup state for build management actions.
+enum Popup {
+    ConfirmDelete {
+        path: PathBuf,
+        name: String,
+        is_folder: bool,
+    },
+    Rename {
+        path: PathBuf,
+        is_folder: bool,
+        name: String,
+        error: Option<String>,
+    },
+    NewFolder {
+        name: String,
+        error: Option<String>,
+    },
+    Error(String),
+}
+
+/// Deferred row interaction, resolved after the entry loop.
+enum RowAction {
+    Open(BuildInfo),
+    Enter(String),
+    ConfirmDelete {
+        path: PathBuf,
+        name: String,
+        is_folder: bool,
+    },
+    Rename {
+        path: PathBuf,
+        name: String,
+        is_folder: bool,
+    },
+    Move {
+        path: PathBuf,
+        dest: PathBuf,
+    },
+}
 
 /// State for the build list panel.
 pub struct BuildListPanel {
     pub entries: Vec<BuildEntry>,
     pub sub_path: String,
     build_path: String,
+    sort_mode: SortMode,
+    filter: String,
+    popup: Option<Popup>,
 }
 
 impl BuildListPanel {
@@ -15,6 +68,9 @@ impl BuildListPanel {
             entries: Vec::new(),
             sub_path: String::new(),
             build_path,
+            sort_mode: SortMode::Name,
+            filter: String::new(),
+            popup: None,
         };
         panel.refresh();
         panel
@@ -50,6 +106,11 @@ impl BuildListPanel {
         self.refresh();
     }
 
+    /// The directory currently being displayed.
+    fn current_dir(&self) -> PathBuf {
+        Path::new(&self.build_path).join(&self.sub_path)
+    }
+
     /// Returns the action the GUI should take, if any.
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<BuildListAction> {
         let mut action = None;
@@ -60,6 +121,12 @@ impl BuildListPanel {
         ui.horizontal(|ui| {
             if ui.button("+ New Build").clicked() {
                 action = Some(BuildListAction::NewBuild);
+            }
+            if ui.button("+ New Folder").clicked() {
+                self.popup = Some(Popup::NewFolder {
+                    name: String::new(),
+                    error: None,
+                });
             }
             ui.separator();
             if !self.sub_path.is_empty() {
@@ -73,7 +140,32 @@ impl BuildListPanel {
             }
         });
 
+        ui.horizontal(|ui| {
+            ui.label("Sort:");
+            egui::ComboBox::from_id_salt("build_list_sort")
+                .selected_text(match self.sort_mode {
+                    SortMode::Name => "Name",
+                    SortMode::Modified => "Date modified",
+                })
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.sort_mode, SortMode::Name, "Name");
+                    ui.selectable_value(&mut self.sort_mode, SortMode::Modified, "Date modified");
+                });
+            ui.label("Search:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter)
+                    .hint_text("filter by name")
+                    .desired_width(180.0),
+            );
+            if !self.filter.is_empty() && ui.button("✖").clicked() {
+                self.filter.clear();
+            }
+        });
+
         ui.separator();
+
+        self.show_popup(ui);
 
         if self.entries.is_empty() {
             ui.label("No builds found.");
@@ -81,55 +173,350 @@ impl BuildListPanel {
                 "Build directory: {}{}",
                 self.build_path, self.sub_path
             ));
-            return None;
+            return action;
         }
 
+        // Folders available as move targets (collected before the row loop)
+        let move_targets: Vec<(String, PathBuf)> = self
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                BuildEntry::Folder(f) => Some((f.folder_name.clone(), f.full_path.clone())),
+                BuildEntry::Build(_) => None,
+            })
+            .collect();
+        let parent_dir = if self.sub_path.is_empty() {
+            None
+        } else {
+            self.current_dir().parent().map(Path::to_path_buf)
+        };
+
+        let filter = self.filter.trim().to_lowercase();
+        let mut visible: Vec<usize> = (0..self.entries.len())
+            .filter(|&i| {
+                filter.is_empty()
+                    || entry_name(&self.entries[i])
+                        .to_lowercase()
+                        .contains(&filter)
+            })
+            .collect();
+        let sort_mode = self.sort_mode;
+        visible.sort_by(|&a, &b| {
+            let (ea, eb) = (&self.entries[a], &self.entries[b]);
+            let a_is_folder = matches!(ea, BuildEntry::Folder(_));
+            let b_is_folder = matches!(eb, BuildEntry::Folder(_));
+            match (a_is_folder, b_is_folder) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => match sort_mode {
+                    SortMode::Name => entry_name(ea)
+                        .to_lowercase()
+                        .cmp(&entry_name(eb).to_lowercase()),
+                    SortMode::Modified => entry_modified(eb)
+                        .partial_cmp(&entry_modified(ea))
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                },
+            }
+        });
+
+        let mut row_action = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for entry in &self.entries {
-                match entry {
+            for &i in &visible {
+                match &self.entries[i] {
                     BuildEntry::Folder(folder) => {
-                        if show_folder_row(ui, folder) {
-                            action = Some(BuildListAction::EnterFolder(folder.folder_name.clone()));
+                        let response = show_folder_row(ui, folder);
+                        if response.clicked() {
+                            row_action = Some(RowAction::Enter(folder.folder_name.clone()));
                         }
+                        response.context_menu(|ui| {
+                            if ui.button("Rename").clicked() {
+                                row_action = Some(RowAction::Rename {
+                                    path: folder.full_path.clone(),
+                                    name: folder.folder_name.clone(),
+                                    is_folder: true,
+                                });
+                                ui.close_menu();
+                            }
+                            if ui.button("Delete").clicked() {
+                                row_action = Some(RowAction::ConfirmDelete {
+                                    path: folder.full_path.clone(),
+                                    name: folder.folder_name.clone(),
+                                    is_folder: true,
+                                });
+                                ui.close_menu();
+                            }
+                        });
                     }
                     BuildEntry::Build(build) => {
-                        if show_build_row(ui, build) {
-                            action = Some(BuildListAction::OpenBuild(build.clone()));
+                        let response = show_build_row(ui, build);
+                        if response.clicked() {
+                            row_action = Some(RowAction::Open(build.clone()));
                         }
+                        response.context_menu(|ui| {
+                            if ui.button("Rename").clicked() {
+                                row_action = Some(RowAction::Rename {
+                                    path: build.full_path.clone(),
+                                    name: build.build_name.clone(),
+                                    is_folder: false,
+                                });
+                                ui.close_menu();
+                            }
+                            let has_targets = parent_dir.is_some() || !move_targets.is_empty();
+                            if has_targets {
+                                ui.menu_button("Move to", |ui| {
+                                    if let Some(ref parent) = parent_dir
+                                        && ui.button("⬆ (parent folder)").clicked()
+                                    {
+                                        row_action = Some(RowAction::Move {
+                                            path: build.full_path.clone(),
+                                            dest: parent.clone(),
+                                        });
+                                        ui.close_menu();
+                                    }
+                                    for (name, path) in &move_targets {
+                                        if ui.button(format!("📁 {name}")).clicked() {
+                                            row_action = Some(RowAction::Move {
+                                                path: build.full_path.clone(),
+                                                dest: path.clone(),
+                                            });
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
+                            }
+                            if ui.button("Delete").clicked() {
+                                row_action = Some(RowAction::ConfirmDelete {
+                                    path: build.full_path.clone(),
+                                    name: build.build_name.clone(),
+                                    is_folder: false,
+                                });
+                                ui.close_menu();
+                            }
+                        });
                     }
                 }
             }
         });
 
-        // Process folder navigation (deferred to avoid borrow conflicts)
-        if let Some(BuildListAction::EnterFolder(ref name)) = action {
-            self.enter_folder(name);
+        match row_action {
+            Some(RowAction::Open(build)) => action = Some(BuildListAction::OpenBuild(build)),
+            Some(RowAction::Enter(name)) => {
+                self.enter_folder(&name);
+                action = Some(BuildListAction::EnterFolder);
+            }
+            Some(RowAction::ConfirmDelete {
+                path,
+                name,
+                is_folder,
+            }) => {
+                self.popup = Some(Popup::ConfirmDelete {
+                    path,
+                    name,
+                    is_folder,
+                });
+            }
+            Some(RowAction::Rename {
+                path,
+                name,
+                is_folder,
+            }) => {
+                self.popup = Some(Popup::Rename {
+                    path,
+                    is_folder,
+                    name,
+                    error: None,
+                });
+            }
+            Some(RowAction::Move { path, dest }) => match build_list::move_build(&path, &dest) {
+                Ok(()) => self.refresh(),
+                Err(e) => self.popup = Some(Popup::Error(e)),
+            },
+            None => {}
         }
 
         action
+    }
+
+    /// Render the active management popup, if any.
+    fn show_popup(&mut self, ui: &mut egui::Ui) {
+        let Some(mut popup) = self.popup.take() else {
+            return;
+        };
+        let mut close = false;
+        let mut refresh = false;
+
+        match &mut popup {
+            Popup::ConfirmDelete {
+                path,
+                name,
+                is_folder,
+            } => {
+                let mut result = None;
+                egui::Window::new("Confirm Delete")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ui.ctx(), |ui| {
+                        if *is_folder {
+                            ui.label(format!("Delete folder \"{name}\" and everything in it?"));
+                        } else {
+                            ui.label(format!("Delete build \"{name}\"?"));
+                        }
+                        ui.label("This cannot be undone.");
+                        ui.horizontal(|ui| {
+                            if ui.button("Delete").clicked() {
+                                result = Some(if *is_folder {
+                                    build_list::delete_folder(path)
+                                } else {
+                                    build_list::delete_build(path)
+                                });
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                match result {
+                    Some(Ok(())) => {
+                        close = true;
+                        refresh = true;
+                    }
+                    Some(Err(e)) => popup = Popup::Error(e),
+                    None => {}
+                }
+            }
+            Popup::Rename {
+                path,
+                is_folder,
+                name,
+                error,
+            } => {
+                let mut do_rename = false;
+                let title = if *is_folder {
+                    "Rename Folder"
+                } else {
+                    "Rename Build"
+                };
+                egui::Window::new(title)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ui.ctx(), |ui| {
+                        ui.label("New name:");
+                        let response = ui.text_edit_singleline(name);
+                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            do_rename = true;
+                        }
+                        if let Some(err) = error {
+                            ui.colored_label(egui::Color32::RED, err.as_str());
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Rename").clicked() {
+                                do_rename = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if do_rename {
+                    match build_list::rename_entry(path, name, *is_folder) {
+                        Ok(_) => {
+                            close = true;
+                            refresh = true;
+                        }
+                        Err(e) => *error = Some(e),
+                    }
+                }
+            }
+            Popup::NewFolder { name, error } => {
+                let mut do_create = false;
+                egui::Window::new("New Folder")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ui.ctx(), |ui| {
+                        ui.label("Folder name:");
+                        let response = ui.text_edit_singleline(name);
+                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            do_create = true;
+                        }
+                        if let Some(err) = error {
+                            ui.colored_label(egui::Color32::RED, err.as_str());
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Create").clicked() {
+                                do_create = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if do_create {
+                    match build_list::create_folder(&self.build_path, &self.sub_path, name) {
+                        Ok(()) => {
+                            close = true;
+                            refresh = true;
+                        }
+                        Err(e) => *error = Some(e),
+                    }
+                }
+            }
+            Popup::Error(message) => {
+                egui::Window::new("Error")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ui.ctx(), |ui| {
+                        ui.colored_label(egui::Color32::RED, message.as_str());
+                        if ui.button("OK").clicked() {
+                            close = true;
+                        }
+                    });
+            }
+        }
+
+        if !close {
+            self.popup = Some(popup);
+        }
+        if refresh {
+            self.refresh();
+        }
     }
 }
 
 /// What the build list wants the app to do.
 pub enum BuildListAction {
-    EnterFolder(String),
+    EnterFolder,
     OpenBuild(BuildInfo),
     NewBuild,
 }
 
-fn show_folder_row(ui: &mut egui::Ui, folder: &FolderInfo) -> bool {
-    let response = ui.add(
-        egui::Button::new(format!("📁 {}", folder.folder_name))
-            .min_size(egui::vec2(ui.available_width(), 24.0)),
-    );
-    response.clicked()
+fn entry_name(entry: &BuildEntry) -> &str {
+    match entry {
+        BuildEntry::Build(b) => &b.build_name,
+        BuildEntry::Folder(f) => &f.folder_name,
+    }
 }
 
-fn show_build_row(ui: &mut egui::Ui, build: &BuildInfo) -> bool {
+fn entry_modified(entry: &BuildEntry) -> f64 {
+    match entry {
+        BuildEntry::Build(b) => b.modified,
+        BuildEntry::Folder(f) => f.modified,
+    }
+}
+
+fn show_folder_row(ui: &mut egui::Ui, folder: &FolderInfo) -> egui::Response {
+    ui.add(
+        egui::Button::new(format!("📁 {}", folder.folder_name))
+            .min_size(egui::vec2(ui.available_width(), 24.0)),
+    )
+}
+
+fn show_build_row(ui: &mut egui::Ui, build: &BuildInfo) -> egui::Response {
     let summary = build_summary(build);
-    let response =
-        ui.add(egui::Button::new(&summary).min_size(egui::vec2(ui.available_width(), 24.0)));
-    response.clicked()
+    ui.add(egui::Button::new(&summary).min_size(egui::vec2(ui.available_width(), 24.0)))
 }
 
 fn build_summary(build: &BuildInfo) -> String {
@@ -146,5 +533,5 @@ fn build_summary(build: &BuildInfo) -> String {
     if let Some(level) = build.level {
         parts.push(format!("Lv{level}"));
     }
-    parts.join(" — ")
+    parts.join(" - ")
 }

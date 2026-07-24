@@ -468,6 +468,10 @@ impl BuildView {
                     if let Some(ref mut tree) = self.tree_panel {
                         let changed = tree.show(ui, bridge);
                         let rebuild = tree.request_rebuild;
+                        if tree.request_items_tab {
+                            tree.request_items_tab = false;
+                            self.active_tab = BuildTab::Items;
+                        }
                         if changed {
                             self.refresh_calc_output(bridge);
                         }
@@ -495,6 +499,9 @@ impl BuildView {
                         self.items_panel = Some(ItemsPanel::new(bridge.lua()));
                         // Items can grant skills and socket jewels into the tree
                         self.skills_panel = Some(SkillsPanel::new(bridge.lua()));
+                        if let Some(ref mut tree) = self.tree_panel {
+                            tree.refresh_jewels(bridge);
+                        }
                     }
                 }
                 BuildTab::Calcs => {
