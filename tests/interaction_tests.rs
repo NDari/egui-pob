@@ -1539,6 +1539,15 @@ fn test_jewel_socket_radii() {
     assert_eq!(filled.len(), 1, "the jewel should appear in its socket");
     assert!(filled[0].allocated);
     assert!(!filled[0].is_variable, "plain jewel is not Thread of Hope");
+    assert_eq!(
+        filled[0].active_art.as_deref(),
+        Some("JewelSocketActiveBlue"),
+        "Cobalt Jewel should select the blue socket art"
+    );
+    let empty = sockets.iter().find(|s| !s.has_jewel);
+    if let Some(empty) = empty {
+        assert!(empty.active_art.is_none(), "empty socket has no jewel art");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2008,5 +2017,222 @@ fn test_calcs_skill_selection() {
         calcs::set_skill_part(lua, 1).expect("set part failed");
         let sel = calcs::skill_selection(lua).expect("selection failed");
         assert_eq!(sel.selected_part, 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cluster jewel subgraphs appear in the extracted tree
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cluster_jewel_subgraph_extraction() {
+    use pob_egui::data::items;
+    use pob_egui::data::tree::TreeData;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let before = TreeData::extract(lua).expect("extract failed");
+    let cluster_before = before.nodes.keys().filter(|id| **id >= 0x10000).count();
+
+    // Add a Large Cluster Jewel and socket it into a large expansion socket
+    let raw = "Rarity: RARE\nTest Cluster\nLarge Cluster Jewel\nItem Level: 84\n\
+               Adds 8 Passive Skills\n2 Added Passive Skills are Jewel Sockets\n\
+               Added Small Passive Skills grant: 12% increased Attack Damage while Dual Wielding";
+    let err = items::add_item_from_raw(lua, raw).expect("add failed");
+    assert!(err.is_none(), "cluster jewel should parse: {err:?}");
+    let jewel_id = items::extract_item_list(lua)
+        .expect("list failed")
+        .iter()
+        .find(|e| e.name.contains("Test Cluster"))
+        .expect("cluster jewel in list")
+        .id;
+
+    let socketed: bool = lua
+        .load(
+            r#"
+            local jewelId = ...
+            local build = mainObject_ref.main.modes['BUILD']
+            local spec = build.spec
+            for nodeId in pairs(spec.tree.sockets) do
+                local node = spec.tree.nodes[nodeId]
+                if node and node.expansionJewel and node.expansionJewel.size == 2 then
+                    build.itemsTab.sockets[nodeId]:SetSelItemId(jewelId)
+                    build.itemsTab:PopulateSlots()
+                    build.buildFlag = true
+                    _runCallback('OnFrame')
+                    return true
+                end
+            end
+            return false
+            "#,
+        )
+        .call(jewel_id)
+        .expect("socketing failed");
+    assert!(socketed, "should find a large expansion socket");
+
+    // The Lua side should now have subgraphs...
+    let subgraph_count: usize = lua
+        .load(
+            r#"
+            local n = 0
+            for _ in pairs(mainObject_ref.main.modes['BUILD'].spec.subGraphs) do
+                n = n + 1
+            end
+            return n
+            "#,
+        )
+        .eval()
+        .expect("subgraph count failed");
+    assert!(subgraph_count > 0, "cluster subgraph should be built");
+
+    // ...and re-extraction should pick up the cluster nodes with positions
+    // and connections
+    let after = TreeData::extract(lua).expect("extract failed");
+    let cluster_nodes: Vec<_> = after.nodes.values().filter(|n| n.id >= 0x10000).collect();
+    assert!(
+        cluster_nodes.len() > cluster_before + 5,
+        "expected new cluster nodes, got {} (before: {cluster_before})",
+        cluster_nodes.len()
+    );
+    for node in &cluster_nodes {
+        assert!(
+            node.x.is_finite() && node.y.is_finite(),
+            "cluster node {} should have a position",
+            node.id
+        );
+    }
+    let cluster_connections = after
+        .connections
+        .iter()
+        .filter(|c| c.from_id >= 0x10000 || c.to_id >= 0x10000)
+        .count();
+    assert!(
+        cluster_connections > 0,
+        "cluster nodes should be connected to the tree"
+    );
+
+    // The subgraph's inner jewel sockets (from "2 Added Passive Skills are
+    // Jewel Sockets") should now appear in the socket list
+    use pob_egui::data::jewels;
+    let sockets = jewels::socket_jewels(lua).expect("sockets failed");
+    let inner: Vec<_> = sockets
+        .iter()
+        .filter(|s| {
+            after
+                .nodes
+                .get(&s.node_id)
+                .is_some_and(|n| n.id != 0 && n.x.is_finite())
+                && lua
+                    .load(format!(
+                        r#"
+                        local node = mainObject_ref.main.modes['BUILD'].spec.nodes[{}]
+                        return node and node.expansionJewel ~= nil
+                            and node.expansionJewel.size ~= 2
+                        "#,
+                        s.node_id
+                    ))
+                    .eval::<bool>()
+                    .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(
+        inner.len(),
+        2,
+        "the large cluster jewel should expose 2 inner sockets"
+    );
+
+    // Socket a Medium Cluster Jewel into an inner socket: it should get the
+    // alt-blue art and spawn its own nested subgraph
+    let med_raw = "Rarity: RARE\nTest Medium Cluster\nMedium Cluster Jewel\nItem Level: 84\n\
+                   Adds 5 Passive Skills\n1 Added Passive Skill is a Jewel Socket\n\
+                   Added Small Passive Skills grant: 10% increased Effect of Non-Damaging Ailments";
+    let err = items::add_item_from_raw(lua, med_raw).expect("add failed");
+    assert!(err.is_none(), "medium cluster should parse: {err:?}");
+    let med_id = items::extract_item_list(lua)
+        .expect("list failed")
+        .iter()
+        .find(|e| e.name.contains("Test Medium Cluster"))
+        .expect("medium cluster in list")
+        .id;
+    let inner_id = inner[0].node_id;
+    lua.load(format!(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.itemsTab.sockets[{inner_id}]:SetSelItemId({med_id})
+        build.itemsTab:PopulateSlots()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+        "#
+    ))
+    .exec()
+    .expect("socketing medium failed");
+
+    let sockets = jewels::socket_jewels(lua).expect("sockets failed");
+    let inner_socket = sockets
+        .iter()
+        .find(|s| s.node_id == inner_id)
+        .expect("inner socket still listed");
+    assert!(inner_socket.has_jewel, "inner socket should hold the jewel");
+    assert_eq!(
+        inner_socket.active_art.as_deref(),
+        Some("JewelSocketActiveAltBlue"),
+        "medium cluster jewel selects the alt-blue art"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Hovered socket shows the socketed jewel's item tooltip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_socket_jewel_tooltip() {
+    use pob_egui::data::{items, jewels};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let raw = "Rarity: RARE\nHover Test Jewel\nCobalt Jewel\nAdds 1 to 2 Cold Damage to Spells";
+    let err = items::add_item_from_raw(lua, raw).expect("add failed");
+    assert!(err.is_none(), "jewel should parse: {err:?}");
+    let jewel_id = items::extract_item_list(lua)
+        .expect("list failed")
+        .iter()
+        .find(|e| e.name.contains("Hover Test Jewel"))
+        .expect("jewel in list")
+        .id;
+
+    let equipped = items::extract_equipped_items(lua).expect("equipped failed");
+    let socket_slot = equipped
+        .iter()
+        .find(|s| s.slot_name.starts_with("Jewel"))
+        .expect("an allocated jewel slot")
+        .slot_name
+        .clone();
+    items::equip_item(lua, &socket_slot, 0).expect("unequip failed");
+    items::equip_item(lua, &socket_slot, jewel_id).expect("equip failed");
+
+    let sockets = jewels::socket_jewels(lua).expect("sockets failed");
+    let filled = sockets
+        .iter()
+        .find(|s| s.has_jewel && s.jewel_title.contains("Hover Test Jewel"))
+        .expect("filled socket");
+    let lines = jewels::socket_jewel_tooltip(lua, filled.node_id).expect("tooltip failed");
+    assert!(
+        lines.iter().any(|l| l.text.contains("Hover Test Jewel")),
+        "tooltip should show the jewel name, got {} lines",
+        lines.len()
+    );
+
+    // An empty socket yields no tooltip lines
+    let empty = sockets.iter().find(|s| !s.has_jewel);
+    if let Some(empty) = empty {
+        let lines = jewels::socket_jewel_tooltip(lua, empty.node_id).expect("tooltip failed");
+        assert!(
+            lines.is_empty(),
+            "empty socket should have no jewel tooltip"
+        );
     }
 }

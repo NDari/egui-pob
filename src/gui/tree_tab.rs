@@ -143,6 +143,8 @@ pub struct TreePanel {
     power: NodePowerState,
     /// Show stat difference previews in node tooltips (Ctrl+D toggles).
     show_stat_diffs: bool,
+    /// Item tooltip of the jewel in the hovered socket (node id, lines).
+    socket_tooltip: Option<(u32, Vec<pob_egui::data::items::TooltipLine>)>,
 }
 
 impl TreePanel {
@@ -191,6 +193,7 @@ impl TreePanel {
                     compare_diff: None,
                     power: NodePowerState::default(),
                     show_stat_diffs: true,
+                    socket_tooltip: None,
                 };
             }
         };
@@ -253,6 +256,7 @@ impl TreePanel {
             compare_diff: None,
             power: NodePowerState::default(),
             show_stat_diffs: true,
+            socket_tooltip: None,
         }
     }
 
@@ -734,6 +738,11 @@ impl TreePanel {
                     .as_ref()
                     .map(|(_, info)| info.diff.as_slice())
                     .unwrap_or(&[]),
+                hover_jewel: self
+                    .socket_tooltip
+                    .as_ref()
+                    .map(|(_, lines)| lines.as_slice())
+                    .unwrap_or(&[]),
             },
         );
 
@@ -835,6 +844,7 @@ impl TreePanel {
         // node changed, or when allocations changed (paths shift).
         if changed {
             self.hover_cache = None;
+            self.socket_tooltip = None;
         }
         let cached_id = self.hover_cache.as_ref().map(|(id, _)| *id);
         if view.hovered != cached_id {
@@ -843,6 +853,24 @@ impl TreePanel {
                     Ok(info) => Some((id, info)),
                     Err(e) => {
                         log::error!("Failed to fetch hover info for node {id}: {e}");
+                        None
+                    }
+                }
+            });
+            // Allocated sockets with a jewel show the jewel's item tooltip
+            self.socket_tooltip = view.hovered.and_then(|id| {
+                let is_filled_socket = tree_data
+                    .nodes
+                    .get(&id)
+                    .is_some_and(|n| n.node_type == NodeType::Socket && n.is_allocated);
+                if !is_filled_socket {
+                    return None;
+                }
+                match jewels::socket_jewel_tooltip(bridge.lua(), id) {
+                    Ok(lines) if !lines.is_empty() => Some((id, lines)),
+                    Ok(_) => None,
+                    Err(e) => {
+                        log::error!("Failed to fetch socket jewel tooltip: {e}");
                         None
                     }
                 }
@@ -866,6 +894,23 @@ impl TreePanel {
         match jewels::socket_jewels(bridge.lua()) {
             Ok(sockets) => self.jewel_sockets = sockets,
             Err(e) => log::error!("Failed to refresh jewel sockets: {e}"),
+        }
+    }
+
+    /// Re-extract the tree data while keeping the camera and sprite atlas.
+    /// Needed when item changes rebuild cluster jewel subgraphs (socketing or
+    /// removing a cluster jewel adds/removes tree nodes).
+    pub fn refresh_tree_data(&mut self, bridge: &LuaBridge) {
+        match TreeData::extract(bridge.lua()) {
+            Ok(td) => {
+                self.search_matches = td.search_matches(&self.search);
+                self.tree_data = Some(td);
+                self.search_cycle = None;
+                self.hover_cache = None;
+                self.current_cache = None;
+                self.compare_diff = None;
+            }
+            Err(e) => log::error!("Failed to refresh tree data: {e}"),
         }
     }
 

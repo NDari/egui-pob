@@ -104,7 +104,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Thread of Hope annular display (inner + outer ring)
 - [x] Impossible Escape keystone radius display
 - [~] Named jewel overlays (radius ring shown; themed rotating art not implemented)
-- [ ] Cluster jewel subgraph rendering
+- [x] Cluster jewel subgraph rendering (subgraph nodes/connections flow through spec.nodes into the renderer; tree data re-extracts when item changes rebuild subgraphs)
 - [x] Right-click jewel socket → jump to items tab
 
 ### Comparison

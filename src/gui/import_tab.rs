@@ -93,10 +93,11 @@ impl ImportPanel {
             }
         });
         if !self.export_code.is_empty() {
+            // Single line on purpose: the code is huge and a multiline box
+            // would grow until the buttons below are unreachable
             ui.add(
-                egui::TextEdit::multiline(&mut self.export_code.as_str())
+                egui::TextEdit::singleline(&mut self.export_code.as_str())
                     .desired_width(f32::INFINITY)
-                    .desired_rows(3)
                     .font(egui::TextStyle::Monospace),
             );
         }
@@ -110,9 +111,8 @@ impl ImportPanel {
             "Paste a build code or URL (pobb.in, pastebin, poe.ninja, maxroll, rentry, poedb):",
         );
         ui.add(
-            egui::TextEdit::multiline(&mut self.import_code)
+            egui::TextEdit::singleline(&mut self.import_code)
                 .desired_width(f32::INFINITY)
-                .desired_rows(3)
                 .hint_text("Paste build code or URL here...")
                 .font(egui::TextStyle::Monospace),
         );

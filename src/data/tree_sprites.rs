@@ -71,6 +71,9 @@ pub struct TreeSpriteAtlas {
     pub node_sprites: HashMap<String, NodeSprites>,
     /// Frame overlay sprites.
     pub frames: FrameSprites,
+    /// Socketed-jewel socket art (JewelSocketActiveBlue etc.), keyed by
+    /// upstream asset name, from the jewel-3.png sheet.
+    pub jewel_art: HashMap<String, SpriteRegion>,
     /// Ascendancy class background images, keyed by ascendancy name (e.g. "Berserker").
     pub ascendancy_backgrounds: HashMap<String, BackgroundImage>,
     /// Class start background images, keyed by asset name (e.g. "Str" for BackgroundStr).
@@ -102,7 +105,9 @@ impl TreeSpriteAtlas {
         let ascendancy_path = tree_data_dir.join("ascendancy-3.webp");
         let group_bg_path = tree_data_dir.join("group-background-3.png");
 
+        let jewel_path = tree_data_dir.join("jewel-3.png");
         let skills_index = load_sheet(&mut sheets, &skills_path);
+        let jewel_index = load_sheet(&mut sheets, &jewel_path);
         let frame_index = load_sheet(&mut sheets, &frame_path);
         let mastery_index = load_sheet(&mut sheets, &mastery_path);
         let mastery_connected_index = load_sheet(&mut sheets, &mastery_connected_path);
@@ -115,6 +120,9 @@ impl TreeSpriteAtlas {
         // Map filenames to sheet indices
         if let Some(idx) = skills_index {
             sheet_map.insert("skills-3.jpg".to_string(), idx);
+        }
+        if let Some(idx) = jewel_index {
+            sheet_map.insert("jewel-3.png".to_string(), idx);
         }
         if let Some(idx) = frame_index {
             sheet_map.insert("frame-3.png".to_string(), idx);
@@ -144,6 +152,7 @@ impl TreeSpriteAtlas {
         // Parse sprite coordinates from the processed spriteMap in Lua
         let node_sprites = extract_node_sprites(lua, &sheets, &sheet_map)?;
         let frames = extract_frame_sprites(lua, &sheets, &sheet_map)?;
+        let jewel_art = extract_jewel_art(lua, &sheets, &sheet_map)?;
 
         // Load standalone background images from the parent TreeData/ directory
         let tree_data_root = tree_data_dir.parent();
@@ -198,6 +207,7 @@ impl TreeSpriteAtlas {
             ascendancy_backgrounds,
             class_backgrounds,
             class_start_art,
+            jewel_art,
         })
     }
 
@@ -288,6 +298,59 @@ fn load_prefixed_backgrounds(
     }
 
     backgrounds
+}
+
+/// Extract jewel socket art (the "jewel" sprite section: JewelSocketActive*
+/// variants shown when a jewel is socketed) from Lua's spriteMap.
+fn extract_jewel_art(
+    lua: &Lua,
+    sheets: &[SpriteSheet],
+    sheet_map: &HashMap<String, usize>,
+) -> Result<HashMap<String, SpriteRegion>, mlua::Error> {
+    let mut jewel_art = HashMap::new();
+    let Some(jewel_idx) = sheet_map.get("jewel-3.png").copied() else {
+        return Ok(jewel_art);
+    };
+    let (sw, sh) = sheets
+        .get(jewel_idx)
+        .map(|s| (s.image.width() as f32, s.image.height() as f32))
+        .unwrap_or((1.0, 1.0));
+
+    let entries: LuaTable = lua
+        .load(
+            r#"
+            local tree = mainObject_ref.main.modes['BUILD'].spec.tree
+            local result = {}
+            if tree and tree.spriteMap then
+                for name, spriteSet in pairs(tree.spriteMap) do
+                    local sprite = spriteSet.jewel
+                    if type(sprite) == "table" and sprite[1] then
+                        result[name] = {
+                            u0 = sprite[1],
+                            v0 = sprite[2],
+                            u1 = sprite[3],
+                            v1 = sprite[4],
+                            w = sprite.width,
+                            h = sprite.height,
+                        }
+                    end
+                end
+            end
+            return result
+        "#,
+        )
+        .eval()?;
+
+    for pair in entries.pairs::<String, LuaTable>() {
+        let (name, coords) = pair?;
+        let mut region = parse_sprite_region(&coords, jewel_idx)?;
+        region.u_min /= sw;
+        region.v_min /= sh;
+        region.u_max /= sw;
+        region.v_max /= sh;
+        jewel_art.insert(name, region);
+    }
+    Ok(jewel_art)
 }
 
 /// Extract node icon sprites from Lua's processed spriteMap.

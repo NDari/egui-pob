@@ -66,6 +66,9 @@ pub struct TreeOverlays<'a> {
     /// Stat difference lines for `hover_node` (PoB color-coded), appended to
     /// its tooltip.
     pub hover_diff: &'a [String],
+    /// Item tooltip of the jewel socketed in `hover_node` (empty when the
+    /// hovered node is not a filled socket). Replaces the node tooltip.
+    pub hover_jewel: &'a [pob_egui::data::items::TooltipLine],
     /// Spec comparison diff (None when compare mode is off).
     pub compare: Option<&'a pob_egui::data::tree_specs::CompareDiff>,
     /// Jewel radius definitions for the active tree version.
@@ -409,8 +412,19 @@ pub fn draw_tree(
             egui::Color32::WHITE
         };
 
+        // Socketed jewels change the socket's art (crimson/viridian/cluster...)
+        let socket_art: Option<&str> = if node.node_type == NodeType::Socket {
+            overlays
+                .jewel_sockets
+                .iter()
+                .find(|s| s.node_id == node.id)
+                .and_then(|s| s.active_art.as_deref())
+        } else {
+            None
+        };
+
         let drew_sprite = if let Some(atlas) = atlas {
-            draw_node_sprite(&painter, node, screen_pos, radius, atlas, tint)
+            draw_node_sprite(&painter, node, screen_pos, radius, atlas, tint, socket_art)
         } else {
             false
         };
@@ -537,15 +551,21 @@ pub fn draw_tree(
             s.visuals.popup_shadow = egui::epaint::Shadow::NONE;
             s.visuals.window_corner_radius = egui::CornerRadius::ZERO;
         });
-        // Diff lines belong to the node the caller's hover cache is for;
-        // it can lag a frame behind the node hovered right now
-        let diff: &[String] = if overlays.hover_node == Some(node.id) {
-            overlays.hover_diff
-        } else {
-            &[]
-        };
+        // Diff/jewel lines belong to the node the caller's hover cache is
+        // for; it can lag a frame behind the node hovered right now
+        let (diff, jewel): (&[String], &[pob_egui::data::items::TooltipLine]) =
+            if overlays.hover_node == Some(node.id) {
+                (overlays.hover_diff, overlays.hover_jewel)
+            } else {
+                (&[], &[])
+            };
         response.clone().on_hover_ui_at_pointer(|ui| {
-            show_node_tooltip(ui, node, tooltip_headers, diff);
+            if !jewel.is_empty() {
+                // A socket with a jewel shows the jewel's item tooltip
+                show_jewel_tooltip(ui, jewel);
+            } else {
+                show_node_tooltip(ui, node, tooltip_headers, diff);
+            }
         });
         ui.ctx().style_mut(|s| s.visuals = saved);
     }
@@ -581,7 +601,39 @@ fn draw_node_sprite(
     radius: f32,
     atlas: &TreeSpriteAtlas,
     tint: egui::Color32,
+    socket_art: Option<&str>,
 ) -> bool {
+    // Jewel sockets: base frame first, then the filled-socket art on top
+    // (upstream draws the active-jewel art as an overlay; the frame graphic
+    // has an opaque center and would hide it the other way around)
+    if node.node_type == NodeType::Socket {
+        let mut drew = false;
+        let half = radius * 1.2;
+        let rect = egui::Rect::from_center_size(screen_pos, egui::vec2(half * 2.0, half * 2.0));
+        if let Some(frame) = get_frame_region(&atlas.frames, node)
+            && let Some(frame_tex) = atlas.texture_id(frame.sheet_index)
+        {
+            let frame_uv = egui::Rect::from_min_max(
+                egui::pos2(frame.u_min, frame.v_min),
+                egui::pos2(frame.u_max, frame.v_max),
+            );
+            painter.image(frame_tex, rect, frame_uv, tint);
+            drew = true;
+        }
+        if node.is_allocated
+            && let Some(region) = socket_art.and_then(|name| atlas.jewel_art.get(name))
+            && let Some(tex) = atlas.texture_id(region.sheet_index)
+        {
+            let uv = egui::Rect::from_min_max(
+                egui::pos2(region.u_min, region.v_min),
+                egui::pos2(region.u_max, region.v_max),
+            );
+            painter.image(tex, rect, uv, tint);
+            drew = true;
+        }
+        return drew;
+    }
+
     // ClassStart nodes use dedicated art instead of normal icon+frame
     if node.node_type == NodeType::ClassStart {
         let art_name = if node.is_allocated {
@@ -782,6 +834,36 @@ fn node_type_color(node_type: NodeType) -> egui::Color32 {
         NodeType::Mastery => Palette::MASTERY,
         NodeType::ClassStart | NodeType::AscendClassStart => Palette::CLASS_START,
     }
+}
+
+/// Item tooltip for the jewel socketed in a hovered tree socket, framed like
+/// the node tooltips.
+fn show_jewel_tooltip(ui: &mut egui::Ui, lines: &[pob_egui::data::items::TooltipLine]) {
+    let frame = egui::Frame::NONE
+        .fill(TOOLTIP_BG)
+        .stroke(egui::Stroke::new(
+            TOOLTIP_BORDER_WIDTH,
+            TOOLTIP_BORDER_COLOR,
+        ))
+        .inner_margin(egui::Margin::same(6));
+    frame.show(ui, |ui| {
+        ui.set_max_width(340.0);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for line in lines {
+            if line.is_separator {
+                ui.separator();
+            } else if line.text.is_empty() {
+                ui.add_space(line.size * 0.4);
+            } else {
+                let size = (line.size * 0.75).clamp(9.0, 16.0);
+                ui.label(super::theme::pob_layout_job(
+                    &line.text,
+                    size,
+                    egui::Color32::WHITE,
+                ));
+            }
+        }
+    });
 }
 
 /// Rich tooltip for a passive tree node, styled to match upstream PoB.

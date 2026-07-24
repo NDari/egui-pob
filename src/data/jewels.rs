@@ -4,6 +4,56 @@
 
 use mlua::prelude::*;
 
+use super::items::TooltipLine;
+
+/// Full item tooltip for the jewel socketed in a tree socket node, with the
+/// socket as slot context (radius stats etc.). Empty when the socket has no
+/// jewel. Mirrors upstream's socket-hover special case in AddNodeTooltip.
+pub fn socket_jewel_tooltip(lua: &Lua, node_id: u32) -> Result<Vec<TooltipLine>, mlua::Error> {
+    let result: LuaTable = lua
+        .load(
+            r#"
+            local nodeId = ...
+            local build = mainObject_ref.main.modes['BUILD']
+            local itemsTab = build.itemsTab
+            local socket, jewel = itemsTab:GetSocketAndJewelForNodeID(nodeId)
+            if not jewel then
+                return { lines = {} }
+            end
+            local tt = new("Tooltip")
+            local ok, err = pcall(function()
+                itemsTab:AddItemTooltip(tt, jewel, { nodeId = nodeId })
+            end)
+            local lines = {}
+            for _, line in ipairs(tt.lines) do
+                table.insert(lines, {
+                    text = line.text or "",
+                    size = line.size or 16,
+                    sep = line.text == nil,
+                })
+            end
+            return { lines = lines, err = not ok and tostring(err) or nil }
+        "#,
+        )
+        .call(node_id)?;
+
+    if let Ok(err) = result.get::<String>("err") {
+        log::warn!("Socket jewel tooltip failed for node {node_id}: {err}");
+    }
+
+    let lines_table: LuaTable = result.get("lines")?;
+    let mut lines = Vec::new();
+    for pair in lines_table.sequence_values::<LuaTable>() {
+        let line = pair?;
+        lines.push(TooltipLine {
+            text: line.get("text").unwrap_or_default(),
+            size: line.get("size").unwrap_or(16.0),
+            is_separator: line.get("sep").unwrap_or(false),
+        });
+    }
+    Ok(lines)
+}
+
 /// One entry of upstream's data.jewelRadius for the active tree version.
 #[derive(Debug, Clone)]
 pub struct RadiusDef {
@@ -30,6 +80,9 @@ pub struct SocketInfo {
     /// Tree positions to draw the ring at instead of the socket
     /// (Impossible Escape draws on its keystones).
     pub keystone_positions: Vec<(f32, f32)>,
+    /// Socket art asset for the socketed jewel (e.g. "JewelSocketActiveRed"),
+    /// following upstream's base-name mapping. None when empty.
+    pub active_art: Option<String>,
 }
 
 /// Parse "^xRRGGBB" into a colour (white on failure).
@@ -90,10 +143,13 @@ pub fn socket_jewels(lua: &Lua) -> Result<Vec<SocketInfo>, mlua::Error> {
             local spec = build.spec
             local tree = spec.tree
             local result = {}
+            -- spec.nodes only contains sockets that are actually visible:
+            -- hidden proxy expansion sockets are excluded at spec creation and
+            -- only appear (under their base ids) while a cluster subgraph
+            -- spawns them, so no size filtering is needed here
             for nodeId in pairs(tree.sockets) do
                 local node = spec.nodes[nodeId]
-                if node and node.name ~= "Charm Socket"
-                   and (not node.expansionJewel or node.expansionJewel.size == 2) then
+                if node and node.name ~= "Charm Socket" then
                     local socket, jewel = build.itemsTab:GetSocketAndJewelForNodeID(nodeId)
                     local entry = {
                         nodeId = nodeId,
@@ -111,6 +167,31 @@ pub fn socket_jewels(lua: &Lua) -> Result<Vec<SocketInfo>, mlua::Error> {
                             if keystone and keystone.x and keystone.y then
                                 table.insert(entry.keystones, { x = keystone.x, y = keystone.y })
                             end
+                        end
+                    end
+                    -- Socket art per jewel base, mirroring upstream's
+                    -- PassiveTreeView overlay selection
+                    if jewel then
+                        local alt = node.expansionJewel ~= nil
+                        local base = jewel.baseName
+                        if base == "Crimson Jewel" then
+                            entry.activeArt = alt and "JewelSocketActiveRedAlt" or "JewelSocketActiveRed"
+                        elseif base == "Viridian Jewel" then
+                            entry.activeArt = alt and "JewelSocketActiveGreenAlt" or "JewelSocketActiveGreen"
+                        elseif base == "Cobalt Jewel" then
+                            entry.activeArt = alt and "JewelSocketActiveBlueAlt" or "JewelSocketActiveBlue"
+                        elseif base == "Prismatic Jewel" then
+                            entry.activeArt = alt and "JewelSocketActivePrismaticAlt" or "JewelSocketActivePrismatic"
+                        elseif jewel.base and jewel.base.subType == "Abyss" then
+                            entry.activeArt = alt and "JewelSocketActiveAbyssAlt" or "JewelSocketActiveAbyss"
+                        elseif base == "Timeless Jewel" then
+                            entry.activeArt = alt and "JewelSocketActiveLegionAlt" or "JewelSocketActiveLegion"
+                        elseif base == "Large Cluster Jewel" then
+                            entry.activeArt = "JewelSocketActiveAltPurple"
+                        elseif base == "Medium Cluster Jewel" then
+                            entry.activeArt = "JewelSocketActiveAltBlue"
+                        elseif base == "Small Cluster Jewel" then
+                            entry.activeArt = "JewelSocketActiveAltRed"
                         end
                     end
                     table.insert(result, entry)
@@ -147,6 +228,7 @@ pub fn socket_jewels(lua: &Lua) -> Result<Vec<SocketInfo>, mlua::Error> {
                 .and_then(|i| i.checked_sub(1)),
             is_variable: entry.get("isVariable").unwrap_or(false),
             keystone_positions,
+            active_art: entry.get("activeArt").ok(),
         });
     }
     Ok(sockets)

@@ -590,9 +590,11 @@ impl BuildView {
                             panel.item_db = db;
                         }
                         self.items_panel = Some(panel);
-                        // Items can grant skills and socket jewels into the tree
+                        // Items can grant skills and socket jewels into the tree;
+                        // cluster jewels add/remove whole subgraphs of nodes
                         self.skills_panel = Some(SkillsPanel::new(bridge.lua()));
                         if let Some(ref mut tree) = self.tree_panel {
+                            tree.refresh_tree_data(bridge);
                             tree.refresh_jewels(bridge);
                         }
                     }
