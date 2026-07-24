@@ -30,6 +30,12 @@ impl Palette {
     const DEPENDENT: egui::Color32 = egui::Color32::from_rgb(220, 60, 50);
     /// Red tint applied to sprites of dependent nodes.
     const DEPENDENT_TINT: egui::Color32 = egui::Color32::from_rgb(255, 90, 80);
+    /// Compare mode: allocated in the compare spec, not the current one.
+    const COMPARE_ADD: egui::Color32 = egui::Color32::from_rgb(80, 230, 80);
+    /// Compare mode: allocated in the current spec, not the compare one.
+    const COMPARE_REMOVE: egui::Color32 = egui::Color32::from_rgb(235, 70, 60);
+    /// Compare mode: mastery allocated in both with a different effect.
+    const COMPARE_MASTERY: egui::Color32 = egui::Color32::from_rgb(100, 150, 255);
 }
 
 /// A click on a tree node.
@@ -57,6 +63,8 @@ pub struct TreeOverlays<'a> {
     pub hover_path: &'a HashSet<u32>,
     /// Nodes that would disconnect if `hover_node` were deallocated.
     pub hover_depends: &'a HashSet<u32>,
+    /// Spec comparison diff (None when compare mode is off).
+    pub compare: Option<&'a pob_egui::data::tree_specs::CompareDiff>,
 }
 
 /// Border color for passive tooltips (upstream default: rgb(128, 77, 0)).
@@ -424,6 +432,24 @@ pub fn draw_tree(
                 ring_radius,
                 egui::Stroke::new(2.5_f32, Palette::SEARCH_HIGHLIGHT),
             );
+        }
+
+        // Spec comparison rings: green = would allocate (in compare spec
+        // only), red = would deallocate (in current only), blue = mastery
+        // with a different effect selected.
+        if let Some(diff) = overlays.compare {
+            let ring_color = if diff.mastery_diff.contains(&node.id) {
+                Some(Palette::COMPARE_MASTERY)
+            } else if diff.to_allocate.contains(&node.id) {
+                Some(Palette::COMPARE_ADD)
+            } else if diff.to_deallocate.contains(&node.id) {
+                Some(Palette::COMPARE_REMOVE)
+            } else {
+                None
+            };
+            if let Some(color) = ring_color {
+                painter.circle_stroke(screen_pos, radius + 3.0, egui::Stroke::new(3.0_f32, color));
+            }
         }
     }
 

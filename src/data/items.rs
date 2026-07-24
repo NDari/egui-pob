@@ -347,6 +347,80 @@ pub fn add_item_from_raw(lua: &Lua, raw: &str) -> Result<Option<String>, mlua::E
     .call(raw)
 }
 
+/// Get an item's raw text (upstream's Item:BuildRaw), as shown in the
+/// edit-item popup. Includes the "Rarity:" line.
+pub fn get_item_raw(lua: &Lua, item_id: i64) -> Result<String, mlua::Error> {
+    lua.load(
+        r#"
+        local itemId = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local item = build.itemsTab.items[itemId]
+        if not item then
+            return ""
+        end
+        return item:BuildRaw()
+    "#,
+    )
+    .call(item_id)
+}
+
+/// Check whether raw item text parses to a valid item.
+pub fn validate_item_raw(lua: &Lua, raw: &str) -> Result<bool, mlua::Error> {
+    lua.load(
+        r#"
+        local raw = ...
+        local item = new("Item", raw)
+        return item ~= nil and item.base ~= nil
+    "#,
+    )
+    .call(raw)
+}
+
+/// Replace an existing item's text, re-parsing with upstream's Item:ParseRaw.
+/// The item keeps its id, so it stays equipped wherever it was. Mirrors
+/// upstream's EditDisplayItemText save path (no quality normalisation).
+/// Returns Some(error) if the new text is not a valid item.
+pub fn replace_item_from_raw(
+    lua: &Lua,
+    item_id: i64,
+    raw: &str,
+) -> Result<Option<String>, mlua::Error> {
+    lua.load(
+        r#"
+        local itemId, raw = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        if not itemsTab.items[itemId] then
+            return "No such item"
+        end
+        local newItem = new("Item", raw)
+        if not newItem or not newItem.base then
+            return "Unrecognised item text"
+        end
+        newItem.id = itemId
+        itemsTab:AddItem(newItem, true)
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+        return nil
+    "#,
+    )
+    .call((item_id, raw))
+}
+
+/// Sort the item list with upstream's SortItemList (by slot order, equipped
+/// first, then by name).
+pub fn sort_item_list(lua: &Lua) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.itemsTab:SortItemList()
+    "#,
+    )
+    .exec()
+}
+
 /// Build the full upstream tooltip for an item using ItemsTab:AddItemTooltip.
 /// Pass a slot name to include the "Equipping this item will..." stat diff
 /// for that slot; pass None for the plain item tooltip.

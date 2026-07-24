@@ -133,6 +133,22 @@ impl LuaBridge {
         Self::run_callback_static(&self.lua, "OnFrame")?;
         Self::run_callback_static(&self.lua, "OnFrame")?;
 
+        // Upstream marks XML-text loads as modified (that path is normally
+        // only used for imports). A build opened from its own file starts
+        // clean, like upstream's LoadDBFile path.
+        if db_file_name.is_some() {
+            self.lua
+                .load(
+                    r#"
+                    local build = mainObject_ref.main.modes['BUILD']
+                    build.modFlag = false
+                    build.unsaved = false
+                "#,
+                )
+                .exec()
+                .map_err(lua_err("Failed to clear modFlag"))?;
+        }
+
         log::info!("Build loaded: {name}");
         Ok(())
     }
@@ -164,6 +180,32 @@ impl LuaBridge {
             .map_err(lua_err("Failed to get buildPath"))
     }
 
+    /// Whether the build has unsaved changes (upstream's build.unsaved,
+    /// recomputed from all tab modFlags every OnFrame).
+    pub fn is_build_dirty(&self) -> bool {
+        self.lua
+            .load("return mainObject_ref.main.modes['BUILD'].unsaved == true")
+            .eval()
+            .unwrap_or(false)
+    }
+
+    /// The build's file path on disk, if it has been saved before.
+    pub fn build_file_name(&self) -> Option<String> {
+        self.lua
+            .load(
+                r#"
+                local name = mainObject_ref.main.modes['BUILD'].dbFileName
+                if type(name) == "string" and name ~= "" then
+                    return name
+                end
+                return nil
+            "#,
+            )
+            .eval::<Option<String>>()
+            .ok()
+            .flatten()
+    }
+
     /// Save the current build to its existing file (build.dbFileName).
     /// Fails if the build has never been saved - use save_build_as first.
     pub fn save_build(&self) -> Result<()> {
@@ -179,6 +221,7 @@ impl LuaBridge {
                 if build:SaveDBFile() then
                     return "Couldn't write " .. build.dbFileName
                 end
+                build.unsaved = false
                 return nil
             "#,
             )
@@ -216,6 +259,7 @@ impl LuaBridge {
                 if build:SaveDBFile() then
                     return "Couldn't write " .. build.dbFileName
                 end
+                build.unsaved = false
                 return nil
             "#,
             )

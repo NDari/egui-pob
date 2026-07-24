@@ -897,6 +897,54 @@ fn test_item_management_roundtrip() {
         "+50 life ring should raise Life ({life_before} -> {life_after})"
     );
 
+    // Edit the item's raw text: raise the life roll. The id must be kept, so
+    // the item stays equipped in Ring 1.
+    let raw = items::get_item_raw(lua, new_item.id).expect("get raw failed");
+    assert!(
+        raw.contains("+50 to maximum Life"),
+        "raw text should contain the life mod: {raw}"
+    );
+    assert!(
+        items::validate_item_raw(lua, &raw).expect("validate call failed"),
+        "BuildRaw output should validate"
+    );
+    assert!(
+        !items::validate_item_raw(lua, "garbage").expect("validate call failed"),
+        "garbage should not validate"
+    );
+    let edited = raw.replace("+50 to maximum Life", "+80 to maximum Life");
+    let err = items::replace_item_from_raw(lua, new_item.id, &edited).expect("replace call failed");
+    assert!(err.is_none(), "edited item should parse: {err:?}");
+    let equipped = items::extract_equipped_items(lua).expect("re-extract equipped failed");
+    let ring1 = equipped
+        .iter()
+        .find(|s| s.slot_name == "Ring 1")
+        .expect("Ring 1 slot");
+    assert_eq!(
+        ring1.sel_item_id, new_item.id,
+        "edited ring should stay equipped"
+    );
+    let life_edited = pob_egui::data::CalcOutput::extract(lua)
+        .expect("calc extract failed")
+        .stats
+        .get("Life")
+        .copied()
+        .unwrap_or(0.0);
+    assert!(
+        life_edited > life_after,
+        "raising the life roll should raise Life ({life_after} -> {life_edited})"
+    );
+
+    // Sorting keeps the same set of items
+    items::sort_item_list(lua).expect("sort failed");
+    let sorted = items::extract_item_list(lua).expect("re-extract failed");
+    assert_eq!(sorted.len(), initial_count + 1, "sort must not drop items");
+    let mut ids_before: Vec<i64> = list.iter().map(|e| e.id).collect();
+    let mut ids_after: Vec<i64> = sorted.iter().map(|e| e.id).collect();
+    ids_before.sort_unstable();
+    ids_after.sort_unstable();
+    assert_eq!(ids_before, ids_after, "sort must keep the same item ids");
+
     // Unequip
     items::equip_item(lua, "Ring 1", 0).expect("unequip failed");
     let equipped = items::extract_equipped_items(lua).expect("re-extract equipped failed");
@@ -935,14 +983,33 @@ fn test_save_as_writes_to_build_path() {
         .call::<()>(build_path.as_str())
         .expect("failed to redirect buildPath");
 
-    // A build loaded without a file has no dbFileName — plain Save must fail
+    // A build loaded without a file has no dbFileName - plain Save must fail
     let err = bridge.save_build();
     assert!(err.is_err(), "Save without a filename should fail");
+    assert!(
+        bridge.build_file_name().is_none(),
+        "loaded-from-text build should have no file"
+    );
+
+    // A build loaded from XML text (import path) counts as unsaved, matching
+    // upstream's semantics for imported builds
+    assert!(
+        bridge.is_build_dirty(),
+        "text-loaded build counts as unsaved"
+    );
 
     // Save As sanitises the name and writes <buildPath><name>.xml
     bridge
         .save_build_as("My: Save/Test?")
         .expect("Save As failed");
+    assert!(!bridge.is_build_dirty(), "Save As should clear dirty state");
+
+    // A change re-dirties; Save clears it again
+    pob_egui::data::config::set_config_value(lua, "conditionEnemyShocked", LuaValue::Boolean(true))
+        .expect("config change failed");
+    assert!(bridge.is_build_dirty(), "config change should mark dirty");
+    bridge.save_build().expect("Save failed");
+    assert!(!bridge.is_build_dirty(), "Save should clear dirty state");
     let expected = tmp_dir.join("My- Save-Test-.xml");
     assert!(
         expected.is_file(),
@@ -975,6 +1042,406 @@ fn test_save_as_writes_to_build_path() {
         expected.to_string_lossy(),
         "reloaded build should keep its file path"
     );
+    assert!(
+        !bridge.is_build_dirty(),
+        "build opened from its own file starts clean"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Character import plumbing (canned API responses, no network)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_char_import_plumbing() {
+    use pob_egui::data::char_import::{self, CharacterInfo};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Character list parsing (valid response)
+    let chars = char_import::parse_character_list(
+        lua,
+        r#"[{"name":"TestChar","league":"Standard","class":"Witch","level":93},
+            {"name":"AltChar","league":"Settlers","class":"Duelist","level":12}]"#,
+    )
+    .expect("valid list should parse");
+    assert_eq!(chars.len(), 2);
+    assert_eq!(chars[0].name, "TestChar");
+    assert_eq!(chars[0].league, "Standard");
+    assert_eq!(chars[0].class, "Witch");
+    assert_eq!(chars[0].level, 93);
+
+    // API error object becomes an error
+    let err = char_import::parse_character_list(
+        lua,
+        r#"{"error":{"code":1,"message":"Resource not found"}}"#,
+    )
+    .expect_err("error response should fail");
+    assert!(
+        err.to_string().contains("Resource not found"),
+        "error message should surface: {err}"
+    );
+
+    // Import a synthetic empty passive tree: all points deallocated, level set
+    let character = CharacterInfo {
+        name: "TestChar".to_string(),
+        league: "Standard".to_string(),
+        class: "Scion".to_string(),
+        level: 42,
+    };
+    let tree_json = r#"{"character":0,"ascendancy":0,"alternate_ascendancy":0,
+        "hashes":[],"hashes_ex":[],"jewel_data":{},"items":[],"mastery_effects":{}}"#;
+    let status = char_import::import_passive_tree_and_jewels(lua, tree_json, &character, true)
+        .expect("tree import call failed");
+    assert!(
+        status.contains("successfully"),
+        "tree import should succeed: {status}"
+    );
+    let (level, points): (i64, i64) = lua
+        .load(
+            r#"
+            local build = mainObject_ref.main.modes['BUILD']
+            local used = 0
+            for _ in pairs(build.spec.allocNodes) do used = used + 1 end
+            return build.characterLevel, used
+        "#,
+        )
+        .eval()
+        .expect("failed to read build state");
+    assert_eq!(level, 42, "character level should be applied");
+    assert!(
+        points <= 1,
+        "empty import should leave only the class start allocated, got {points}"
+    );
+
+    // Import synthetic empty items (keep existing skills/items)
+    let items_json = r#"{"items":[],"character":{"name":"TestChar","level":55}}"#;
+    let status = char_import::import_items_and_skills(lua, items_json, false, false, false)
+        .expect("items import call failed");
+    assert!(
+        status.contains("successfully"),
+        "items import should succeed: {status}"
+    );
+    let level: i64 = lua
+        .load("return mainObject_ref.main.modes['BUILD'].characterLevel")
+        .eval()
+        .expect("failed to read level");
+    assert_eq!(level, 55, "items import should update the level");
+}
+
+// ---------------------------------------------------------------------------
+// Gem search (upstream GemSelectControl)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_gem_search() {
+    use pob_egui::data::gems;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Exact name match ranks first
+    let results = gems::search_gems(lua, 1, "Fireball", false, 12).expect("search failed");
+    assert!(!results.is_empty(), "Fireball should match");
+    assert_eq!(results[0].name, "Fireball");
+    assert!(!results[0].is_support);
+
+    // Abbreviation matching ("CtF" -> "Cold to Fire")
+    let results = gems::search_gems(lua, 1, "CtF", false, 12).expect("search failed");
+    assert!(
+        results.iter().any(|g| g.name == "Cold to Fire"),
+        "CtF should match Cold to Fire: {:?}",
+        results.iter().map(|g| &g.name).collect::<Vec<_>>()
+    );
+
+    // Tag search: ":aura" returns only gems with the aura tag
+    let results = gems::search_gems(lua, 1, ":aura", false, 50).expect("search failed");
+    assert!(!results.is_empty(), "aura tag should match gems");
+    assert!(
+        results.iter().any(|g| g.name == "Anger"),
+        "Anger is an aura"
+    );
+
+    // Tag exclusion: ":aura:-fire" excludes Anger
+    let results = gems::search_gems(lua, 1, ":aura:-fire", false, 50).expect("search failed");
+    assert!(!results.is_empty());
+    assert!(
+        !results.iter().any(|g| g.name == "Anger"),
+        "Anger has the fire tag and must be excluded"
+    );
+
+    // Support-compatibility marks: search supports for the main socket group
+    // (test build's group 1 has an active skill)
+    let results = gems::search_gems(lua, 1, "Support", false, 50).expect("search failed");
+    let supports: Vec<_> = results.iter().filter(|g| g.is_support).collect();
+    assert!(!supports.is_empty(), "should find support gems");
+    assert!(
+        supports.iter().any(|g| g.can_support),
+        "some support should be compatible with the main skill"
+    );
+
+    // DPS sorting produces DPS values and colors
+    let results = gems::search_gems(lua, 1, "Support", true, 20).expect("dps search failed");
+    assert!(
+        results
+            .iter()
+            .any(|g| g.dps > 0.0 && !g.dps_color.is_empty()),
+        "DPS sort should compute values"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tree specs: create, copy, rename, switch, delete, URL round-trip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_tree_specs_roundtrip() {
+    use pob_egui::data::tree_specs;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let (specs, active) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs.len(), 1, "test build has one spec");
+    assert_eq!(active, 1);
+    let original_alloc: i64 = lua
+        .load("local n = 0; for _ in pairs(mainObject_ref.main.modes['BUILD'].spec.allocNodes) do n = n + 1 end; return n")
+        .eval()
+        .expect("count failed");
+    assert!(original_alloc > 10, "test build has an allocated tree");
+
+    // Copy the current spec: same allocation count, becomes active
+    tree_specs::copy_spec(lua, 1, "My Copy").expect("copy failed");
+    let (specs, active) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs.len(), 2);
+    assert_eq!(active, 2, "copy becomes active");
+    assert_eq!(specs[1].title, "My Copy");
+    let copy_alloc: i64 = lua
+        .load("local n = 0; for _ in pairs(mainObject_ref.main.modes['BUILD'].spec.allocNodes) do n = n + 1 end; return n")
+        .eval()
+        .expect("count failed");
+    assert_eq!(copy_alloc, original_alloc, "copy preserves allocations");
+
+    // New empty spec keeps the class but no allocations
+    tree_specs::new_spec(lua, "Empty Tree").expect("new failed");
+    let (specs, active) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs.len(), 3);
+    assert_eq!(active, 3);
+    let empty_alloc: i64 = lua
+        .load("local n = 0; for _ in pairs(mainObject_ref.main.modes['BUILD'].spec.allocNodes) do n = n + 1 end; return n")
+        .eval()
+        .expect("count failed");
+    // Class start + ascendancy start are auto-allocated
+    assert!(
+        empty_alloc <= 2,
+        "new spec should have only start nodes allocated, got {empty_alloc}"
+    );
+
+    // Rename
+    tree_specs::rename_spec(lua, 3, "Renamed").expect("rename failed");
+    let (specs, _) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs[2].title, "Renamed");
+
+    // Switch back to the original: allocations restored
+    tree_specs::set_active_spec(lua, 1).expect("switch failed");
+    let (_, active) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(active, 1);
+    let back_alloc: i64 = lua
+        .load("local n = 0; for _ in pairs(mainObject_ref.main.modes['BUILD'].spec.allocNodes) do n = n + 1 end; return n")
+        .eval()
+        .expect("count failed");
+    assert_eq!(back_alloc, original_alloc);
+
+    // Export the active spec, import it back as a new spec. Compare only what
+    // the official URL format carries: it skips class/ascendancy start nodes,
+    // and its 2-bit secondary-ascendancy field can't encode bloodline ids > 3
+    // (upstream limitation).
+    let count_real_nodes = r#"
+        local n = 0
+        for id, node in pairs(mainObject_ref.main.modes['BUILD'].spec.allocNodes) do
+            if id < 65536 and node.type ~= "ClassStart" and node.type ~= "AscendClassStart" then
+                n = n + 1
+            end
+        end
+        return n
+    "#;
+    let original_real: i64 = lua.load(count_real_nodes).eval().expect("count failed");
+    let url = tree_specs::export_tree_url(lua).expect("export failed");
+    assert!(
+        url.starts_with("https://www.pathofexile.com/passive-skill-tree/"),
+        "export should produce an official URL: {url}"
+    );
+    let err = tree_specs::import_tree_url(lua, &url, "Reimported").expect("import call failed");
+    assert!(err.is_none(), "imported URL should decode: {err:?}");
+    let (specs, active) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs.len(), 4);
+    assert_eq!(active, 4);
+    assert_eq!(specs[3].title, "Reimported");
+    let reimport_real: i64 = lua.load(count_real_nodes).eval().expect("count failed");
+    assert_eq!(
+        reimport_real, original_real,
+        "URL round-trip preserves real tree node allocations"
+    );
+
+    // Delete the copies; the last spec cannot be deleted
+    tree_specs::delete_spec(lua, 4).expect("delete failed");
+    tree_specs::delete_spec(lua, 3).expect("delete failed");
+    tree_specs::delete_spec(lua, 2).expect("delete failed");
+    let (specs, active) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs.len(), 1);
+    assert_eq!(active, 1);
+    tree_specs::delete_spec(lua, 1).expect("delete call failed");
+    let (specs, _) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs.len(), 1, "the last spec must not be deletable");
+}
+
+// ---------------------------------------------------------------------------
+// Tree comparison: spec allocation extraction and diff
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_tree_compare_diff() {
+    use pob_egui::data::tree_specs;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Copy the spec; the copy becomes active (index 2), original is index 1
+    tree_specs::copy_spec(lua, 1, "Compare Target").expect("copy failed");
+
+    // Identical specs diff to nothing
+    let original = tree_specs::spec_allocation(lua, 1).expect("alloc read failed");
+    let current = tree_specs::spec_allocation(lua, 2).expect("alloc read failed");
+    assert!(!original.allocated.is_empty());
+    assert_eq!(original.allocated, current.allocated);
+    let diff = tree_specs::compare_diff(&current, &original);
+    assert!(diff.to_allocate.is_empty(), "identical specs: no diff");
+    assert!(diff.to_deallocate.is_empty(), "identical specs: no diff");
+    assert!(diff.mastery_diff.is_empty(), "identical specs: no diff");
+
+    // Allocate one more node on the active copy
+    let node_id: u32 = lua
+        .load(
+            r#"
+            local build = mainObject_ref.main.modes['BUILD']
+            local spec = build.spec
+            spec:BuildAllDependsAndPaths()
+            for id, node in pairs(spec.nodes) do
+                if not spec.allocNodes[id]
+                   and node.type == "Normal"
+                   and not node.ascendancyName
+                   and node.path and #node.path > 0 then
+                    spec:AllocNode(node)
+                    spec:AddUndoState()
+                    build.buildFlag = true
+                    _runCallback('OnFrame')
+                    return id
+                end
+            end
+            return 0
+        "#,
+        )
+        .eval()
+        .expect("failed to allocate node");
+    assert!(node_id > 0);
+
+    // Now the diff shows exactly the newly allocated nodes as current-only
+    // (AllocNode allocates the node plus any path nodes leading to it)
+    let current = tree_specs::spec_allocation(lua, 2).expect("alloc read failed");
+    let newly: std::collections::HashSet<u32> = current
+        .allocated
+        .difference(&original.allocated)
+        .copied()
+        .collect();
+    assert!(
+        newly.contains(&node_id) && !newly.is_empty(),
+        "allocation should add the chosen node"
+    );
+    let diff = tree_specs::compare_diff(&current, &original);
+    assert_eq!(
+        diff.to_deallocate, newly,
+        "newly allocated nodes are current-only"
+    );
+    assert!(diff.to_allocate.is_empty());
+
+    // And in the opposite direction they show as compare-only (green)
+    let reverse = tree_specs::compare_diff(&original, &current);
+    assert_eq!(reverse.to_allocate, newly);
+    assert!(reverse.to_deallocate.is_empty());
+
+    // The test build uses masteries: selections should be extracted
+    assert!(
+        !current.mastery_selections.is_empty(),
+        "test build should have mastery selections"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tree version conversion
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_tree_version_conversion() {
+    use pob_egui::data::tree_specs;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Version list: non-empty, exactly one latest, and it is the last entry
+    let versions = tree_specs::list_tree_versions(lua).expect("version list failed");
+    assert!(versions.len() > 5, "should know many tree versions");
+    let latest: Vec<_> = versions.iter().filter(|v| v.is_latest).collect();
+    assert_eq!(latest.len(), 1, "exactly one latest version");
+    let latest = latest[0].clone();
+    assert_eq!(versions.last().unwrap().id, latest.id);
+    assert!(!latest.display.is_empty());
+
+    // The loaded build's spec is on the latest version
+    let (specs, active) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(active, 1);
+    assert!(specs[0].is_latest_version);
+
+    // Copy + Convert to the previous version: a converted copy is inserted
+    // and becomes active, the original stays on the latest version.
+    // (Skip subtype variants of the latest version, e.g. 3_28_ruthless.)
+    let previous = versions
+        .iter()
+        .rev()
+        .find(|v| !v.id.starts_with(&latest.id))
+        .expect("an older version should exist")
+        .clone();
+    tree_specs::convert_to_version(lua, &previous.id, false, true).expect("convert failed");
+    let (specs, active) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs.len(), 2, "copy+convert adds a spec");
+    assert_eq!(active, 2, "converted copy becomes active");
+    assert_eq!(specs[1].tree_version, previous.id);
+    assert!(!specs[1].is_latest_version, "converted spec is outdated");
+    assert!(specs[0].is_latest_version, "original is untouched");
+
+    // Some allocations should survive the downgrade
+    let converted = tree_specs::spec_allocation(lua, 2).expect("alloc read failed");
+    assert!(
+        converted.allocated.len() > 10,
+        "most allocations should survive a one-version downgrade, got {}",
+        converted.allocated.len()
+    );
+
+    // Convert all trees to the latest version: everything ends up latest,
+    // spec count unchanged, active index preserved
+    tree_specs::convert_all_to_version(lua, &latest.id).expect("convert all failed");
+    let (specs, active) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs.len(), 2, "convert-all replaces in place");
+    assert_eq!(active, 2, "active index preserved");
+    assert!(
+        specs.iter().all(|s| s.is_latest_version),
+        "all specs should be on the latest version: {specs:?}"
+    );
 }

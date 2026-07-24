@@ -27,8 +27,8 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Save build to disk (Save)
 - [x] Save As (new name, for new builds)
 - [ ] Save As with folder browser (like upstream's folder list + new folder)
-- [ ] Save confirmation popup on close/switch with unsaved changes
-- [ ] Auto-save / dirty-state tracking
+- [x] Save confirmation popup on close/switch with unsaved changes
+- [~] Auto-save / dirty-state tracking (dirty tracking via upstream build.unsaved done; auto-save not planned)
 
 ### Loadout System
 - [ ] Multiple loadouts per build (linked tree/items/skills/config sets)
@@ -106,25 +106,25 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Right-click jewel socket → jump to items tab
 
 ### Comparison
-- [ ] Compare checkbox to enable comparison mode
-- [ ] Compare spec dropdown to select comparison tree
-- [ ] Green/red node diff coloring (allocate/deallocate indicators)
-- [ ] Blue mastery diff (different effect selected)
+- [x] Compare checkbox to enable comparison mode
+- [x] Compare spec dropdown to select comparison tree
+- [x] Green/red node diff coloring (allocate/deallocate indicators)
+- [x] Blue mastery diff (different effect selected)
 
 ### Tree Specs
-- [ ] Multiple tree specs per build
-- [ ] Spec management popup (create, delete, rename, reorder)
-- [ ] Import tree from URL (PoE official, PoePlanner, PoESkillTree, PoEURL)
-- [ ] Export tree as URL
-- [ ] Copy tree URL to clipboard
+- [x] Multiple tree specs per build (dropdown in tree toolbar)
+- [~] Spec management popup (create, copy, delete, rename done; reorder pending)
+- [x] Import tree from URL (PoE official, PoePlanner; poeurl shortlinks expanded via HTTP)
+- [x] Export tree as URL
+- [x] Copy tree URL to clipboard
 - [ ] PoEURL shortlink generation
 
 ### Tree Version
-- [ ] Tree version dropdown
-- [ ] Convert to latest version button
-- [ ] Convert all trees button
-- [ ] Version mismatch warning banner
-- [ ] Conversion confirmation popup
+- [x] Tree version dropdown
+- [x] Convert to latest version button
+- [x] Convert all trees button
+- [x] Version mismatch warning banner
+- [x] Conversion confirmation popup (Convert / Copy + Convert / Cancel)
 
 ### Tattoos
 - [ ] Modify node popup (tattoo selection)
@@ -169,11 +169,11 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Display gem name, level, quality
 - [x] Add gem to socket group (text entry, fuzzy-matched by Lua's FindSkillGem; e.g. "CtF")
 - [x] Remove gem from socket group
-- [ ] Gem search/autocomplete (GemSelectControl)
-  - [ ] Name search, tag search (`:tag`), exclusion (`-tag`)
-  - [ ] Sort by DPS impact
-  - [ ] Color-coded gem types (Str/Dex/Int)
-  - [ ] Support relationship indicators (check mark)
+- [x] Gem search/autocomplete (via upstream GemSelectControl instance)
+  - [x] Name search, tag search (`:tag`), exclusion (`-tag`)
+  - [x] Sort by DPS impact
+  - [x] Color-coded gem types (Str/Dex/Int)
+  - [x] Support relationship indicators (check mark)
 - [x] Edit gem level
 - [x] Edit gem quality
 - [ ] Quality variant selection (Default, Anomalous, Divergent, Phantasmal)
@@ -182,7 +182,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Vaal gem global effect toggles
 
 ### Gem Options
-- [ ] Sort gems by DPS toggle with stat selector
+- [~] Sort gems by DPS toggle with stat selector (toggle done; stat selector pending)
 - [ ] Default gem level dropdown (Normal Max, Corrupted Max, etc.)
 - [ ] Default gem quality input
 - [ ] Show support gem type filter
@@ -213,11 +213,11 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Equip item to slot (dropdown per slot)
 - [x] Unequip item from slot
 - [x] Delete item (with confirmation)
-- [ ] Sort item list
+- [x] Sort item list (upstream SortItemList: by slot, equipped first)
 - [ ] Drag items between slots
 
 ### Item Editing
-- [ ] Edit item text (raw text editor)
+- [x] Edit item text (raw editor popup with live validation; also creates custom items)
 - [ ] Variant selection dropdown (for multi-variant uniques)
 - [ ] Alt variant dropdowns (up to 5)
 - [ ] Socket color selection (R/G/B/W per socket)
@@ -343,15 +343,15 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Support character export toggle
 
 ### Character Import (from PoE Account)
-- [ ] Account name input with realm selection (PC, Xbox, PS4, etc.)
-- [ ] POESESSID input for private profiles
-- [ ] Download character list from PoE API
-- [ ] League filter dropdown
-- [ ] Character selection dropdown
-- [ ] Import passive tree and jewels (with optional jewel clearing)
-- [ ] Import items and skills (with options to delete existing)
+- [x] Account name input with realm selection (PC, Xbox, PS4, etc.)
+- [x] POESESSID input for private profiles
+- [x] Download character list from PoE API (HTTP in Rust, parsed by upstream ProcessJSON)
+- [x] League filter dropdown
+- [x] Character selection dropdown
+- [x] Import passive tree and jewels (upstream ImportPassiveTreeAndJewels, jewel clearing option)
+- [x] Import items and skills (upstream ImportItemsAndSkills; delete items/skills, ignore swap options)
 - [ ] Account history tracking
-- [ ] Privacy settings link
+- [x] Privacy settings link
 
 ### Import Modes
 - [ ] Import to current build vs. create new build toggle
@@ -394,7 +394,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 ## 13. Keyboard Shortcuts
 
-- [ ] Ctrl+S: Save build
+- [x] Ctrl+S: Save build (opens Save As when the build has no file)
 - [ ] Ctrl+W: Close build (with save prompt)
 - [~] Ctrl+Z: Undo (tree done; items, config pending)
 - [~] Ctrl+Y: Redo (tree done; items, config pending)

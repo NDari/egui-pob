@@ -320,6 +320,7 @@ pub fn set_config_value(lua: &Lua, var: &str, value: LuaValue) -> Result<(), mlu
         configTab.input["{var}"] = ...
         build.buildFlag = true
         configTab:BuildModList()
+        configTab:AddUndoState()
     "#
     ))
     .call::<()>(value)?;

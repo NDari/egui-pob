@@ -2,10 +2,13 @@
 
 pub mod build_list;
 pub mod calcs;
+pub mod char_import;
 pub mod config;
+pub mod gems;
 pub mod items;
 pub mod skills;
 pub mod tree;
+pub mod tree_specs;
 pub mod tree_sprites;
 
 use std::collections::HashMap;

@@ -17,8 +17,20 @@ pub struct ItemsPanel {
     paste_error: Option<String>,
     /// Item id pending delete confirmation.
     confirm_delete: Option<i64>,
+    /// Open edit/create item dialog.
+    edit_dialog: Option<EditItemDialog>,
     /// Cached tooltip lines keyed by (item id, slot context).
     tooltip_cache: HashMap<(i64, Option<String>), Vec<TooltipLine>>,
+}
+
+/// Raw-text item editor state. `item_id` is None when creating a new item.
+struct EditItemDialog {
+    item_id: Option<i64>,
+    text: String,
+    error: Option<String>,
+    /// Result of validating `validated_text` (avoids re-parsing every frame).
+    valid: bool,
+    validated_text: String,
 }
 
 impl ItemsPanel {
@@ -47,6 +59,7 @@ impl ItemsPanel {
             error,
             paste_error: None,
             confirm_delete: None,
+            edit_dialog: None,
             tooltip_cache: HashMap::new(),
         }
     }
@@ -60,7 +73,9 @@ impl ItemsPanel {
 
         let mut changed = false;
 
-        // Top bar: paste from clipboard
+        changed |= self.show_edit_dialog(ui, bridge);
+
+        // Top bar: paste from clipboard, create custom item
         ui.horizontal(|ui| {
             if ui
                 .button("Paste item")
@@ -68,6 +83,19 @@ impl ItemsPanel {
                 .clicked()
             {
                 changed |= self.paste_item_from_clipboard(bridge);
+            }
+            if ui
+                .button("New item")
+                .on_hover_text("Create a custom item from raw text")
+                .clicked()
+            {
+                self.edit_dialog = Some(EditItemDialog {
+                    item_id: None,
+                    text: "Rarity: RARE\nNew Item\n".to_string(),
+                    error: None,
+                    valid: false,
+                    validated_text: String::new(),
+                });
             }
             if let Some(ref err) = self.paste_error {
                 ui.colored_label(Theme::ERROR, err);
@@ -101,7 +129,20 @@ impl ItemsPanel {
                     });
             });
             cols[1].push_id("item_list", |ui| {
-                ui.strong("All Items");
+                ui.horizontal(|ui| {
+                    ui.strong("All Items");
+                    if !self.item_list.is_empty()
+                        && ui
+                            .small_button("Sort")
+                            .on_hover_text("Sort by slot, equipped first")
+                            .clicked()
+                    {
+                        match items::sort_item_list(bridge.lua()) {
+                            Ok(()) => changed = true,
+                            Err(e) => log::error!("Failed to sort items: {e}"),
+                        }
+                    }
+                });
                 ui.add_space(4.0);
                 egui::ScrollArea::vertical()
                     .id_salt("items_scroll")
@@ -217,8 +258,29 @@ impl ItemsPanel {
                     if ui.small_button("No").clicked() {
                         self.confirm_delete = None;
                     }
-                } else if ui.small_button("🗑").on_hover_text("Delete item").clicked() {
-                    self.confirm_delete = Some(entry.id);
+                } else {
+                    if ui.small_button("🗑").on_hover_text("Delete item").clicked() {
+                        self.confirm_delete = Some(entry.id);
+                    }
+                    if ui
+                        .small_button("✏")
+                        .on_hover_text("Edit item text")
+                        .clicked()
+                    {
+                        match items::get_item_raw(bridge.lua(), entry.id) {
+                            Ok(raw) if !raw.is_empty() => {
+                                self.edit_dialog = Some(EditItemDialog {
+                                    item_id: Some(entry.id),
+                                    text: raw,
+                                    error: None,
+                                    valid: true,
+                                    validated_text: String::new(),
+                                });
+                            }
+                            Ok(_) => log::error!("Item {} has no raw text", entry.id),
+                            Err(e) => log::error!("Failed to get item text: {e}"),
+                        }
+                    }
                 }
 
                 let resp = ui.label(
@@ -240,6 +302,88 @@ impl ItemsPanel {
             return true;
         }
         false
+    }
+
+    /// Draw the edit/create item dialog if open. Returns true if the build
+    /// changed (item saved).
+    fn show_edit_dialog(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
+        let Some(dialog) = &mut self.edit_dialog else {
+            return false;
+        };
+
+        let mut changed = false;
+        let mut close = false;
+        let is_edit = dialog.item_id.is_some();
+        let title = if is_edit {
+            "Edit Item Text"
+        } else {
+            "Create Custom Item from Text"
+        };
+
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut dialog.text)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(450.0)
+                                .desired_rows(16),
+                        );
+                    });
+
+                // Re-validate only when the text changes
+                if dialog.text != dialog.validated_text {
+                    dialog.valid =
+                        items::validate_item_raw(bridge.lua(), &dialog.text).unwrap_or(false);
+                    dialog.validated_text = dialog.text.clone();
+                }
+                if !dialog.valid {
+                    ui.colored_label(
+                        Theme::ERROR,
+                        "Invalid item text. For Rare and Unique items the first two lines \
+                         after \"Rarity:\" must be the title and base name.",
+                    );
+                }
+                if let Some(ref err) = dialog.error {
+                    ui.colored_label(Theme::ERROR, err);
+                }
+
+                ui.horizontal(|ui| {
+                    let label = if is_edit { "Save" } else { "Create" };
+                    if ui
+                        .add_enabled(dialog.valid, egui::Button::new(label))
+                        .clicked()
+                    {
+                        let result = match dialog.item_id {
+                            Some(id) => {
+                                items::replace_item_from_raw(bridge.lua(), id, &dialog.text)
+                            }
+                            None => items::add_item_from_raw(bridge.lua(), &dialog.text),
+                        };
+                        match result {
+                            Ok(None) => {
+                                changed = true;
+                                close = true;
+                            }
+                            Ok(Some(err)) => dialog.error = Some(err),
+                            Err(e) => dialog.error = Some(format!("Failed: {e}")),
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if close {
+            self.edit_dialog = None;
+        }
+        changed
     }
 
     fn paste_item_from_clipboard(&mut self, bridge: &LuaBridge) -> bool {

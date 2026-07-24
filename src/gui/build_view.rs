@@ -59,6 +59,8 @@ pub struct BuildView {
     pub is_unsaved_new: bool,
     /// When set, shows a save-as dialog before navigating away.
     save_as_dialog: Option<SaveAsDialog>,
+    /// When true, shows a "save changes?" prompt before navigating away.
+    save_prompt: bool,
     /// Available classes and ascendancies.
     classes: Vec<ClassEntry>,
     /// Currently selected class index (into `classes`).
@@ -77,6 +79,9 @@ pub struct BuildView {
 struct SaveAsDialog {
     name: String,
     error: Option<String>,
+    /// True when triggered by leaving the build (back button): offers
+    /// Discard, and navigates back after saving.
+    then_close: bool,
 }
 
 impl BuildView {
@@ -112,6 +117,7 @@ impl BuildView {
             active_tab: BuildTab::Tree,
             is_unsaved_new: false,
             save_as_dialog: None,
+            save_prompt: false,
             classes,
             selected_class,
             selected_ascend,
@@ -122,15 +128,40 @@ impl BuildView {
         }
     }
 
+    /// Save the build, opening the Save As dialog if it has no file yet.
+    fn request_save(&mut self, bridge: &LuaBridge) {
+        if bridge.build_file_name().is_none() {
+            self.save_as_dialog = Some(SaveAsDialog {
+                name: self.build_name.clone(),
+                error: None,
+                then_close: false,
+            });
+        } else {
+            match bridge.save_build() {
+                Ok(()) => log::info!("Build saved"),
+                Err(e) => log::error!("Save failed: {e}"),
+            }
+        }
+    }
+
     /// Draw the build view. Returns true if the user wants to go back to the build list.
     pub fn show(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
         let mut go_back = false;
+
+        // Ctrl+S: save (unless a modal is already open)
+        if self.save_as_dialog.is_none()
+            && !self.save_prompt
+            && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S))
+        {
+            self.request_save(bridge);
+        }
 
         // Handle save-as dialog (modal)
         if let Some(dialog) = &mut self.save_as_dialog {
             let mut close_dialog = false;
             let mut do_save = false;
             let mut discard = false;
+            let then_close = dialog.then_close;
 
             egui::Window::new("Save Build As")
                 .collapsible(false)
@@ -149,7 +180,7 @@ impl BuildView {
                         if ui.button("Save").clicked() {
                             do_save = true;
                         }
-                        if ui.button("Discard").clicked() {
+                        if then_close && ui.button("Discard").clicked() {
                             discard = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -168,7 +199,7 @@ impl BuildView {
                             self.build_name = name;
                             self.is_unsaved_new = false;
                             self.save_as_dialog = None;
-                            go_back = true;
+                            go_back = then_close;
                         }
                         Err(e) => {
                             dialog.error = Some(format!("Save failed: {e}"));
@@ -187,45 +218,86 @@ impl BuildView {
             }
         }
 
+        // Handle "save changes?" prompt (modal, for builds that have a file)
+        if self.save_prompt {
+            let mut close_prompt = false;
+            egui::Window::new("Save Changes")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label(format!(
+                        "'{}' has unsaved changes. Save before closing?",
+                        self.build_name
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button("Save and Close").clicked() {
+                            match bridge.save_build() {
+                                Ok(()) => {
+                                    go_back = true;
+                                }
+                                Err(e) => log::error!("Save failed: {e}"),
+                            }
+                            close_prompt = true;
+                        }
+                        if ui.button("Discard Changes").clicked() {
+                            go_back = true;
+                            close_prompt = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close_prompt = true;
+                        }
+                    });
+                });
+            if close_prompt {
+                self.save_prompt = false;
+            }
+            if go_back {
+                return true;
+            }
+        }
+
         // Top bar: back button, build name, class/ascendancy, level, points
         let mut class_changed = false;
         let mut ascend_changed = false;
         let mut secondary_changed = false;
         let mut header_changed = false;
 
+        let dirty = bridge.is_build_dirty();
+        let mut request_save = false;
         ui.horizontal(|ui| {
             if ui.button("< Builds").clicked() {
-                if self.is_unsaved_new {
+                if bridge.build_file_name().is_none() && (self.is_unsaved_new || dirty) {
+                    // Never saved: needs a name before it can be kept
                     self.save_as_dialog = Some(SaveAsDialog {
                         name: self.build_name.clone(),
                         error: None,
+                        then_close: true,
                     });
+                } else if dirty {
+                    self.save_prompt = true;
                 } else {
                     go_back = true;
                 }
             }
-            ui.heading(&self.build_name);
+            let title = if dirty {
+                format!("{} *", self.build_name)
+            } else {
+                self.build_name.clone()
+            };
+            ui.heading(title);
 
             ui.separator();
 
             // Save buttons
-            if ui.button("Save").clicked() {
-                if self.is_unsaved_new {
-                    self.save_as_dialog = Some(SaveAsDialog {
-                        name: self.build_name.clone(),
-                        error: None,
-                    });
-                } else {
-                    match bridge.save_build() {
-                        Ok(()) => log::info!("Build saved"),
-                        Err(e) => log::error!("Save failed: {e}"),
-                    }
-                }
+            if ui.button("Save").on_hover_text("Ctrl+S").clicked() {
+                request_save = true;
             }
             if ui.button("Save As").clicked() {
                 self.save_as_dialog = Some(SaveAsDialog {
                     name: self.build_name.clone(),
                     error: None,
+                    then_close: false,
                 });
             }
 
@@ -331,6 +403,10 @@ impl BuildView {
         });
         ui.separator();
 
+        if request_save {
+            self.request_save(bridge);
+        }
+
         // Apply class/ascendancy changes
         if class_changed || ascend_changed {
             let class_id = self.classes[self.selected_class].class_id;
@@ -389,10 +465,18 @@ impl BuildView {
 
             match self.active_tab {
                 BuildTab::Tree => {
-                    if let Some(ref mut tree) = self.tree_panel
-                        && tree.show(ui, bridge)
-                    {
-                        self.refresh_calc_output(bridge);
+                    if let Some(ref mut tree) = self.tree_panel {
+                        let changed = tree.show(ui, bridge);
+                        let rebuild = tree.request_rebuild;
+                        if changed {
+                            self.refresh_calc_output(bridge);
+                        }
+                        if rebuild {
+                            // Active spec switched: tree data, sprites, and
+                            // jewel sockets may all have changed
+                            self.tree_panel = Some(TreePanel::new(bridge.lua()));
+                            self.items_panel = Some(ItemsPanel::new(bridge.lua()));
+                        }
                     }
                 }
                 BuildTab::Skills => {

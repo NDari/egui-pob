@@ -2,8 +2,23 @@
 
 use std::collections::HashMap;
 
+use pob_egui::data::gems::{self, GemChoice};
 use pob_egui::data::skills::{self, GemProperty, SocketGroup};
 use pob_egui::lua_bridge::LuaBridge;
+
+/// Gem autocomplete state, shared across socket groups (only one add-gem
+/// field has focus at a time).
+#[derive(Default)]
+struct GemSuggest {
+    /// (group index, query, sort_by_dps) the current results were computed for.
+    query_key: Option<(usize, String, bool)>,
+    results: Vec<GemChoice>,
+    /// True if the suggestion list was hovered last frame. Keeps the list
+    /// alive during the frame where clicking it steals focus from the field.
+    hovered: bool,
+    /// Sort suggestions by DPS impact (upstream's Sort by DPS).
+    sort_by_dps: bool,
+}
 
 /// A deferred mutation, collected during drawing and applied afterwards.
 enum SkillAction {
@@ -29,6 +44,8 @@ pub struct SkillsPanel {
     label_edits: HashMap<usize, String>,
     /// Group index awaiting delete confirmation (group has gems).
     confirm_delete: Option<usize>,
+    /// Gem autocomplete state.
+    suggest: GemSuggest,
 }
 
 impl SkillsPanel {
@@ -43,6 +60,7 @@ impl SkillsPanel {
                     add_gem_error: HashMap::new(),
                     label_edits: HashMap::new(),
                     confirm_delete: None,
+                    suggest: GemSuggest::default(),
                 }
             }
             Err(e) => {
@@ -54,6 +72,7 @@ impl SkillsPanel {
                     add_gem_error: HashMap::new(),
                     label_edits: HashMap::new(),
                     confirm_delete: None,
+                    suggest: GemSuggest::default(),
                 }
             }
         }
@@ -72,6 +91,11 @@ impl SkillsPanel {
             if ui.button("New Socket Group").clicked() {
                 actions.push(SkillAction::NewGroup);
             }
+            ui.checkbox(&mut self.suggest.sort_by_dps, "Sort gems by DPS")
+                .on_hover_text(
+                    "Sort gem suggestions by their DPS impact on the socket group \
+                     (slower on first use per group)",
+                );
         });
         ui.separator();
 
@@ -85,12 +109,14 @@ impl SkillsPanel {
                     .or_insert_with(|| group.label.clone());
                 show_socket_group(
                     ui,
+                    bridge,
                     group,
                     label_buf,
                     add_text,
                     add_error,
                     &mut actions,
                     &mut self.confirm_delete,
+                    &mut self.suggest,
                 );
             }
         });
@@ -178,14 +204,17 @@ impl SkillsPanel {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show_socket_group(
     ui: &mut egui::Ui,
+    bridge: &LuaBridge,
     group: &mut SocketGroup,
     label_buf: &mut String,
     add_text: &mut String,
     add_error: Option<&String>,
     actions: &mut Vec<SkillAction>,
     confirm_delete: &mut Option<usize>,
+    suggest: &mut GemSuggest,
 ) {
     let title = socket_group_title(group);
     let header_text = if group.is_main {
@@ -296,13 +325,17 @@ fn show_socket_group(
                 });
             }
 
-            // Add gem row: name is fuzzily matched by Lua (e.g. "CtF")
+            // Add gem row: autocomplete via upstream's GemSelectControl.
+            // Supports tag search (":aura"), exclusion (":-cold"), and
+            // abbreviations ("CtF"); Enter adds the fuzzy match directly.
+            let mut field_focused = false;
             ui.horizontal(|ui| {
                 let text_response = ui.add(
                     egui::TextEdit::singleline(add_text)
                         .desired_width(180.0)
-                        .hint_text("gem name..."),
+                        .hint_text("gem name or :tag..."),
                 );
+                field_focused = text_response.has_focus();
                 let submitted =
                     text_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (ui.small_button("Add Gem").clicked() || submitted)
@@ -316,6 +349,77 @@ fn show_socket_group(
             });
             if let Some(err) = add_error {
                 ui.colored_label(super::theme::Theme::ERROR, err);
+            }
+
+            // Suggestion list, shown while the field has focus (or while the
+            // list itself is being hovered/clicked)
+            let show_list = !add_text.trim().is_empty()
+                && (field_focused
+                    || (suggest.hovered
+                        && suggest
+                            .query_key
+                            .as_ref()
+                            .is_some_and(|k| k.0 == group_index)));
+            if show_list {
+                let key = (group_index, add_text.clone(), suggest.sort_by_dps);
+                if suggest.query_key.as_ref() != Some(&key) {
+                    suggest.results = gems::search_gems(
+                        bridge.lua(),
+                        group_index,
+                        add_text.trim(),
+                        suggest.sort_by_dps,
+                        12,
+                    )
+                    .unwrap_or_else(|e| {
+                        log::error!("Gem search failed: {e}");
+                        Vec::new()
+                    });
+                    suggest.query_key = Some(key);
+                }
+
+                let frame_resp = egui::Frame::group(ui.style())
+                    .inner_margin(4.0)
+                    .show(ui, |ui| {
+                        if suggest.results.is_empty() {
+                            ui.colored_label(super::theme::Theme::TEXT_DIM, "no matches");
+                        }
+                        for choice in &suggest.results {
+                            ui.horizontal(|ui| {
+                                let color = match choice.attribute.as_str() {
+                                    "str" => egui::Color32::from_rgb(224, 80, 48),
+                                    "dex" => egui::Color32::from_rgb(112, 255, 112),
+                                    "int" => egui::Color32::from_rgb(112, 112, 255),
+                                    _ => super::theme::Theme::TEXT_DEFAULT,
+                                };
+                                let tick = if choice.can_support { "✔ " } else { "    " };
+                                let resp = ui.selectable_label(
+                                    false,
+                                    egui::RichText::new(format!("{tick}{}", choice.name))
+                                        .color(color),
+                                );
+                                if suggest.sort_by_dps && choice.dps > 0.0 {
+                                    ui.label(super::theme::pob_layout_job(
+                                        &format!("{}{:.0}", choice.dps_color, choice.dps),
+                                        12.0,
+                                        super::theme::Theme::TEXT_MUTED,
+                                    ));
+                                }
+                                if resp.clicked() {
+                                    actions.push(SkillAction::AddGem(
+                                        group_index,
+                                        choice.name.clone(),
+                                    ));
+                                }
+                            });
+                        }
+                    });
+                suggest.hovered = frame_resp.response.contains_pointer();
+            } else if suggest
+                .query_key
+                .as_ref()
+                .is_some_and(|k| k.0 == group_index)
+            {
+                suggest.hovered = false;
             }
         });
 }

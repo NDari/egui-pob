@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use pob_egui::data::tree::{self, HoverInfo, MasteryEffectList, NodeType, TreeData};
+use pob_egui::data::tree_specs::{self, CompareDiff, SpecAllocation, SpecInfo, TreeVersion};
 use pob_egui::data::tree_sprites::TreeSpriteAtlas;
 use pob_egui::lua_bridge::LuaBridge;
 
@@ -13,6 +14,31 @@ use super::tree_renderer::{self, TooltipHeaders, TreeCamera};
 struct MasteryPopup {
     node_id: u32,
     list: MasteryEffectList,
+}
+
+/// A pending name prompt in the spec manager.
+enum SpecAction {
+    New,
+    Copy(usize),
+    Rename(usize),
+}
+
+/// Name-entry prompt state for New/Copy/Rename.
+struct SpecPrompt {
+    action: SpecAction,
+    text: String,
+}
+
+/// Pending tree version conversion awaiting confirmation.
+struct ConvertPopup {
+    /// Target version id, e.g. "3_27".
+    version: String,
+    display: String,
+    /// True to convert every spec instead of just the active one.
+    all: bool,
+    /// Passed through to upstream: ignore the active spec's subtype
+    /// (ruthless/alternate) when matching the target version.
+    ignore_sub_type: bool,
 }
 
 /// State for the passive tree tab.
@@ -32,6 +58,31 @@ pub struct TreePanel {
     /// Path/depends info for the currently hovered node, fetched from Lua
     /// once per hover change.
     hover_cache: Option<(u32, HoverInfo)>,
+    // Tree spec management
+    specs: Vec<SpecInfo>,
+    /// Active spec index (1-based, matching Lua).
+    active_spec: usize,
+    manage_specs_open: bool,
+    spec_prompt: Option<SpecPrompt>,
+    import_url: String,
+    import_error: Option<String>,
+    export_url: Option<String>,
+    /// Set when the active spec changed: the whole panel (tree data, atlas)
+    /// must be rebuilt by the parent.
+    pub request_rebuild: bool,
+    // Tree version conversion
+    tree_versions: Vec<TreeVersion>,
+    convert_popup: Option<ConvertPopup>,
+    // Spec comparison
+    compare_enabled: bool,
+    /// Compare spec index (1-based; 0 = not yet chosen).
+    compare_index: usize,
+    /// Cached allocation of the compare spec, keyed by its index.
+    compare_cache: Option<(usize, SpecAllocation)>,
+    /// Cached allocation of the active spec (invalidated on tree changes).
+    current_cache: Option<SpecAllocation>,
+    /// Computed diff shown by the renderer.
+    compare_diff: Option<CompareDiff>,
 }
 
 impl TreePanel {
@@ -60,6 +111,21 @@ impl TreePanel {
                     search_cycle: None,
                     mastery_popup: None,
                     hover_cache: None,
+                    specs: Vec::new(),
+                    active_spec: 1,
+                    manage_specs_open: false,
+                    spec_prompt: None,
+                    import_url: String::new(),
+                    import_error: None,
+                    export_url: None,
+                    request_rebuild: false,
+                    tree_versions: Vec::new(),
+                    convert_popup: None,
+                    compare_enabled: false,
+                    compare_index: 0,
+                    compare_cache: None,
+                    current_cache: None,
+                    compare_diff: None,
                 };
             }
         };
@@ -75,6 +141,11 @@ impl TreePanel {
                 .ok()
         });
 
+        let (specs, active_spec) = tree_specs::list_specs(lua).unwrap_or_else(|e| {
+            log::error!("Failed to list tree specs: {e}");
+            (Vec::new(), 1)
+        });
+
         Self {
             tree_data,
             camera,
@@ -88,6 +159,24 @@ impl TreePanel {
             search_cycle: None,
             mastery_popup: None,
             hover_cache: None,
+            specs,
+            active_spec,
+            manage_specs_open: false,
+            spec_prompt: None,
+            import_url: String::new(),
+            import_error: None,
+            export_url: None,
+            request_rebuild: false,
+            tree_versions: tree_specs::list_tree_versions(lua).unwrap_or_else(|e| {
+                log::error!("Failed to list tree versions: {e}");
+                Vec::new()
+            }),
+            convert_popup: None,
+            compare_enabled: false,
+            compare_index: 0,
+            compare_cache: None,
+            current_cache: None,
+            compare_diff: None,
         }
     }
 
@@ -119,6 +208,13 @@ impl TreePanel {
             self.textures_uploaded = true;
         }
 
+        if self.manage_specs_open {
+            changed |= self.show_manage_dialog(ui, bridge);
+        }
+        if self.convert_popup.is_some() {
+            changed |= self.show_convert_popup(ui, bridge);
+        }
+
         let (Some(tree_data), Some(camera)) = (&mut self.tree_data, &mut self.camera) else {
             ui.label("No tree data loaded.");
             return false;
@@ -127,7 +223,110 @@ impl TreePanel {
         // Search bar. Enter / Shift+Enter (or the arrow buttons) cycle through
         // matches, centering the camera on each.
         let mut jump: Option<i32> = None;
+        let mut spec_switch: Option<usize> = None;
         ui.horizontal(|ui| {
+            // Tree spec selector
+            if !self.specs.is_empty() {
+                let active_label = self
+                    .specs
+                    .get(self.active_spec - 1)
+                    .map(spec_label)
+                    .unwrap_or_else(|| "Default".to_string());
+                egui::ComboBox::from_id_salt("spec_select")
+                    .selected_text(active_label)
+                    .width(160.0)
+                    .show_ui(ui, |ui| {
+                        for (i, spec) in self.specs.iter().enumerate() {
+                            if ui
+                                .selectable_label(self.active_spec == i + 1, spec_label(spec))
+                                .clicked()
+                                && self.active_spec != i + 1
+                            {
+                                spec_switch = Some(i + 1);
+                            }
+                        }
+                    });
+                if ui.button("Manage...").clicked() {
+                    self.manage_specs_open = true;
+                }
+
+                // Tree version dropdown: selecting a different version opens
+                // the conversion confirmation popup (like upstream)
+                if !self.tree_versions.is_empty() {
+                    let active_version = self
+                        .specs
+                        .get(self.active_spec - 1)
+                        .map(|s| s.tree_version.clone())
+                        .unwrap_or_default();
+                    let current_display = self
+                        .tree_versions
+                        .iter()
+                        .find(|v| v.id == active_version)
+                        .map(|v| v.display.clone())
+                        .unwrap_or_else(|| active_version.replace('_', "."));
+                    ui.label("Version:");
+                    egui::ComboBox::from_id_salt("tree_version_select")
+                        .selected_text(current_display)
+                        .width(70.0)
+                        .show_ui(ui, |ui| {
+                            for version in &self.tree_versions {
+                                if ui
+                                    .selectable_label(
+                                        version.id == active_version,
+                                        &version.display,
+                                    )
+                                    .clicked()
+                                    && version.id != active_version
+                                {
+                                    self.convert_popup = Some(ConvertPopup {
+                                        version: version.id.clone(),
+                                        display: version.display.clone(),
+                                        all: false,
+                                        ignore_sub_type: true,
+                                    });
+                                }
+                            }
+                        });
+                }
+
+                // Spec comparison toggle + compare-spec selector
+                if ui
+                    .checkbox(&mut self.compare_enabled, "Compare")
+                    .on_hover_text(
+                        "Highlight differences against another tree: green = allocate, \
+                         red = deallocate, blue = different mastery effect",
+                    )
+                    .changed()
+                {
+                    self.compare_diff = None;
+                    if self.compare_enabled && self.compare_index == 0 {
+                        self.compare_index = self.active_spec;
+                    }
+                }
+                if self.compare_enabled {
+                    let compare_label = self
+                        .compare_index
+                        .checked_sub(1)
+                        .and_then(|i| self.specs.get(i))
+                        .map(spec_label)
+                        .unwrap_or_else(|| "-".to_string());
+                    egui::ComboBox::from_id_salt("compare_select")
+                        .selected_text(compare_label)
+                        .width(160.0)
+                        .show_ui(ui, |ui| {
+                            for (i, spec) in self.specs.iter().enumerate() {
+                                if ui
+                                    .selectable_label(self.compare_index == i + 1, spec_label(spec))
+                                    .clicked()
+                                {
+                                    self.compare_index = i + 1;
+                                }
+                            }
+                        });
+                }
+                ui.separator();
+            }
+
             ui.label("Search:");
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.search)
@@ -173,6 +372,59 @@ impl TreePanel {
                 }
             }
         });
+
+        // Version mismatch banner: offer conversion when the active spec is
+        // from an older tree version
+        let active_outdated = self
+            .specs
+            .get(self.active_spec - 1)
+            .is_some_and(|s| !s.is_latest_version);
+        if active_outdated
+            && let Some(latest) = self.tree_versions.iter().find(|v| v.is_latest).cloned()
+        {
+            ui.horizontal(|ui| {
+                let version_display = self
+                    .specs
+                    .get(self.active_spec - 1)
+                    .map(|s| s.tree_version.replace('_', "."))
+                    .unwrap_or_default();
+                ui.colored_label(
+                    super::theme::Theme::MAIN_SKILL,
+                    format!("⚠ This tree is from version {version_display}."),
+                );
+                if ui
+                    .button(format!("Convert to {}", latest.display))
+                    .clicked()
+                {
+                    self.convert_popup = Some(ConvertPopup {
+                        version: latest.id.clone(),
+                        display: latest.display.clone(),
+                        all: false,
+                        ignore_sub_type: false,
+                    });
+                }
+                if self.specs.len() > 1 && ui.button("Convert all trees").clicked() {
+                    self.convert_popup = Some(ConvertPopup {
+                        version: latest.id.clone(),
+                        display: latest.display.clone(),
+                        all: true,
+                        ignore_sub_type: false,
+                    });
+                }
+            });
+        }
+
+        // Apply a spec switch from the dropdown
+        if let Some(index) = spec_switch {
+            match tree_specs::set_active_spec(bridge.lua(), index) {
+                Ok(()) => {
+                    self.active_spec = index;
+                    self.request_rebuild = true;
+                    changed = true;
+                }
+                Err(e) => log::error!("Failed to switch spec: {e}"),
+            }
+        }
 
         // Cycle to the next/previous match and center the camera on it
         if let Some(dir) = jump
@@ -228,6 +480,34 @@ impl TreePanel {
             }
         }
 
+        // Refresh comparison caches and recompute the diff when stale
+        if self.compare_enabled && self.compare_index > 0 {
+            if self
+                .compare_cache
+                .as_ref()
+                .is_none_or(|(i, _)| *i != self.compare_index)
+            {
+                match tree_specs::spec_allocation(bridge.lua(), self.compare_index) {
+                    Ok(alloc) => self.compare_cache = Some((self.compare_index, alloc)),
+                    Err(e) => log::error!("Failed to read compare spec: {e}"),
+                }
+                self.compare_diff = None;
+            }
+            if self.current_cache.is_none() {
+                match tree_specs::spec_allocation(bridge.lua(), self.active_spec) {
+                    Ok(alloc) => self.current_cache = Some(alloc),
+                    Err(e) => log::error!("Failed to read active spec: {e}"),
+                }
+                self.compare_diff = None;
+            }
+            if self.compare_diff.is_none()
+                && let (Some(current), Some((_, compare))) =
+                    (&self.current_cache, &self.compare_cache)
+            {
+                self.compare_diff = Some(tree_specs::compare_diff(current, compare));
+            }
+        }
+
         let atlas_ref = self.atlas.as_ref();
         let headers_ref = self.tooltip_headers.as_ref();
 
@@ -235,6 +515,11 @@ impl TreePanel {
         let (hover_node, hover_path, hover_depends) = match &self.hover_cache {
             Some((id, info)) => (Some(*id), &info.path, &info.depends),
             None => (None, &empty, &empty),
+        };
+        let compare = if self.compare_enabled {
+            self.compare_diff.as_ref()
+        } else {
+            None
         };
         let view = tree_renderer::draw_tree(
             ui,
@@ -247,6 +532,7 @@ impl TreePanel {
                 hover_node,
                 hover_path,
                 hover_depends,
+                compare,
             },
         );
 
@@ -358,7 +644,306 @@ impl TreePanel {
                     });
         }
 
+        // Any tree change invalidates the comparison snapshot of the active spec
+        if changed {
+            self.current_cache = None;
+            self.compare_diff = None;
+        }
+
         changed
+    }
+
+    /// Draw the "Manage Passive Trees" dialog. Returns true if the build
+    /// changed (spec created/copied/deleted/imported).
+    fn show_manage_dialog(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
+        let mut changed = false;
+        let mut close = false;
+        // (action closures collected to run after the UI pass)
+        let mut activate: Option<usize> = None;
+        let mut delete: Option<usize> = None;
+
+        egui::Window::new("Manage Passive Trees")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                for (i, spec) in self.specs.iter().enumerate() {
+                    let index = i + 1;
+                    ui.horizontal(|ui| {
+                        let is_active = index == self.active_spec;
+                        let label = if is_active {
+                            egui::RichText::new(spec_label(spec))
+                                .color(super::theme::Theme::MAIN_SKILL)
+                        } else {
+                            egui::RichText::new(spec_label(spec))
+                        };
+                        ui.label(label);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.specs.len() > 1 && ui.small_button("Delete").clicked() {
+                                delete = Some(index);
+                            }
+                            if ui.small_button("Rename").clicked() {
+                                self.spec_prompt = Some(SpecPrompt {
+                                    action: SpecAction::Rename(index),
+                                    text: spec.title.clone(),
+                                });
+                            }
+                            if ui.small_button("Copy").clicked() {
+                                self.spec_prompt = Some(SpecPrompt {
+                                    action: SpecAction::Copy(index),
+                                    text: format!("{} (copy)", spec.title),
+                                });
+                            }
+                            if !is_active && ui.small_button("Activate").clicked() {
+                                activate = Some(index);
+                            }
+                        });
+                    });
+                }
+                ui.separator();
+
+                // Name prompt for New/Copy/Rename
+                if let Some(prompt) = &mut self.spec_prompt {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.add(egui::TextEdit::singleline(&mut prompt.text).desired_width(200.0));
+                    });
+                }
+
+                ui.horizontal(|ui| {
+                    if let Some(prompt) = &self.spec_prompt {
+                        let name = prompt.text.trim().to_string();
+                        if ui
+                            .add_enabled(!name.is_empty(), egui::Button::new("OK"))
+                            .clicked()
+                        {
+                            let result = match prompt.action {
+                                SpecAction::New => tree_specs::new_spec(bridge.lua(), &name),
+                                SpecAction::Copy(i) => {
+                                    tree_specs::copy_spec(bridge.lua(), i, &name)
+                                }
+                                SpecAction::Rename(i) => {
+                                    tree_specs::rename_spec(bridge.lua(), i, &name)
+                                }
+                            };
+                            match result {
+                                Ok(()) => {
+                                    if !matches!(prompt.action, SpecAction::Rename(_)) {
+                                        self.request_rebuild = true;
+                                        changed = true;
+                                    }
+                                    self.refresh_specs(bridge);
+                                    self.spec_prompt = None;
+                                }
+                                Err(e) => log::error!("Spec action failed: {e}"),
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.spec_prompt = None;
+                        }
+                    } else if ui.button("New Tree").clicked() {
+                        self.spec_prompt = Some(SpecPrompt {
+                            action: SpecAction::New,
+                            text: "Default".to_string(),
+                        });
+                    }
+                });
+                ui.separator();
+
+                // Import tree URL as a new spec
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.import_url)
+                            .desired_width(260.0)
+                            .hint_text("pathofexile.com / poeplanner / poeurl link"),
+                    );
+                    if ui.button("Import Tree").clicked() && !self.import_url.trim().is_empty() {
+                        let result =
+                            tree_specs::expand_shortlink(self.import_url.trim()).and_then(|url| {
+                                tree_specs::import_tree_url(bridge.lua(), &url, "Imported tree")
+                                    .map_err(|e| anyhow::anyhow!("Import failed: {e}"))
+                            });
+                        match result {
+                            Ok(None) => {
+                                self.import_error = None;
+                                self.import_url.clear();
+                                self.request_rebuild = true;
+                                changed = true;
+                                self.refresh_specs(bridge);
+                            }
+                            Ok(Some(err)) => self.import_error = Some(err),
+                            Err(e) => self.import_error = Some(format!("{e}")),
+                        }
+                    }
+                });
+                if let Some(ref err) = self.import_error {
+                    ui.colored_label(super::theme::Theme::ERROR, err);
+                }
+
+                // Export the active spec as a URL
+                ui.horizontal(|ui| {
+                    if ui.button("Export Tree URL").clicked() {
+                        match tree_specs::export_tree_url(bridge.lua()) {
+                            Ok(url) => self.export_url = Some(url),
+                            Err(e) => log::error!("Export failed: {e}"),
+                        }
+                    }
+                    if let Some(url) = &self.export_url
+                        && ui.button("Copy to Clipboard").clicked()
+                        && let Ok(mut clip) = arboard::Clipboard::new()
+                    {
+                        let _ = clip.set_text(url);
+                    }
+                });
+                if let Some(ref url) = self.export_url {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut url.as_str())
+                            .desired_width(340.0)
+                            .desired_rows(2)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                }
+
+                ui.separator();
+                if ui.button("Done").clicked() {
+                    close = true;
+                }
+            });
+
+        if let Some(index) = activate {
+            match tree_specs::set_active_spec(bridge.lua(), index) {
+                Ok(()) => {
+                    self.request_rebuild = true;
+                    changed = true;
+                    self.refresh_specs(bridge);
+                }
+                Err(e) => log::error!("Failed to switch spec: {e}"),
+            }
+        }
+        if let Some(index) = delete {
+            match tree_specs::delete_spec(bridge.lua(), index) {
+                Ok(()) => {
+                    self.request_rebuild = true;
+                    changed = true;
+                    self.refresh_specs(bridge);
+                }
+                Err(e) => log::error!("Failed to delete spec: {e}"),
+            }
+        }
+        if close {
+            self.manage_specs_open = false;
+            self.export_url = None;
+            self.import_error = None;
+            self.spec_prompt = None;
+        }
+        changed
+    }
+
+    /// Draw the version conversion confirmation popup. Returns true if a
+    /// conversion ran (the panel must be rebuilt by the parent).
+    fn show_convert_popup(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
+        let Some(popup) = &self.convert_popup else {
+            return false;
+        };
+        let (version, display, all, ignore_sub_type) = (
+            popup.version.clone(),
+            popup.display.clone(),
+            popup.all,
+            popup.ignore_sub_type,
+        );
+
+        let mut changed = false;
+        let mut close = false;
+        let title = if all {
+            format!("Convert all to Version {display}")
+        } else {
+            format!("Convert to Version {display}")
+        };
+
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.label(
+                    "Warning: some or all of the passives may be de-allocated \
+                     due to changes in the tree.",
+                );
+                if all {
+                    ui.label(format!(
+                        "Convert will replace all trees that are not version {display}. \
+                         This action cannot be undone."
+                    ));
+                } else {
+                    ui.label(
+                        "Convert will replace your current tree. \
+                         Copy + Convert will keep the original as a separate tree.",
+                    );
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Convert").clicked() {
+                        let result = if all {
+                            tree_specs::convert_all_to_version(bridge.lua(), &version)
+                        } else {
+                            tree_specs::convert_to_version(
+                                bridge.lua(),
+                                &version,
+                                true,
+                                ignore_sub_type,
+                            )
+                        };
+                        match result {
+                            Ok(()) => changed = true,
+                            Err(e) => log::error!("Conversion failed: {e}"),
+                        }
+                        close = true;
+                    }
+                    if !all && ui.button("Copy + Convert").clicked() {
+                        match tree_specs::convert_to_version(
+                            bridge.lua(),
+                            &version,
+                            false,
+                            ignore_sub_type,
+                        ) {
+                            Ok(()) => changed = true,
+                            Err(e) => log::error!("Conversion failed: {e}"),
+                        }
+                        close = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if close {
+            self.convert_popup = None;
+        }
+        if changed {
+            self.request_rebuild = true;
+            self.refresh_specs(bridge);
+        }
+        changed
+    }
+
+    fn refresh_specs(&mut self, bridge: &LuaBridge) {
+        match tree_specs::list_specs(bridge.lua()) {
+            Ok((specs, active)) => {
+                self.specs = specs;
+                self.active_spec = active;
+            }
+            Err(e) => log::error!("Failed to refresh specs: {e}"),
+        }
+    }
+}
+
+/// Display label for a spec: "[3.25] Title" for non-latest tree versions.
+fn spec_label(spec: &SpecInfo) -> String {
+    if spec.is_latest_version {
+        spec.title.clone()
+    } else {
+        format!("[{}] {}", spec.tree_version.replace('_', "."), spec.title)
     }
 }
 
