@@ -1,9 +1,10 @@
 //! Build list panel: displays saved builds, allows opening and managing them
 //! (delete, rename, move to folder, new folder, sort, search).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use pob_egui::data::build_list::{self, BuildEntry, BuildInfo, FolderInfo};
+use pob_egui::data::build_list::{self, BuildEntry, BuildInfo, BuildPreview, FolderInfo};
 
 /// How the build list is sorted. Folders always sort before builds.
 #[derive(Clone, Copy, PartialEq)]
@@ -60,6 +61,10 @@ pub struct BuildListPanel {
     sort_mode: SortMode,
     filter: String,
     popup: Option<Popup>,
+    /// Recently opened builds, most recent first.
+    recent: Vec<BuildInfo>,
+    /// Hover preview data, parsed from build XMLs on first hover.
+    preview_cache: HashMap<PathBuf, BuildPreview>,
 }
 
 impl BuildListPanel {
@@ -71,6 +76,11 @@ impl BuildListPanel {
             sort_mode: SortMode::Name,
             filter: String::new(),
             popup: None,
+            recent: build_list::load_recent_builds()
+                .iter()
+                .filter_map(|p| build_list::build_info_from_path(p))
+                .collect(),
+            preview_cache: HashMap::new(),
         };
         panel.refresh();
         panel
@@ -221,6 +231,21 @@ impl BuildListPanel {
 
         let mut row_action = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // Recently opened builds (top level, no active search)
+            if self.sub_path.is_empty() && filter.is_empty() && !self.recent.is_empty() {
+                ui.strong("Recent");
+                let recent = self.recent.clone();
+                for build in &recent {
+                    let resp = show_build_row(ui, build);
+                    let resp = preview_tooltip(resp, &mut self.preview_cache, build);
+                    if resp.clicked() {
+                        row_action = Some(RowAction::Open(build.clone()));
+                    }
+                }
+                ui.separator();
+                ui.strong("All builds");
+            }
+
             for &i in &visible {
                 match &self.entries[i] {
                     BuildEntry::Folder(folder) => {
@@ -249,6 +274,7 @@ impl BuildListPanel {
                     }
                     BuildEntry::Build(build) => {
                         let response = show_build_row(ui, build);
+                        let response = preview_tooltip(response, &mut self.preview_cache, build);
                         if response.clicked() {
                             row_action = Some(RowAction::Open(build.clone()));
                         }
@@ -512,6 +538,65 @@ fn show_folder_row(ui: &mut egui::Ui, folder: &FolderInfo) -> egui::Response {
         egui::Button::new(format!("📁 {}", folder.folder_name))
             .min_size(egui::vec2(ui.available_width(), 24.0)),
     )
+}
+
+/// Attach the build preview tooltip (class, level, headline stats) to a row,
+/// parsing the XML on first hover.
+fn preview_tooltip(
+    resp: egui::Response,
+    cache: &mut HashMap<PathBuf, BuildPreview>,
+    build: &BuildInfo,
+) -> egui::Response {
+    if !resp.hovered() {
+        return resp;
+    }
+    let preview = cache
+        .entry(build.full_path.clone())
+        .or_insert_with(|| build_list::build_preview(&build.full_path));
+    resp.on_hover_ui(|ui| {
+        ui.strong(&build.build_name);
+        let class = preview
+            .ascend_class_name
+            .as_deref()
+            .filter(|c| *c != "None" && !c.is_empty())
+            .or(preview.class_name.as_deref());
+        match (class, preview.level) {
+            (Some(class), Some(level)) => {
+                ui.label(format!("Level {level} {class}"));
+            }
+            (Some(class), None) => {
+                ui.label(class.to_string());
+            }
+            (None, Some(level)) => {
+                ui.label(format!("Level {level}"));
+            }
+            (None, None) => {}
+        }
+        if preview.stats.is_empty() {
+            ui.colored_label(
+                egui::Color32::from_rgb(150, 150, 150),
+                "No saved stats (build not calculated yet)",
+            );
+        } else {
+            ui.separator();
+            for (label, value) in &preview.stats {
+                ui.label(format!("{label}: {}", format_stat(*value)));
+            }
+        }
+    })
+}
+
+/// Compact number formatting for preview stats.
+fn format_stat(value: f64) -> String {
+    if value >= 1_000_000.0 {
+        format!("{:.2}M", value / 1_000_000.0)
+    } else if value >= 10_000.0 {
+        format!("{:.1}k", value / 1_000.0)
+    } else if value >= 100.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
 }
 
 fn show_build_row(ui: &mut egui::Ui, build: &BuildInfo) -> egui::Response {

@@ -20,7 +20,7 @@ use build_view::BuildView;
 
 /// What screen the app is showing.
 enum AppScreen {
-    BuildList(BuildListPanel),
+    BuildList(Box<BuildListPanel>),
     BuildView(Box<BuildView>),
 }
 
@@ -29,6 +29,8 @@ pub struct PobApp {
     bridge: LuaBridge,
     status: AppStatus,
     screen: Option<AppScreen>,
+    /// Last window title sent to the OS (avoids re-sending every frame).
+    window_title: String,
 }
 
 enum AppStatus {
@@ -48,13 +50,14 @@ impl PobApp {
                         bridge: b,
                         status: AppStatus::Error(format!("Boot verification failed: {e}")),
                         screen: None,
+                        window_title: String::new(),
                     }
                 } else {
                     // Initialize build list
                     let screen = match b.build_path() {
                         Ok(path) => {
                             log::info!("Build path: {path}");
-                            Some(AppScreen::BuildList(BuildListPanel::new(path)))
+                            Some(AppScreen::BuildList(Box::new(BuildListPanel::new(path))))
                         }
                         Err(e) => {
                             log::error!("Failed to get build path: {e}");
@@ -65,6 +68,7 @@ impl PobApp {
                         bridge: b,
                         status: AppStatus::Running,
                         screen,
+                        window_title: String::new(),
                     }
                 }
             }
@@ -72,6 +76,7 @@ impl PobApp {
                 bridge: LuaBridge::new_dummy(),
                 status: AppStatus::Error(format!("Failed to initialize Lua: {e}")),
                 screen: None,
+                window_title: String::new(),
             },
         }
     }
@@ -109,6 +114,7 @@ impl PobApp {
             return;
         }
 
+        pob_egui::data::build_list::add_recent_build(&build_info.full_path);
         self.screen = Some(AppScreen::BuildView(Box::new(BuildView::new(
             build_info.build_name.clone(),
             &self.bridge,
@@ -118,7 +124,7 @@ impl PobApp {
     fn go_to_build_list(&mut self) {
         match self.bridge.build_path() {
             Ok(path) => {
-                self.screen = Some(AppScreen::BuildList(BuildListPanel::new(path)));
+                self.screen = Some(AppScreen::BuildList(Box::new(BuildListPanel::new(path))));
             }
             Err(e) => {
                 log::error!("Failed to get build path: {e}");
@@ -129,6 +135,18 @@ impl PobApp {
 
 impl eframe::App for PobApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Keep the OS window title in sync with the open build
+        let desired_title = match &self.screen {
+            Some(AppScreen::BuildView(view)) => {
+                format!("{} - Path of Building", view.window_title())
+            }
+            _ => "Path of Building".to_string(),
+        };
+        if desired_title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(desired_title.clone()));
+            self.window_title = desired_title;
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| match &self.status {
             AppStatus::Error(msg) => {
                 ui.heading("Path of Building — Error");

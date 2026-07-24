@@ -20,8 +20,8 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Create new folder
 - [x] Sort builds (by name, date modified)
 - [x] Build search/filter by name
-- [ ] Recent builds list
-- [ ] Build preview tooltip on hover (class, level, DPS summary)
+- [x] Recent builds list (last 10 opened, shown above the list; persisted in the app data dir)
+- [x] Build preview tooltip on hover (class, level, DPS/Life/EHP parsed from the XML's PlayerStat elements)
 
 ### Save System
 - [x] Save build to disk (Save)
@@ -158,14 +158,14 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Main skill selection ("Set Main" button)
 - [x] Create new socket group
 - [x] Delete socket group (with confirmation if gems exist; item-granted groups protected)
-- [ ] Delete all socket groups
+- [x] Delete all socket groups (button + confirmation; item-granted groups kept)
 - [ ] Reorder socket groups (drag and drop)
 - [ ] Copy/paste socket groups (Ctrl+C/V)
 - [x] Enable/disable socket group (checkbox)
-- [ ] Include/exclude from FullDPS (Ctrl+Right-Click)
+- [x] Include/exclude from FullDPS (checkbox per group; upstream's Ctrl+Right-Click shortcut not implemented)
 - [x] Socket group label editing
-- [ ] Socket group slot assignment (socketed in dropdown)
-- [ ] Socket group count multiplier
+- [x] Socket group slot assignment (socketed in dropdown)
+- [x] Socket group count multiplier (item-granted groups, like upstream)
 
 ### Gem Management
 - [x] Display gem name, level, quality
@@ -178,9 +178,9 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
   - [x] Support relationship indicators (check mark)
 - [x] Edit gem level
 - [x] Edit gem quality
-- [ ] Quality variant selection (Default, Anomalous, Divergent, Phantasmal)
+- [x] Quality variant selection (Default, Anomalous, Divergent, Phantasmal; dropdown shown when the gem has alt-quality stats)
 - [x] Enable/disable individual gem
-- [ ] Gem count (for totems, minions, traps, mines)
+- [x] Gem count (for totems, minions, traps, mines; shown for gems granting active effects)
 - [ ] Vaal gem global effect toggles
 
 ### Gem Options
@@ -274,7 +274,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 ## 6. Calcs Tab
 
 - [x] Calcs tab (full calculation breakdown display, driven by upstream's CalcSections data)
-- [~] Socket group / active skill / skill part selectors (socket group done; active skill/part pending)
+- [x] Socket group / active skill / skill part selectors (calcs-mode selection via mainActiveSkillCalcs/skillPartCalcs, independent of the sidebar like upstream)
 - [x] Calculation mode dropdown (Unbuffed, Buffed, In Combat, Effective DPS)
 - [x] Expandable stat sections (Offense, Defense, etc.)
 - [x] Click stat to show detailed breakdown
@@ -310,7 +310,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Color code buttons (Normal, Magic, Rare, Unique, Fire, Cold, etc.)
 - [x] Show/hide color codes toggle
 - [ ] Ctrl+Z/Y undo/redo within editor
-- [ ] Zoom support (Ctrl+scroll)
+- [x] Zoom support (Ctrl+scroll over the editor, 8-40pt)
 
 ---
 
@@ -356,7 +356,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Privacy settings link
 
 ### Import Modes
-- [ ] Import to current build vs. create new build toggle
+- [x] Import to current build vs. create new build toggle (radio in the import section; new-build path resets the view to an unsaved "Imported Build")
 
 ---
 
@@ -417,7 +417,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Global undo/redo system
 - [ ] Tooltip positioning (avoid screen edges)
 - [ ] DPI scaling / HiDPI support
-- [ ] Window title with build name and class
+- [x] Window title with build name and class ("Name (Ascendancy [+ Secondary]) - Path of Building")
 - [ ] Confirmation popups for destructive actions
 - [ ] Status bar / toast notifications
 - [ ] Loading indicators for async operations

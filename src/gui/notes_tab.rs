@@ -80,6 +80,8 @@ pub struct NotesPanel {
     show_color_codes: bool,
     /// Character offsets (byte index) of the current selection, captured last frame.
     last_selection: Option<(usize, usize)>,
+    /// Editor font size (Ctrl+scroll to zoom).
+    font_size: f32,
 }
 
 impl NotesPanel {
@@ -89,6 +91,7 @@ impl NotesPanel {
             buffer,
             show_color_codes: false,
             last_selection: None,
+            font_size: 13.0,
         }
     }
 
@@ -142,11 +145,19 @@ impl NotesPanel {
                 let id = ui.make_persistent_id("notes_editor");
                 let mut output = egui::TextEdit::multiline(&mut self.buffer)
                     .id(id)
-                    .font(egui::TextStyle::Monospace)
+                    .font(egui::FontId::monospace(self.font_size))
                     .desired_width(f32::INFINITY)
                     .desired_rows(20)
                     .min_size(available)
                     .show(ui);
+
+                // Ctrl+scroll over the editor zooms the text
+                if output.response.hovered() {
+                    let zoom = ui.input(|i| i.zoom_delta());
+                    if zoom != 1.0 {
+                        self.font_size = (self.font_size * zoom).clamp(8.0, 40.0);
+                    }
+                }
 
                 // Capture selection for next color button insertion.
                 if let Some(cursor_range) = output.cursor_range {

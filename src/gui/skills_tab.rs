@@ -25,8 +25,12 @@ enum SkillAction {
     SetMain(usize),
     NewGroup,
     DeleteGroup(usize),
+    DeleteAllGroups,
     SetEnabled(usize, bool),
     SetLabel(usize, String),
+    SetSlot(usize, Option<String>),
+    SetFullDps(usize, bool),
+    SetGroupCount(usize, i64),
     SetGem(usize, usize, GemProperty),
     AddGem(usize, String),
     RemoveGem(usize, usize),
@@ -44,6 +48,8 @@ pub struct SkillsPanel {
     label_edits: HashMap<usize, String>,
     /// Group index awaiting delete confirmation (group has gems).
     confirm_delete: Option<usize>,
+    /// True while the delete-all confirmation popup is open.
+    confirm_delete_all: bool,
     /// Gem autocomplete state.
     suggest: GemSuggest,
 }
@@ -60,6 +66,7 @@ impl SkillsPanel {
                     add_gem_error: HashMap::new(),
                     label_edits: HashMap::new(),
                     confirm_delete: None,
+                    confirm_delete_all: false,
                     suggest: GemSuggest::default(),
                 }
             }
@@ -72,6 +79,7 @@ impl SkillsPanel {
                     add_gem_error: HashMap::new(),
                     label_edits: HashMap::new(),
                     confirm_delete: None,
+                    confirm_delete_all: false,
                     suggest: GemSuggest::default(),
                 }
             }
@@ -91,12 +99,40 @@ impl SkillsPanel {
             if ui.button("New Socket Group").clicked() {
                 actions.push(SkillAction::NewGroup);
             }
+            if self.groups.iter().any(|g| !g.from_item)
+                && ui
+                    .button("Delete All")
+                    .on_hover_text("Delete every socket group (item-granted groups remain)")
+                    .clicked()
+            {
+                self.confirm_delete_all = true;
+            }
             ui.checkbox(&mut self.suggest.sort_by_dps, "Sort gems by DPS")
                 .on_hover_text(
                     "Sort gem suggestions by their DPS impact on the socket group \
                      (slower on first use per group)",
                 );
         });
+
+        // Delete-all confirmation
+        if self.confirm_delete_all {
+            egui::Window::new("Delete All Socket Groups")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label("Delete every socket group? Item-granted groups are kept.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete All").clicked() {
+                            actions.push(SkillAction::DeleteAllGroups);
+                            self.confirm_delete_all = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_delete_all = false;
+                        }
+                    });
+                });
+        }
         ui.separator();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -178,6 +214,16 @@ impl SkillsPanel {
                 SkillAction::SetLabel(index, ref label) => {
                     skills::set_group_label(lua, index, label)
                 }
+                SkillAction::SetSlot(index, ref slot) => {
+                    skills::set_group_slot(lua, index, slot.as_deref())
+                }
+                SkillAction::SetFullDps(index, include) => {
+                    skills::set_group_full_dps(lua, index, include)
+                }
+                SkillAction::SetGroupCount(index, count) => {
+                    skills::set_group_count(lua, index, count)
+                }
+                SkillAction::DeleteAllGroups => skills::delete_all_socket_groups(lua),
                 SkillAction::SetGem(group, gem, property) => {
                     skills::set_gem_property(lua, group, gem, property)
                 }
@@ -270,6 +316,57 @@ fn show_socket_group(
                 }
             });
 
+            // Second row: socket slot assignment, Full DPS, count multiplier
+            ui.horizontal(|ui| {
+                ui.label("Socketed in:");
+                let current_label = group
+                    .slot
+                    .as_deref()
+                    .and_then(|slot| {
+                        skills::GROUP_SLOT_LIST
+                            .iter()
+                            .find(|(_, name)| *name == Some(slot))
+                            .map(|(label, _)| *label)
+                    })
+                    .unwrap_or("None");
+                ui.add_enabled_ui(!group.from_item, |ui| {
+                    egui::ComboBox::from_id_salt(format!("group_slot_{}", group.index))
+                        .selected_text(current_label)
+                        .width(130.0)
+                        .show_ui(ui, |ui| {
+                            for (label, slot_name) in skills::GROUP_SLOT_LIST {
+                                if ui.selectable_label(label == current_label, label).clicked()
+                                    && label != current_label
+                                {
+                                    actions.push(SkillAction::SetSlot(
+                                        group.index,
+                                        slot_name.map(str::to_string),
+                                    ));
+                                }
+                            }
+                        });
+                })
+                .response
+                .on_hover_text(
+                    "The item this skill is socketed in; the skill benefits from that \
+                     item's socketed-gem modifiers",
+                );
+
+                let mut full_dps = group.include_in_full_dps;
+                if ui.checkbox(&mut full_dps, "Full DPS").changed() {
+                    actions.push(SkillAction::SetFullDps(group.index, full_dps));
+                }
+
+                if group.from_item {
+                    ui.label("Count:");
+                    let mut count = group.group_count;
+                    let resp = ui.add(egui::DragValue::new(&mut count).range(1..=99));
+                    if drag_value_committed(&resp) {
+                        actions.push(SkillAction::SetGroupCount(group.index, count));
+                    }
+                }
+            });
+
             let group_index = group.index;
             for (i, gem) in group.gems.iter_mut().enumerate() {
                 let gem_index = i + 1; // Lua is 1-based
@@ -317,6 +414,53 @@ fn show_socket_group(
                             gem_index,
                             GemProperty::Quality(gem.quality),
                         ));
+                    }
+
+                    // Quality variant (Anomalous/Divergent/...) when the gem
+                    // has any beyond Default
+                    if gem.alt_qualities.len() > 1 {
+                        let current = gem
+                            .alt_qualities
+                            .iter()
+                            .find(|(_, t)| *t == gem.quality_id)
+                            .map(|(l, _)| l.as_str())
+                            .unwrap_or("Default");
+                        egui::ComboBox::from_id_salt(format!(
+                            "gem_quality_id_{group_index}_{gem_index}"
+                        ))
+                        .selected_text(current)
+                        .width(95.0)
+                        .show_ui(ui, |ui| {
+                            for (label, type_id) in &gem.alt_qualities {
+                                if ui
+                                    .selectable_label(*type_id == gem.quality_id, label)
+                                    .clicked()
+                                    && *type_id != gem.quality_id
+                                {
+                                    actions.push(SkillAction::SetGem(
+                                        group_index,
+                                        gem_index,
+                                        GemProperty::QualityId(type_id.clone()),
+                                    ));
+                                }
+                            }
+                        });
+                    }
+
+                    // Skill copy count (totems, mirages, item-triggered copies)
+                    if gem.has_count {
+                        let count_response = ui.add(
+                            egui::DragValue::new(&mut gem.count)
+                                .range(1..=99)
+                                .prefix("x "),
+                        );
+                        if drag_value_committed(&count_response) {
+                            actions.push(SkillAction::SetGem(
+                                group_index,
+                                gem_index,
+                                GemProperty::Count(gem.count),
+                            ));
+                        }
                     }
 
                     if ui.small_button("✕").clicked() {

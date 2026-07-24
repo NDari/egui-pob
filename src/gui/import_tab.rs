@@ -25,6 +25,11 @@ pub struct ImportPanel {
     clear_items: bool,
     clear_skills: bool,
     ignore_weapon_swap: bool,
+    /// Import into a fresh build instead of overwriting the open one.
+    import_to_new: bool,
+    /// Set after a successful new-build import; the build view resets its
+    /// name/unsaved state when it sees this.
+    pub new_build_imported: bool,
 }
 
 impl ImportPanel {
@@ -45,6 +50,8 @@ impl ImportPanel {
             clear_items: true,
             clear_skills: true,
             ignore_weapon_swap: false,
+            import_to_new: false,
+            new_build_imported: false,
         }
     }
 
@@ -109,17 +116,36 @@ impl ImportPanel {
                 .hint_text("Paste build code or URL here...")
                 .font(egui::TextStyle::Monospace),
         );
+        ui.horizontal(|ui| {
+            ui.label("Import to:");
+            ui.radio_value(&mut self.import_to_new, false, "This build");
+            ui.radio_value(&mut self.import_to_new, true, "A new build");
+        });
         if ui.button("Import").clicked() && !self.import_code.is_empty() {
             let input = self.import_code.trim().to_string();
-            let result = if looks_like_url(&input) {
-                import_from_url(bridge, &input)
+            // For a new-build import, switch the VM to a fresh build first so
+            // the current one is untouched
+            let prepared = if self.import_to_new {
+                bridge
+                    .create_new_build()
+                    .map_err(|e| anyhow::anyhow!("failed to create new build: {e}"))
             } else {
-                import_build_code(bridge, &input)
+                Ok(())
             };
+            let result = prepared.and_then(|()| {
+                if looks_like_url(&input) {
+                    import_from_url(bridge, &input)
+                } else {
+                    import_build_code(bridge, &input)
+                }
+            });
             match result {
                 Ok(()) => {
                     self.status_message = Some(("Build imported.".to_string(), false));
                     self.import_code.clear();
+                    if self.import_to_new {
+                        self.new_build_imported = true;
+                    }
                     imported = true;
                 }
                 Err(e) => {

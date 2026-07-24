@@ -20,6 +20,7 @@ pub struct CalcsPanel {
     sections: Vec<CalcSection>,
     input: Option<CalcsInput>,
     socket_group_names: Vec<String>,
+    skill_selection: calcs::CalcsSkillSelection,
     breakdown: Option<OpenBreakdown>,
     search: String,
     error: Option<String>,
@@ -31,6 +32,7 @@ impl CalcsPanel {
             sections: Vec::new(),
             input: None,
             socket_group_names: Vec::new(),
+            skill_selection: calcs::CalcsSkillSelection::default(),
             breakdown: None,
             search: String::new(),
             error: None,
@@ -56,6 +58,9 @@ impl CalcsPanel {
             .ok();
         self.socket_group_names = skills::extract_skills(lua)
             .map(|groups| groups.iter().map(socket_group_name).collect())
+            .unwrap_or_default();
+        self.skill_selection = calcs::skill_selection(lua)
+            .map_err(|e| log::error!("Failed to get calcs skill selection: {e}"))
             .unwrap_or_default();
         if let Some(ref mut open) = self.breakdown {
             let (si, ui_idx, ri, ci) = open.cell;
@@ -154,6 +159,52 @@ impl CalcsPanel {
                                     log::error!("Failed to set skill number: {e}");
                                 } else {
                                     changed = true;
+                                }
+                            }
+                        }
+                    });
+            }
+
+            // Active skill selector (within the selected socket group)
+            if self.skill_selection.skills.len() > 1 {
+                let sel = self.skill_selection.selected_skill;
+                let current = self
+                    .skill_selection
+                    .skills
+                    .get(sel)
+                    .map(String::as_str)
+                    .unwrap_or("?");
+                egui::ComboBox::from_id_salt("calcs_active_skill")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (i, name) in self.skill_selection.skills.iter().enumerate() {
+                            if ui.selectable_label(i == sel, name).clicked() && i != sel {
+                                match calcs::set_active_skill(bridge.lua(), i) {
+                                    Ok(()) => changed = true,
+                                    Err(e) => log::error!("Failed to set active skill: {e}"),
+                                }
+                            }
+                        }
+                    });
+            }
+
+            // Skill part selector (for multi-part skills)
+            if self.skill_selection.parts.len() > 1 {
+                let sel = self.skill_selection.selected_part;
+                let current = self
+                    .skill_selection
+                    .parts
+                    .get(sel)
+                    .map(String::as_str)
+                    .unwrap_or("?");
+                egui::ComboBox::from_id_salt("calcs_skill_part")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (i, name) in self.skill_selection.parts.iter().enumerate() {
+                            if ui.selectable_label(i == sel, name).clicked() && i != sel {
+                                match calcs::set_skill_part(bridge.lua(), i) {
+                                    Ok(()) => changed = true,
+                                    Err(e) => log::error!("Failed to set skill part: {e}"),
                                 }
                             }
                         }

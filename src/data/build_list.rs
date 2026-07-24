@@ -105,6 +105,121 @@ pub fn scan_builds(build_path: &str, sub_path: &str) -> Vec<BuildEntry> {
     entries
 }
 
+/// Build a BuildInfo for an arbitrary .xml path (used by the recent list,
+/// whose entries can live anywhere under the build directory).
+pub fn build_info_from_path(path: &Path) -> Option<BuildInfo> {
+    if !path.is_file() {
+        return None;
+    }
+    let file_name = path.file_name()?.to_string_lossy().to_string();
+    let build_name = file_name
+        .strip_suffix(".xml")
+        .unwrap_or(&file_name)
+        .to_string();
+    let (level, class_name, ascend_class_name) = parse_build_header(path);
+    let modified = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    Some(BuildInfo {
+        file_name,
+        build_name,
+        full_path: path.to_path_buf(),
+        sub_path: String::new(),
+        level,
+        class_name,
+        ascend_class_name,
+        modified,
+    })
+}
+
+/// Key stats parsed from a build XML for the hover preview tooltip.
+#[derive(Debug, Clone, Default)]
+pub struct BuildPreview {
+    pub level: Option<u32>,
+    pub class_name: Option<String>,
+    pub ascend_class_name: Option<String>,
+    /// (label, value) pairs of the headline stats stored in the XML.
+    pub stats: Vec<(String, f64)>,
+}
+
+/// Parse the preview data (class, level, headline stats) from a build XML.
+/// Build files store the last calc results as `<PlayerStat stat="..." .../>`
+/// elements, so no Lua round-trip is needed.
+pub fn build_preview(path: &Path) -> BuildPreview {
+    let (level, class_name, ascend_class_name) = parse_build_header(path);
+    let mut preview = BuildPreview {
+        level,
+        class_name,
+        ascend_class_name,
+        stats: Vec::new(),
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return preview;
+    };
+
+    let wanted = [
+        ("CombinedDPS", "Combined DPS"),
+        ("TotalDPS", "Hit DPS"),
+        ("Life", "Life"),
+        ("EnergyShield", "Energy Shield"),
+        ("TotalEHP", "Effective Hit Pool"),
+    ];
+    for (stat, label) in wanted {
+        let needle = format!("stat=\"{stat}\"");
+        if let Some(pos) = text.find(&needle) {
+            // The value attribute sits on the same element, either side of stat=
+            let elem_start = text[..pos].rfind('<').unwrap_or(0);
+            let elem_end = text[pos..].find('>').map(|e| pos + e).unwrap_or(pos);
+            let elem = &text[elem_start..elem_end];
+            if let Some(value) = extract_attr(elem, "value").and_then(|v| v.parse::<f64>().ok()) {
+                preview.stats.push((label.to_string(), value));
+            }
+        }
+    }
+    preview
+}
+
+/// Path of the recent-builds list file (in the app's own data directory).
+fn recent_builds_file() -> Option<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "pob-egui")?;
+    let dir = dirs.data_dir();
+    std::fs::create_dir_all(dir).ok()?;
+    Some(dir.join("recent_builds.txt"))
+}
+
+/// Load the recent-builds list, most recent first. Entries whose files no
+/// longer exist are dropped.
+pub fn load_recent_builds() -> Vec<PathBuf> {
+    let Some(file) = recent_builds_file() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// Record a build as most recently opened (deduplicated, capped at 10).
+pub fn add_recent_build(path: &Path) {
+    let Some(file) = recent_builds_file() else {
+        return;
+    };
+    let mut list = load_recent_builds();
+    list.retain(|p| p != path);
+    list.insert(0, path.to_path_buf());
+    list.truncate(10);
+    let text: String = list.iter().map(|p| format!("{}\n", p.display())).collect();
+    if let Err(e) = std::fs::write(&file, text) {
+        log::warn!("Failed to write recent builds: {e}");
+    }
+}
+
 /// Validate a user-supplied build or folder name: non-empty, no path
 /// separators, no leading/trailing whitespace surprises.
 pub fn validate_name(name: &str) -> Result<(), String> {
@@ -333,6 +448,52 @@ mod tests {
         touch(&sub.join("a.xml"));
         assert!(move_build(&file, &sub).is_err());
         assert!(file.exists());
+    }
+
+    #[test]
+    fn build_preview_parses_header_and_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hero.xml");
+        std::fs::write(
+            &file,
+            "<PathOfBuilding><Build level=\"92\" className=\"Witch\" \
+             ascendClassName=\"Necromancer\">\
+             <PlayerStat stat=\"Life\" value=\"5432\"/>\
+             <PlayerStat stat=\"CombinedDPS\" value=\"1234567.89\"/>\
+             </Build></PathOfBuilding>",
+        )
+        .unwrap();
+
+        let preview = build_preview(&file);
+        assert_eq!(preview.level, Some(92));
+        assert_eq!(preview.ascend_class_name.as_deref(), Some("Necromancer"));
+        assert!(
+            preview
+                .stats
+                .iter()
+                .any(|(l, v)| l == "Life" && (*v - 5432.0).abs() < 0.01)
+        );
+        assert!(
+            preview
+                .stats
+                .iter()
+                .any(|(l, v)| l == "Combined DPS" && (*v - 1234567.89).abs() < 0.01)
+        );
+    }
+
+    #[test]
+    fn build_info_from_path_reads_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("My Build.xml");
+        std::fs::write(
+            &file,
+            "<PathOfBuilding><Build level=\"12\" className=\"Duelist\"></Build></PathOfBuilding>",
+        )
+        .unwrap();
+        let info = build_info_from_path(&file).expect("info");
+        assert_eq!(info.build_name, "My Build");
+        assert_eq!(info.level, Some(12));
+        assert!(build_info_from_path(&dir.path().join("missing.xml")).is_none());
     }
 
     #[test]

@@ -213,6 +213,121 @@ pub fn set_buff_mode(lua: &Lua, mode: &str) -> Result<(), mlua::Error> {
         .call(("misc_buffMode", mode))
 }
 
+/// The calcs view's active skill and skill part selection for the currently
+/// selected socket group. The calcs tab has its own selection, independent of
+/// the sidebar (upstream's `mainActiveSkillCalcs` / `skillPartCalcs`).
+#[derive(Debug, Clone, Default)]
+pub struct CalcsSkillSelection {
+    pub skills: Vec<String>,
+    /// Selected skill, 0-based.
+    pub selected_skill: usize,
+    pub parts: Vec<String>,
+    /// Selected part, 0-based.
+    pub selected_part: usize,
+}
+
+/// Read the calcs-mode active skill / part selection.
+pub fn skill_selection(lua: &Lua) -> Result<CalcsSkillSelection, mlua::Error> {
+    let t: LuaTable = lua
+        .load(
+            r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        local groupIdx = (build.calcsTab.input and build.calcsTab.input.skill_number)
+            or build.mainSocketGroup or 1
+        local group = build.skillsTab.socketGroupList[groupIdx]
+        local out = { skills = {}, selSkill = 1, parts = {}, selPart = 1 }
+        if group and group.displaySkillListCalcs then
+            for _, skill in ipairs(group.displaySkillListCalcs) do
+                local name = skill.activeEffect and skill.activeEffect.grantedEffect
+                    and skill.activeEffect.grantedEffect.name or "?"
+                table.insert(out.skills, name)
+            end
+            out.selSkill = group.mainActiveSkillCalcs or 1
+            local skill = group.displaySkillListCalcs[out.selSkill]
+            if skill and skill.activeEffect and skill.activeEffect.grantedEffect then
+                local ge = skill.activeEffect.grantedEffect
+                local src = skill.activeEffect.srcInstance
+                if ge.parts then
+                    for _, part in ipairs(ge.parts) do
+                        table.insert(out.parts, part.name or "?")
+                    end
+                    out.selPart = src and (src.skillPartCalcs or src.skillPart) or 1
+                end
+            end
+        end
+        return out
+    "#,
+        )
+        .eval()?;
+
+    let get_vec = |key: &str| -> Vec<String> {
+        t.get::<LuaTable>(key)
+            .map(|tbl| {
+                tbl.sequence_values::<String>()
+                    .filter_map(|r| r.ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let skills = get_vec("skills");
+    let parts = get_vec("parts");
+    Ok(CalcsSkillSelection {
+        selected_skill: t
+            .get::<usize>("selSkill")
+            .unwrap_or(1)
+            .saturating_sub(1)
+            .min(skills.len().saturating_sub(1)),
+        skills,
+        selected_part: t
+            .get::<usize>("selPart")
+            .unwrap_or(1)
+            .saturating_sub(1)
+            .min(parts.len().saturating_sub(1)),
+        parts,
+    })
+}
+
+/// Select the calcs-mode active skill (0-based index).
+pub fn set_active_skill(lua: &Lua, index: usize) -> Result<(), mlua::Error> {
+    let lua_idx = index + 1;
+    lua.load(format!(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        local groupIdx = (build.calcsTab.input and build.calcsTab.input.skill_number)
+            or build.mainSocketGroup or 1
+        local group = build.skillsTab.socketGroupList[groupIdx]
+        if group then
+            group.mainActiveSkillCalcs = {lua_idx}
+            build.buildFlag = true
+            _runCallback('OnFrame')
+        end
+    "#
+    ))
+    .exec()
+}
+
+/// Select the calcs-mode skill part (0-based index).
+pub fn set_skill_part(lua: &Lua, index: usize) -> Result<(), mlua::Error> {
+    let lua_idx = index + 1;
+    lua.load(format!(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        local groupIdx = (build.calcsTab.input and build.calcsTab.input.skill_number)
+            or build.mainSocketGroup or 1
+        local group = build.skillsTab.socketGroupList[groupIdx]
+        local skill = group and group.displaySkillListCalcs
+            and group.displaySkillListCalcs[group.mainActiveSkillCalcs or 1]
+        if skill and skill.activeEffect and skill.activeEffect.srcInstance then
+            skill.activeEffect.srcInstance.skillPartCalcs = {lua_idx}
+            build.calcsTab:AddUndoState()
+            build.buildFlag = true
+            _runCallback('OnFrame')
+        end
+    "#
+    ))
+    .exec()
+}
+
 /// Toggle between player and minion stats.
 pub fn set_show_minion(lua: &Lua, show: bool) -> Result<(), mlua::Error> {
     ensure_helper(lua)?;

@@ -1905,3 +1905,108 @@ fn test_node_power_build() {
         "report rows should carry node positions for panning"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Socket group management: slot, Full DPS, count, quality variant, delete all
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_socket_group_management() {
+    use pob_egui::data::skills::{self, GemProperty};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let groups = skills::extract_skills(lua).expect("extract failed");
+    let group = groups
+        .iter()
+        .find(|g| !g.from_item && !g.gems.is_empty())
+        .expect("a user socket group with gems");
+    let gi = group.index;
+
+    // Slot assignment round-trips
+    skills::set_group_slot(lua, gi, Some("Body Armour")).expect("set slot failed");
+    let groups = skills::extract_skills(lua).expect("extract failed");
+    let group = groups.iter().find(|g| g.index == gi).unwrap();
+    assert_eq!(group.slot.as_deref(), Some("Body Armour"));
+    skills::set_group_slot(lua, gi, None).expect("clear slot failed");
+    let groups = skills::extract_skills(lua).expect("extract failed");
+    assert_eq!(groups.iter().find(|g| g.index == gi).unwrap().slot, None);
+
+    // Full DPS toggle round-trips
+    skills::set_group_full_dps(lua, gi, true).expect("full dps failed");
+    let groups = skills::extract_skills(lua).expect("extract failed");
+    assert!(
+        groups
+            .iter()
+            .find(|g| g.index == gi)
+            .unwrap()
+            .include_in_full_dps
+    );
+
+    // Gem count and quality variant
+    let group = groups.iter().find(|g| g.index == gi).unwrap();
+    if let Some((idx0, gem)) = group
+        .gems
+        .iter()
+        .enumerate()
+        .find(|(_, g)| g.has_count && !g.is_support)
+    {
+        let gem_idx = idx0 + 1;
+        skills::set_gem_property(lua, gi, gem_idx, GemProperty::Count(3))
+            .expect("set count failed");
+        let groups = skills::extract_skills(lua).expect("extract failed");
+        assert_eq!(
+            groups.iter().find(|g| g.index == gi).unwrap().gems[idx0].count,
+            3,
+            "gem count should round-trip"
+        );
+        assert_eq!(gem.quality_id, "Default");
+        assert!(
+            !gem.alt_qualities.is_empty(),
+            "every gem has at least the Default variant"
+        );
+    }
+
+    // Delete all removes user groups but keeps item-granted ones
+    skills::delete_all_socket_groups(lua).expect("delete all failed");
+    let groups = skills::extract_skills(lua).expect("extract failed");
+    assert!(
+        groups.iter().all(|g| g.from_item),
+        "only item-granted groups should remain, got {} groups",
+        groups.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Calcs tab active skill / part selection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_calcs_skill_selection() {
+    use pob_egui::data::calcs;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let sel = calcs::skill_selection(lua).expect("selection failed");
+    assert!(
+        !sel.skills.is_empty(),
+        "the calcs socket group should list active skills"
+    );
+    assert!(sel.selected_skill < sel.skills.len());
+
+    // Selecting an active skill round-trips (index 0 is always valid)
+    calcs::set_active_skill(lua, 0).expect("set active skill failed");
+    let sel = calcs::skill_selection(lua).expect("selection failed");
+    assert_eq!(sel.selected_skill, 0);
+
+    // If the skill has parts, part selection round-trips too
+    if sel.parts.len() > 1 {
+        calcs::set_skill_part(lua, 1).expect("set part failed");
+        let sel = calcs::skill_selection(lua).expect("selection failed");
+        assert_eq!(sel.selected_part, 1);
+    }
+}

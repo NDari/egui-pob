@@ -135,6 +135,36 @@ impl BuildView {
         }
     }
 
+    /// Window title text for this build: "Name (Class)" like upstream's
+    /// SetWindowTitleWithBuildClass (ascendancy when picked, plus secondary).
+    pub fn window_title(&self) -> String {
+        let mut class_text = self
+            .classes
+            .get(self.selected_class)
+            .map(|c| {
+                if self.selected_ascend > 0 {
+                    c.ascendancies
+                        .get(self.selected_ascend)
+                        .map(|a| a.name.as_str())
+                        .unwrap_or(c.name.as_str())
+                } else {
+                    c.name.as_str()
+                }
+            })
+            .unwrap_or("")
+            .to_string();
+        if self.selected_secondary > 0
+            && let Some(secondary) = self.secondary_ascendancies.get(self.selected_secondary)
+        {
+            class_text = format!("{class_text} + {}", secondary.name);
+        }
+        if class_text.is_empty() {
+            self.build_name.clone()
+        } else {
+            format!("{} ({class_text})", self.build_name)
+        }
+    }
+
     /// Save the build, opening the Save As dialog if it has no file yet.
     fn request_save(&mut self, bridge: &LuaBridge) {
         if bridge.build_file_name().is_none() {
@@ -599,7 +629,12 @@ impl BuildView {
                 }
                 BuildTab::Import => {
                     if self.import_panel.show(ui, bridge) {
-                        // Build was imported — refresh everything
+                        // Build was imported - refresh everything
+                        if self.import_panel.new_build_imported {
+                            self.import_panel.new_build_imported = false;
+                            self.build_name = "Imported Build".to_string();
+                            self.is_unsaved_new = true;
+                        }
                         self.refresh_all(bridge);
                     }
                 }
@@ -634,6 +669,17 @@ impl BuildView {
         self.skills_panel = Some(SkillsPanel::new(bridge.lua()));
         self.calcs_panel = None; // recreated lazily on next visit
         self.notes_panel = Some(NotesPanel::new(bridge.lua()));
+        // The import may have changed class/ascendancy/level: resync the
+        // header dropdowns with the Lua state
+        let (selected_class, selected_ascend) = find_current_selection(bridge.lua(), &self.classes);
+        self.selected_class = selected_class;
+        self.selected_ascend = selected_ascend;
+        self.secondary_ascendancies = load_secondary_ascendancies(bridge.lua());
+        self.selected_secondary =
+            find_secondary_selection(bridge.lua(), &self.secondary_ascendancies);
+        let header = load_char_header(bridge.lua());
+        self.char_level = header.level.to_string();
+        self.level_auto_mode = header.level_auto;
     }
 
     fn show_stat_sidebar(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) {
