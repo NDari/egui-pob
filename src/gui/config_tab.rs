@@ -2,7 +2,20 @@
 
 use mlua::prelude::*;
 use pob_egui::data::config::{self, ConfigOption, LuaValueKind};
+use pob_egui::data::config_sets::{self, ConfigSetInfo};
 use pob_egui::lua_bridge::LuaBridge;
+
+/// Pending name prompt in the config set manager.
+enum SetAction {
+    New,
+    Copy(i64),
+    Rename(i64),
+}
+
+struct SetPrompt {
+    action: SetAction,
+    text: String,
+}
 
 pub struct ConfigPanel {
     pub options: Vec<ConfigOption>,
@@ -11,10 +24,20 @@ pub struct ConfigPanel {
     pub show_ineligible: bool,
     /// True while the reset-to-defaults confirmation popup is open.
     confirm_reset: bool,
+    /// Config sets in order + the active set id.
+    sets: Vec<ConfigSetInfo>,
+    active_set: i64,
+    manage_sets_open: bool,
+    set_prompt: Option<SetPrompt>,
+    confirm_delete_set: Option<i64>,
 }
 
 impl ConfigPanel {
     pub fn new(lua: &Lua) -> Self {
+        let (sets, active_set) = config_sets::list_config_sets(lua).unwrap_or_else(|e| {
+            log::error!("Failed to list config sets: {e}");
+            (Vec::new(), 1)
+        });
         match config::extract_config_options(lua) {
             Ok(options) => {
                 log::info!("Loaded {} config options", options.len());
@@ -24,6 +47,11 @@ impl ConfigPanel {
                     search: String::new(),
                     show_ineligible: false,
                     confirm_reset: false,
+                    sets,
+                    active_set,
+                    manage_sets_open: false,
+                    set_prompt: None,
+                    confirm_delete_set: None,
                 }
             }
             Err(e) => Self {
@@ -32,6 +60,11 @@ impl ConfigPanel {
                 search: String::new(),
                 show_ineligible: false,
                 confirm_reset: false,
+                sets,
+                active_set,
+                manage_sets_open: false,
+                set_prompt: None,
+                confirm_delete_set: None,
             },
         }
     }
@@ -52,6 +85,41 @@ impl ConfigPanel {
             ui.colored_label(super::theme::Theme::ERROR, err);
             return false;
         }
+
+        // Config set selector row
+        if !self.sets.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Config set:");
+                let active_label = self
+                    .sets
+                    .iter()
+                    .find(|s| s.id == self.active_set)
+                    .map(config_set_label)
+                    .unwrap_or_else(|| "Default".to_string());
+                egui::ComboBox::from_id_salt("config_set_select")
+                    .selected_text(active_label)
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for set in &self.sets {
+                            if ui
+                                .selectable_label(set.id == self.active_set, config_set_label(set))
+                                .clicked()
+                                && set.id != self.active_set
+                            {
+                                match config_sets::set_active_config_set(bridge.lua(), set.id) {
+                                    Ok(()) => changed = true,
+                                    Err(e) => log::error!("Failed to switch config set: {e}"),
+                                }
+                            }
+                        }
+                    });
+                if ui.button("Manage...").clicked() {
+                    self.manage_sets_open = true;
+                }
+            });
+        }
+
+        changed |= self.show_set_manager(ui, bridge);
 
         // Toolbar: search + ineligible toggle
         ui.horizontal(|ui| {
@@ -155,8 +223,151 @@ impl ConfigPanel {
 
         if changed {
             self.refresh_visibility(bridge.lua());
+            match config_sets::list_config_sets(bridge.lua()) {
+                Ok((sets, active)) => {
+                    self.sets = sets;
+                    self.active_set = active;
+                }
+                Err(e) => log::error!("Failed to refresh config sets: {e}"),
+            }
         }
 
+        changed
+    }
+
+    /// Manage Config Sets dialog. Returns true if the sets changed.
+    fn show_set_manager(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
+        if !self.manage_sets_open {
+            return false;
+        }
+        let mut changed = false;
+        let mut close = false;
+        let mut activate: Option<i64> = None;
+        let mut delete: Option<i64> = None;
+
+        egui::Window::new("Manage Config Sets")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                for set in &self.sets {
+                    ui.horizontal(|ui| {
+                        let is_active = set.id == self.active_set;
+                        let label = if is_active {
+                            egui::RichText::new(config_set_label(set))
+                                .color(super::theme::Theme::MAIN_SKILL)
+                        } else {
+                            egui::RichText::new(config_set_label(set))
+                        };
+                        ui.label(label);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.sets.len() > 1 && ui.small_button("Delete").clicked() {
+                                self.confirm_delete_set = Some(set.id);
+                            }
+                            if ui.small_button("Rename").clicked() {
+                                self.set_prompt = Some(SetPrompt {
+                                    action: SetAction::Rename(set.id),
+                                    text: set.title.clone(),
+                                });
+                            }
+                            if ui.small_button("Copy").clicked() {
+                                self.set_prompt = Some(SetPrompt {
+                                    action: SetAction::Copy(set.id),
+                                    text: format!("{} (copy)", config_set_label(set)),
+                                });
+                            }
+                            if !is_active && ui.small_button("Activate").clicked() {
+                                activate = Some(set.id);
+                            }
+                        });
+                    });
+                }
+                ui.separator();
+
+                if let Some(prompt) = &mut self.set_prompt {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.add(egui::TextEdit::singleline(&mut prompt.text).desired_width(200.0));
+                    });
+                }
+
+                ui.horizontal(|ui| {
+                    if let Some(prompt) = &self.set_prompt {
+                        let name = prompt.text.trim().to_string();
+                        if ui
+                            .add_enabled(!name.is_empty(), egui::Button::new("OK"))
+                            .clicked()
+                        {
+                            let result = match prompt.action {
+                                SetAction::New => config_sets::new_config_set(bridge.lua(), &name),
+                                SetAction::Copy(id) => {
+                                    config_sets::copy_config_set(bridge.lua(), id, &name)
+                                }
+                                SetAction::Rename(id) => {
+                                    config_sets::rename_config_set(bridge.lua(), id, &name)
+                                }
+                            };
+                            match result {
+                                Ok(()) => changed = true,
+                                Err(e) => log::error!("Config set action failed: {e}"),
+                            }
+                            self.set_prompt = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.set_prompt = None;
+                        }
+                    } else {
+                        if ui.button("New Set").clicked() {
+                            self.set_prompt = Some(SetPrompt {
+                                action: SetAction::New,
+                                text: String::new(),
+                            });
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    }
+                });
+
+                if let Some(id) = self.confirm_delete_set {
+                    let title = self
+                        .sets
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map(config_set_label)
+                        .unwrap_or_default();
+                    ui.separator();
+                    ui.colored_label(
+                        super::theme::Theme::ERROR,
+                        format!("Delete '{title}'? Its configuration values are lost."),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            delete = Some(id);
+                            self.confirm_delete_set = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_delete_set = None;
+                        }
+                    });
+                }
+            });
+
+        if let Some(id) = activate {
+            match config_sets::set_active_config_set(bridge.lua(), id) {
+                Ok(()) => changed = true,
+                Err(e) => log::error!("Failed to switch config set: {e}"),
+            }
+        }
+        if let Some(id) = delete {
+            match config_sets::delete_config_set(bridge.lua(), id) {
+                Ok(()) => changed = true,
+                Err(e) => log::error!("Failed to delete config set: {e}"),
+            }
+        }
+        if close {
+            self.manage_sets_open = false;
+        }
         changed
     }
 
@@ -292,6 +503,14 @@ impl ConfigPanel {
         }
 
         changed
+    }
+}
+
+fn config_set_label(set: &ConfigSetInfo) -> String {
+    if set.title.is_empty() {
+        "Default".to_string()
+    } else {
+        set.title.clone()
     }
 }
 

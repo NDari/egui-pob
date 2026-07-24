@@ -2236,3 +2236,269 @@ fn test_socket_jewel_tooltip() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Skill sets: create, copy, switch, rename, delete
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_skill_sets() {
+    use pob_egui::data::{skill_sets, skills};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let (sets, active) = skill_sets::list_skill_sets(lua).expect("list failed");
+    assert_eq!(sets.len(), 1, "test build starts with one skill set");
+    let original_id = active;
+    let user_groups = |lua: &mlua::Lua| -> usize {
+        skills::extract_skills(lua)
+            .expect("skills failed")
+            .iter()
+            .filter(|g| !g.from_item)
+            .count()
+    };
+    let original_groups = user_groups(lua);
+    assert!(original_groups > 0, "the build has socket groups");
+
+    // New set: empty, becomes active
+    skill_sets::new_skill_set(lua, "Empty Set").expect("new failed");
+    let (sets, active) = skill_sets::list_skill_sets(lua).expect("list failed");
+    assert_eq!(sets.len(), 2);
+    assert_ne!(active, original_id, "new set becomes active");
+    assert_eq!(
+        user_groups(lua),
+        0,
+        "new set has no user socket groups (item-granted ones re-inject)"
+    );
+
+    // Copy the original set: same group count, does not become active
+    skill_sets::copy_skill_set(lua, original_id, "Copied Set").expect("copy failed");
+    let (sets, active_after_copy) = skill_sets::list_skill_sets(lua).expect("list failed");
+    assert_eq!(sets.len(), 3);
+    assert_eq!(active_after_copy, active, "copy does not switch sets");
+    let copy = sets
+        .iter()
+        .find(|s| s.title == "Copied Set")
+        .expect("copy listed");
+
+    // Switching to the copy restores the group list
+    skill_sets::set_active_skill_set(lua, copy.id).expect("switch failed");
+    assert_eq!(
+        user_groups(lua),
+        original_groups,
+        "copied set has the original socket groups"
+    );
+
+    // Rename round-trips
+    skill_sets::rename_skill_set(lua, copy.id, "Renamed Set").expect("rename failed");
+    let (sets, _) = skill_sets::list_skill_sets(lua).expect("list failed");
+    assert!(sets.iter().any(|s| s.title == "Renamed Set"));
+
+    // Deleting the active set falls back to a neighbour
+    skill_sets::delete_skill_set(lua, copy.id).expect("delete failed");
+    let (sets, active) = skill_sets::list_skill_sets(lua).expect("list failed");
+    assert_eq!(sets.len(), 2);
+    assert_ne!(active, copy.id, "deleted set is no longer active");
+    assert!(!sets.iter().any(|s| s.id == copy.id));
+}
+
+// ---------------------------------------------------------------------------
+// Item sets: create, copy, switch, weapon swap, delete
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_item_sets() {
+    use pob_egui::data::{item_sets, items};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let (sets, original_id) = item_sets::list_item_sets(lua).expect("list failed");
+    assert_eq!(sets.len(), 1, "test build starts with one item set");
+
+    // Record the currently equipped body armour
+    let equipped_body = |lua: &mlua::Lua| -> i64 {
+        items::extract_equipped_items(lua)
+            .expect("equipped failed")
+            .iter()
+            .find(|s| s.slot_name == "Body Armour")
+            .map(|s| s.sel_item_id)
+            .unwrap_or(0)
+    };
+    let original_body = equipped_body(lua);
+    assert!(original_body > 0, "test build has a body armour equipped");
+
+    // New set: empty equipment, becomes active
+    item_sets::new_item_set(lua, "Naked Set").expect("new failed");
+    let (sets, active) = item_sets::list_item_sets(lua).expect("list failed");
+    assert_eq!(sets.len(), 2);
+    assert_ne!(active, original_id);
+    assert_eq!(equipped_body(lua), 0, "new set has nothing equipped");
+
+    // Switching back restores the original equipment
+    item_sets::set_active_item_set(lua, original_id).expect("switch failed");
+    assert_eq!(equipped_body(lua), original_body, "original set restored");
+
+    // Copy preserves equipment
+    item_sets::copy_item_set(lua, original_id, "Copied Gear").expect("copy failed");
+    let (sets, _) = item_sets::list_item_sets(lua).expect("list failed");
+    assert_eq!(sets.len(), 3);
+    let copy = sets
+        .iter()
+        .find(|s| s.title == "Copied Gear")
+        .expect("copy listed");
+    item_sets::set_active_item_set(lua, copy.id).expect("switch failed");
+    assert_eq!(equipped_body(lua), original_body, "copy has the same gear");
+
+    // Weapon swap flag round-trips and reveals swap slots
+    assert!(!item_sets::use_second_weapon_set(lua).expect("swap read failed"));
+    item_sets::set_use_second_weapon_set(lua, true).expect("swap set failed");
+    assert!(item_sets::use_second_weapon_set(lua).expect("swap read failed"));
+    let slots = items::extract_equipped_items(lua).expect("equipped failed");
+    assert!(
+        slots.iter().any(|s| s.slot_name.contains("Swap")),
+        "swap slots should be visible while weapon swap is enabled"
+    );
+    item_sets::set_use_second_weapon_set(lua, false).expect("swap unset failed");
+
+    // Rename + delete (active falls back to a neighbour)
+    item_sets::rename_item_set(lua, copy.id, "Renamed Gear").expect("rename failed");
+    let (sets, _) = item_sets::list_item_sets(lua).expect("list failed");
+    assert!(sets.iter().any(|s| s.title == "Renamed Gear"));
+    item_sets::delete_item_set(lua, copy.id).expect("delete failed");
+    let (sets, active) = item_sets::list_item_sets(lua).expect("list failed");
+    assert_eq!(sets.len(), 2);
+    assert_ne!(active, copy.id);
+}
+
+// ---------------------------------------------------------------------------
+// Config sets: create, copy, switch, delete
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_config_sets() {
+    use pob_egui::data::{config, config_sets};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let (sets, original_id) = config_sets::list_config_sets(lua).expect("list failed");
+    assert_eq!(sets.len(), 1, "test build starts with one config set");
+
+    let read_penalty = |lua: &mlua::Lua| -> f64 {
+        lua.load(
+            "return mainObject_ref.main.modes['BUILD'].configTab.input['resistancePenalty'] or -60",
+        )
+        .eval()
+        .expect("read failed")
+    };
+
+    // Change a value in the original set
+    config::set_config_value(lua, "resistancePenalty", mlua::Value::Number(0.0))
+        .expect("set failed");
+    assert_eq!(read_penalty(lua), 0.0);
+
+    // New set starts from defaults and becomes active
+    config_sets::new_config_set(lua, "Boss Config").expect("new failed");
+    let (sets, active) = config_sets::list_config_sets(lua).expect("list failed");
+    assert_eq!(sets.len(), 2);
+    assert_ne!(active, original_id);
+    assert_eq!(read_penalty(lua), -60.0, "new set has default values");
+
+    // Copy of the original preserves the changed value
+    config_sets::copy_config_set(lua, original_id, "Copied Config").expect("copy failed");
+    let (sets, _) = config_sets::list_config_sets(lua).expect("list failed");
+    let copy = sets
+        .iter()
+        .find(|s| s.title == "Copied Config")
+        .expect("copy listed");
+    config_sets::set_active_config_set(lua, copy.id).expect("switch failed");
+    assert_eq!(read_penalty(lua), 0.0, "copied set kept the changed value");
+
+    // Rename + delete active falls back
+    config_sets::rename_config_set(lua, copy.id, "Renamed Config").expect("rename failed");
+    config_sets::delete_config_set(lua, copy.id).expect("delete failed");
+    let (sets, active) = config_sets::list_config_sets(lua).expect("list failed");
+    assert_eq!(sets.len(), 2);
+    assert_ne!(active, copy.id);
+
+    // Switching back to the original restores its value
+    config_sets::set_active_config_set(lua, original_id).expect("switch failed");
+    assert_eq!(read_penalty(lua), 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Loadouts: creation, listing, activation across all four set systems
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_loadouts() {
+    use pob_egui::data::{config_sets, item_sets, loadouts, skill_sets, tree_specs};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // With single sets everywhere, the sole tree spec forms a loadout
+    let (list, _) = loadouts::list_loadouts(lua).expect("list failed");
+    let initial_count = list.len();
+
+    // New loadout creates a spec + item/skill/config sets sharing the name
+    loadouts::new_loadout(lua, "Bossing").expect("new loadout failed");
+    let (list, _) = loadouts::list_loadouts(lua).expect("list failed");
+    assert!(
+        list.iter().any(|l| l == "Bossing"),
+        "new loadout listed, got {list:?}"
+    );
+    assert!(list.len() > initial_count);
+    let (sets, _) = skill_sets::list_skill_sets(lua).expect("skill sets failed");
+    assert!(sets.iter().any(|s| s.title == "Bossing"));
+    let (sets, _) = item_sets::list_item_sets(lua).expect("item sets failed");
+    assert!(sets.iter().any(|s| s.title == "Bossing"));
+    let (sets, _) = config_sets::list_config_sets(lua).expect("config sets failed");
+    assert!(sets.iter().any(|s| s.title == "Bossing"));
+
+    // Activating it switches all four actives
+    assert!(
+        loadouts::activate_loadout(lua, "Bossing").expect("activate failed"),
+        "activation should find the loadout"
+    );
+    let (specs, active_spec) = tree_specs::list_specs(lua).expect("specs failed");
+    assert_eq!(
+        specs
+            .get(active_spec - 1)
+            .map(|s| s.title.as_str())
+            .unwrap_or(""),
+        "Bossing",
+        "tree spec switched"
+    );
+    let (sets, active) = skill_sets::list_skill_sets(lua).expect("skill sets failed");
+    assert_eq!(
+        sets.iter().find(|s| s.id == active).unwrap().title,
+        "Bossing",
+        "skill set switched"
+    );
+    let (sets, active) = item_sets::list_item_sets(lua).expect("item sets failed");
+    assert_eq!(
+        sets.iter().find(|s| s.id == active).unwrap().title,
+        "Bossing",
+        "item set switched"
+    );
+    let (sets, active) = config_sets::list_config_sets(lua).expect("config sets failed");
+    assert_eq!(
+        sets.iter().find(|s| s.id == active).unwrap().title,
+        "Bossing",
+        "config set switched"
+    );
+
+    // The matched loadout is reported as selected
+    let (_, selected) = loadouts::list_loadouts(lua).expect("list failed");
+    assert_eq!(selected.as_deref(), Some("Bossing"));
+
+    // Unknown names are rejected
+    assert!(!loadouts::activate_loadout(lua, "Nope").expect("activate failed"));
+}

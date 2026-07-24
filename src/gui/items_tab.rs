@@ -4,10 +4,32 @@
 use std::collections::HashMap;
 
 use pob_egui::data::item_db::{self, DbItem};
+use pob_egui::data::item_sets::{self, ItemSetInfo};
 use pob_egui::data::items::{self, EquippedItem, ItemListEntry, TooltipLine};
 use pob_egui::lua_bridge::LuaBridge;
 
 use super::theme::{self, Theme};
+
+/// Pending name prompt in the item set manager.
+enum SetAction {
+    New,
+    Copy(i64),
+    Rename(i64),
+}
+
+struct SetPrompt {
+    action: SetAction,
+    text: String,
+}
+
+/// Item set manager UI state (survives the panel rebuilds that follow every
+/// item change).
+#[derive(Default)]
+pub struct ItemSetsUi {
+    manage_open: bool,
+    prompt: Option<SetPrompt>,
+    confirm_delete: Option<i64>,
+}
 
 /// State for the items panel.
 pub struct ItemsPanel {
@@ -24,6 +46,13 @@ pub struct ItemsPanel {
     tooltip_cache: HashMap<(i64, Option<String>), Vec<TooltipLine>>,
     /// Unique / rare-template database browser (survives panel rebuilds).
     pub item_db: ItemDbBrowser,
+    /// Item sets in order + the active set id.
+    sets: Vec<ItemSetInfo>,
+    active_set: i64,
+    /// Active set's weapon-swap flag.
+    use_swap: bool,
+    /// Item set manager state (survives panel rebuilds).
+    pub sets_ui: ItemSetsUi,
 }
 
 /// Raw-text item editor state. `item_id` is None when creating a new item.
@@ -58,6 +87,11 @@ impl ItemsPanel {
                 item_list.len()
             );
         }
+        let (sets, active_set) = item_sets::list_item_sets(lua).unwrap_or_else(|e| {
+            log::error!("Failed to list item sets: {e}");
+            (Vec::new(), 1)
+        });
+        let use_swap = item_sets::use_second_weapon_set(lua).unwrap_or(false);
         Self {
             equipped,
             item_list,
@@ -67,6 +101,10 @@ impl ItemsPanel {
             edit_dialog: None,
             tooltip_cache: HashMap::new(),
             item_db: ItemDbBrowser::default(),
+            sets,
+            active_set,
+            use_swap,
+            sets_ui: ItemSetsUi::default(),
         }
     }
 
@@ -80,6 +118,55 @@ impl ItemsPanel {
         let mut changed = false;
 
         changed |= self.show_edit_dialog(ui, bridge);
+
+        // Item set selector row
+        if !self.sets.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Item set:");
+                let active_label = self
+                    .sets
+                    .iter()
+                    .find(|s| s.id == self.active_set)
+                    .map(item_set_label)
+                    .unwrap_or_else(|| "Default".to_string());
+                egui::ComboBox::from_id_salt("item_set_select")
+                    .selected_text(active_label)
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for set in &self.sets {
+                            if ui
+                                .selectable_label(set.id == self.active_set, item_set_label(set))
+                                .clicked()
+                                && set.id != self.active_set
+                            {
+                                match item_sets::set_active_item_set(bridge.lua(), set.id) {
+                                    Ok(()) => changed = true,
+                                    Err(e) => log::error!("Failed to switch item set: {e}"),
+                                }
+                            }
+                        }
+                    });
+                if ui.button("Manage...").clicked() {
+                    self.sets_ui.manage_open = true;
+                }
+                ui.separator();
+                let mut use_swap = self.use_swap;
+                if ui
+                    .checkbox(&mut use_swap, "Weapon swap")
+                    .on_hover_text(
+                        "Use the second weapon set (Weapon 1/2 Swap slots) for this item set",
+                    )
+                    .changed()
+                {
+                    match item_sets::set_use_second_weapon_set(bridge.lua(), use_swap) {
+                        Ok(()) => changed = true,
+                        Err(e) => log::error!("Failed to toggle weapon swap: {e}"),
+                    }
+                }
+            });
+        }
+
+        changed |= self.show_set_manager(ui, bridge);
 
         // Top bar: paste from clipboard, create custom item
         ui.horizontal(|ui| {
@@ -168,6 +255,142 @@ impl ItemsPanel {
             });
         });
 
+        changed
+    }
+
+    /// Manage Item Sets dialog. Returns true if the sets changed.
+    fn show_set_manager(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
+        if !self.sets_ui.manage_open {
+            return false;
+        }
+        let mut changed = false;
+        let mut close = false;
+        let mut activate: Option<i64> = None;
+        let mut delete: Option<i64> = None;
+
+        egui::Window::new("Manage Item Sets")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                for set in &self.sets {
+                    ui.horizontal(|ui| {
+                        let is_active = set.id == self.active_set;
+                        let label = if is_active {
+                            egui::RichText::new(item_set_label(set))
+                                .color(super::theme::Theme::MAIN_SKILL)
+                        } else {
+                            egui::RichText::new(item_set_label(set))
+                        };
+                        ui.label(label);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.sets.len() > 1 && ui.small_button("Delete").clicked() {
+                                self.sets_ui.confirm_delete = Some(set.id);
+                            }
+                            if ui.small_button("Rename").clicked() {
+                                self.sets_ui.prompt = Some(SetPrompt {
+                                    action: SetAction::Rename(set.id),
+                                    text: set.title.clone(),
+                                });
+                            }
+                            if ui.small_button("Copy").clicked() {
+                                self.sets_ui.prompt = Some(SetPrompt {
+                                    action: SetAction::Copy(set.id),
+                                    text: format!("{} (copy)", item_set_label(set)),
+                                });
+                            }
+                            if !is_active && ui.small_button("Activate").clicked() {
+                                activate = Some(set.id);
+                            }
+                        });
+                    });
+                }
+                ui.separator();
+
+                if let Some(prompt) = &mut self.sets_ui.prompt {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.add(egui::TextEdit::singleline(&mut prompt.text).desired_width(200.0));
+                    });
+                }
+
+                ui.horizontal(|ui| {
+                    if let Some(prompt) = &self.sets_ui.prompt {
+                        let name = prompt.text.trim().to_string();
+                        if ui
+                            .add_enabled(!name.is_empty(), egui::Button::new("OK"))
+                            .clicked()
+                        {
+                            let result = match prompt.action {
+                                SetAction::New => item_sets::new_item_set(bridge.lua(), &name),
+                                SetAction::Copy(id) => {
+                                    item_sets::copy_item_set(bridge.lua(), id, &name)
+                                }
+                                SetAction::Rename(id) => {
+                                    item_sets::rename_item_set(bridge.lua(), id, &name)
+                                }
+                            };
+                            match result {
+                                Ok(()) => changed = true,
+                                Err(e) => log::error!("Item set action failed: {e}"),
+                            }
+                            self.sets_ui.prompt = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.sets_ui.prompt = None;
+                        }
+                    } else {
+                        if ui.button("New Set").clicked() {
+                            self.sets_ui.prompt = Some(SetPrompt {
+                                action: SetAction::New,
+                                text: String::new(),
+                            });
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    }
+                });
+
+                if let Some(id) = self.sets_ui.confirm_delete {
+                    let title = self
+                        .sets
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map(item_set_label)
+                        .unwrap_or_default();
+                    ui.separator();
+                    ui.colored_label(
+                        Theme::ERROR,
+                        format!("Delete '{title}'? Its equipment selection is lost."),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            delete = Some(id);
+                            self.sets_ui.confirm_delete = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.sets_ui.confirm_delete = None;
+                        }
+                    });
+                }
+            });
+
+        if let Some(id) = activate {
+            match item_sets::set_active_item_set(bridge.lua(), id) {
+                Ok(()) => changed = true,
+                Err(e) => log::error!("Failed to switch item set: {e}"),
+            }
+        }
+        if let Some(id) = delete {
+            match item_sets::delete_item_set(bridge.lua(), id) {
+                Ok(()) => changed = true,
+                Err(e) => log::error!("Failed to delete item set: {e}"),
+            }
+        }
+        if close {
+            self.sets_ui.manage_open = false;
+        }
         changed
     }
 
@@ -808,6 +1031,14 @@ fn hover_tooltip(
         return resp;
     }
     resp.on_hover_ui(|ui| show_tooltip_lines(ui, lines))
+}
+
+fn item_set_label(set: &ItemSetInfo) -> String {
+    if set.title.is_empty() {
+        "Default".to_string()
+    } else {
+        set.title.clone()
+    }
 }
 
 /// Render item tooltip lines (shared by build items and DB items).

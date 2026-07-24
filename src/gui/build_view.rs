@@ -2,6 +2,7 @@
 
 use pob_egui::data::CalcOutput;
 use pob_egui::data::display_stats::{self, SidebarStats};
+use pob_egui::data::loadouts;
 use pob_egui::lua_bridge::LuaBridge;
 
 use super::calcs_tab::CalcsPanel;
@@ -77,6 +78,11 @@ pub struct BuildView {
     // Character header state
     char_level: String,
     level_auto_mode: bool,
+    /// Loadouts (matched tree/item/skill/config set names) + current match.
+    loadouts: Vec<String>,
+    selected_loadout: Option<String>,
+    /// Name buffer for the New Loadout prompt (None = closed).
+    loadout_prompt: Option<String>,
 }
 
 struct SaveAsDialog {
@@ -108,6 +114,11 @@ impl BuildView {
         let secondary_ascendancies = load_secondary_ascendancies(bridge.lua());
         let selected_secondary = find_secondary_selection(bridge.lua(), &secondary_ascendancies);
         let header = load_char_header(bridge.lua());
+        let (loadouts, selected_loadout) =
+            loadouts::list_loadouts(bridge.lua()).unwrap_or_else(|e| {
+                log::error!("Failed to list loadouts: {e}");
+                (Vec::new(), None)
+            });
 
         Self {
             build_name,
@@ -132,6 +143,9 @@ impl BuildView {
             selected_secondary,
             char_level: header.level.to_string(),
             level_auto_mode: header.level_auto,
+            loadouts,
+            selected_loadout,
+            loadout_prompt: None,
         }
     }
 
@@ -355,6 +369,8 @@ impl BuildView {
 
         let dirty = bridge.is_build_dirty();
         let mut request_save = false;
+        let mut activate_loadout: Option<String> = None;
+        let mut new_loadout_clicked = false;
         ui.horizontal(|ui| {
             if ui.button("< Builds").clicked() && self.request_close(bridge) {
                 go_back = true;
@@ -460,6 +476,44 @@ impl BuildView {
 
             ui.separator();
 
+            // Loadouts: activate a matching tree/item/skill/config set combo
+            ui.label("Loadout:");
+            let selected_text = self.selected_loadout.as_deref().unwrap_or("-");
+            egui::ComboBox::from_id_salt("loadout_select")
+                .selected_text(selected_text)
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    if self.loadouts.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No loadouts")
+                                .color(egui::Color32::from_rgb(150, 150, 150)),
+                        );
+                    }
+                    for loadout in &self.loadouts {
+                        let is_selected = self.selected_loadout.as_deref() == Some(loadout);
+                        if ui.selectable_label(is_selected, loadout).clicked() && !is_selected {
+                            activate_loadout = Some(loadout.clone());
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "A loadout switches the tree, items, skills, and config together. \
+                     Sets with the same name (or a shared {tag} in their names) form a loadout.",
+                );
+            if ui
+                .button("+")
+                .on_hover_text(
+                    "New loadout: creates a linked tree spec, item set, skill set, \
+                     and config set with the same name",
+                )
+                .clicked()
+            {
+                new_loadout_clicked = true;
+            }
+
+            ui.separator();
+
             // Character level
             ui.label("Lv");
             let level_response = ui.add(
@@ -491,6 +545,50 @@ impl BuildView {
 
         if request_save {
             self.request_save(bridge);
+        }
+
+        // Loadout actions
+        if let Some(name) = activate_loadout {
+            match loadouts::activate_loadout(bridge.lua(), &name) {
+                Ok(true) => self.refresh_all(bridge),
+                Ok(false) => log::warn!("Loadout '{name}' no longer matches"),
+                Err(e) => log::error!("Failed to activate loadout: {e}"),
+            }
+        }
+        if new_loadout_clicked {
+            self.loadout_prompt = Some("New Loadout".to_string());
+        }
+        if let Some(mut name) = self.loadout_prompt.take() {
+            let mut keep_open = true;
+            egui::Window::new("New Loadout")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label("Enter a name for this loadout:");
+                    let response = ui.text_edit_singleline(&mut name);
+                    let submitted =
+                        response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.horizontal(|ui| {
+                        let create = ui
+                            .add_enabled(!name.trim().is_empty(), egui::Button::new("Create"))
+                            .clicked()
+                            || (submitted && !name.trim().is_empty());
+                        if create {
+                            match loadouts::new_loadout(bridge.lua(), name.trim()) {
+                                Ok(()) => self.refresh_all(bridge),
+                                Err(e) => log::error!("Failed to create loadout: {e}"),
+                            }
+                            keep_open = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep_open = false;
+                        }
+                    });
+                });
+            if keep_open {
+                self.loadout_prompt = Some(name);
+            }
         }
 
         // Apply class/ascendancy changes
@@ -582,12 +680,13 @@ impl BuildView {
                         && items.show(ui, bridge)
                     {
                         self.refresh_calc_output(bridge);
-                        // Rebuild the panel but keep the DB browser (its
-                        // loaded lists and open window survive item changes)
-                        let db = self.items_panel.take().map(|p| p.item_db);
+                        // Rebuild the panel but keep the DB browser and the
+                        // set-manager UI (their open windows survive changes)
+                        let carried = self.items_panel.take().map(|p| (p.item_db, p.sets_ui));
                         let mut panel = ItemsPanel::new(bridge.lua());
-                        if let Some(db) = db {
+                        if let Some((db, sets_ui)) = carried {
                             panel.item_db = db;
+                            panel.sets_ui = sets_ui;
                         }
                         self.items_panel = Some(panel);
                         // Items can grant skills and socket jewels into the tree;
@@ -658,6 +757,13 @@ impl BuildView {
         match display_stats::extract_sidebar_stats(bridge.lua()) {
             Ok(stats) => self.sidebar_stats = Some(stats),
             Err(e) => log::error!("Failed to refresh sidebar stats: {e}"),
+        }
+        match loadouts::list_loadouts(bridge.lua()) {
+            Ok((list, selected)) => {
+                self.loadouts = list;
+                self.selected_loadout = selected;
+            }
+            Err(e) => log::error!("Failed to refresh loadouts: {e}"),
         }
         self.calcs_stale = true;
     }

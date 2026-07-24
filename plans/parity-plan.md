@@ -31,10 +31,10 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [~] Auto-save / dirty-state tracking (dirty tracking via upstream build.unsaved done; auto-save not planned)
 
 ### Loadout System
-- [ ] Multiple loadouts per build (linked tree/items/skills/config sets)
-- [ ] Loadout dropdown in top bar
-- [ ] Create/delete/rename loadouts
-- [ ] Sync between loadout tabs
+- [x] Multiple loadouts per build (linked tree/items/skills/config sets, matched by set title or {tag}, via upstream SyncLoadouts)
+- [x] Loadout dropdown in top bar (shows the currently matched loadout; activating switches all four sets)
+- [x] Create/delete/rename loadouts (create via + button; rename/delete happen through the underlying sets, same as upstream)
+- [x] Sync between loadout tabs (list + selection refresh on every set change)
 
 ---
 
@@ -192,9 +192,9 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Show legacy gems toggle
 
 ### Skill Sets
-- [ ] Multiple skill sets per build
-- [ ] Skill set management popup
-- [ ] Switch between skill sets
+- [x] Multiple skill sets per build (upstream skillSets; XML round-trip via upstream save/load)
+- [x] Skill set management popup (new/copy/rename/delete with confirmation)
+- [x] Switch between skill sets (dropdown in the skills toolbar)
 
 ---
 
@@ -261,10 +261,10 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Search and filter in databases (search with Anywhere/Names/Modifiers modes + base type filter; league/requirement/obtainable filters not yet)
 
 ### Item Sets
-- [ ] Multiple item sets per build
-- [ ] Item set dropdown
-- [ ] Item set management
-- [ ] Weapon swap support
+- [x] Multiple item sets per build (upstream itemSets; slot selections swap via SetActiveItemSet)
+- [x] Item set dropdown
+- [x] Item set management (new/copy/rename/delete popup with confirmation)
+- [x] Weapon swap support (per-set checkbox; empty swap slots become visible/equippable while enabled)
 
 ### Undo/Redo
 - [ ] Ctrl+Z / Ctrl+Y for item changes
@@ -296,8 +296,8 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Section headers with collapsible groups
 - [x] Conditional option visibility (ifNode, ifOption, ifCond dependencies)
 - [x] Tooltips for config option explanations
-- [ ] Config sets (multiple independent configs per build)
-- [ ] Config set management popup
+- [x] Config sets (multiple independent configs per build; dropdown in the config toolbar)
+- [x] Config set management popup (new/copy/rename/delete with confirmation)
 - [x] Reset to defaults (button + confirmation; restores upstream varList defaults)
 - [ ] Undo/redo for config changes
 

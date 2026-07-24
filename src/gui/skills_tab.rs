@@ -3,8 +3,21 @@
 use std::collections::HashMap;
 
 use pob_egui::data::gems::{self, GemChoice};
+use pob_egui::data::skill_sets::{self, SkillSetInfo};
 use pob_egui::data::skills::{self, GemProperty, SocketGroup};
 use pob_egui::lua_bridge::LuaBridge;
+
+/// Pending name prompt in the skill set manager.
+enum SetAction {
+    New,
+    Copy(i64),
+    Rename(i64),
+}
+
+struct SetPrompt {
+    action: SetAction,
+    text: String,
+}
 
 /// Gem autocomplete state, shared across socket groups (only one add-gem
 /// field has focus at a time).
@@ -34,6 +47,11 @@ enum SkillAction {
     SetGem(usize, usize, GemProperty),
     AddGem(usize, String),
     RemoveGem(usize, usize),
+    ActivateSet(i64),
+    NewSet(String),
+    CopySet(i64, String),
+    RenameSet(i64, String),
+    DeleteSet(i64),
 }
 
 /// State for the skills panel.
@@ -52,10 +70,21 @@ pub struct SkillsPanel {
     confirm_delete_all: bool,
     /// Gem autocomplete state.
     suggest: GemSuggest,
+    /// Skill sets in order + the active set id.
+    sets: Vec<SkillSetInfo>,
+    active_set: i64,
+    manage_sets_open: bool,
+    set_prompt: Option<SetPrompt>,
+    /// Set id awaiting delete confirmation.
+    confirm_delete_set: Option<i64>,
 }
 
 impl SkillsPanel {
     pub fn new(lua: &mlua::Lua) -> Self {
+        let (sets, active_set) = skill_sets::list_skill_sets(lua).unwrap_or_else(|e| {
+            log::error!("Failed to list skill sets: {e}");
+            (Vec::new(), 1)
+        });
         match skills::extract_skills(lua) {
             Ok(groups) => {
                 log::info!("Loaded {} socket groups", groups.len());
@@ -68,6 +97,11 @@ impl SkillsPanel {
                     confirm_delete: None,
                     confirm_delete_all: false,
                     suggest: GemSuggest::default(),
+                    sets,
+                    active_set,
+                    manage_sets_open: false,
+                    set_prompt: None,
+                    confirm_delete_set: None,
                 }
             }
             Err(e) => {
@@ -81,6 +115,11 @@ impl SkillsPanel {
                     confirm_delete: None,
                     confirm_delete_all: false,
                     suggest: GemSuggest::default(),
+                    sets,
+                    active_set,
+                    manage_sets_open: false,
+                    set_prompt: None,
+                    confirm_delete_set: None,
                 }
             }
         }
@@ -96,6 +135,33 @@ impl SkillsPanel {
         let mut actions: Vec<SkillAction> = Vec::new();
 
         ui.horizontal(|ui| {
+            // Skill set selector + manager
+            if !self.sets.is_empty() {
+                let active_label = self
+                    .sets
+                    .iter()
+                    .find(|s| s.id == self.active_set)
+                    .map(set_label)
+                    .unwrap_or_else(|| "Default".to_string());
+                egui::ComboBox::from_id_salt("skill_set_select")
+                    .selected_text(active_label)
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for set in &self.sets {
+                            if ui
+                                .selectable_label(set.id == self.active_set, set_label(set))
+                                .clicked()
+                                && set.id != self.active_set
+                            {
+                                actions.push(SkillAction::ActivateSet(set.id));
+                            }
+                        }
+                    });
+                if ui.button("Manage...").clicked() {
+                    self.manage_sets_open = true;
+                }
+                ui.separator();
+            }
             if ui.button("New Socket Group").clicked() {
                 actions.push(SkillAction::NewGroup);
             }
@@ -113,6 +179,10 @@ impl SkillsPanel {
                      (slower on first use per group)",
                 );
         });
+
+        if self.manage_sets_open {
+            self.show_set_manager(ui, &mut actions);
+        }
 
         // Delete-all confirmation
         if self.confirm_delete_all {
@@ -193,11 +263,128 @@ impl SkillsPanel {
                 Ok(groups) => self.groups = groups,
                 Err(e) => log::error!("Failed to refresh skills: {e}"),
             }
+            match skill_sets::list_skill_sets(bridge.lua()) {
+                Ok((sets, active)) => {
+                    self.sets = sets;
+                    self.active_set = active;
+                }
+                Err(e) => log::error!("Failed to refresh skill sets: {e}"),
+            }
             // Group indices may have shifted; drop stale edit buffers
             self.label_edits.clear();
             self.add_gem_text.clear();
         }
         changed
+    }
+
+    /// Manage Skill Sets dialog: activate, new, copy, rename, delete.
+    fn show_set_manager(&mut self, ui: &mut egui::Ui, actions: &mut Vec<SkillAction>) {
+        let mut close = false;
+        egui::Window::new("Manage Skill Sets")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                for set in &self.sets {
+                    ui.horizontal(|ui| {
+                        let is_active = set.id == self.active_set;
+                        let label = if is_active {
+                            egui::RichText::new(set_label(set))
+                                .color(super::theme::Theme::MAIN_SKILL)
+                        } else {
+                            egui::RichText::new(set_label(set))
+                        };
+                        ui.label(label);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.sets.len() > 1 && ui.small_button("Delete").clicked() {
+                                self.confirm_delete_set = Some(set.id);
+                            }
+                            if ui.small_button("Rename").clicked() {
+                                self.set_prompt = Some(SetPrompt {
+                                    action: SetAction::Rename(set.id),
+                                    text: set.title.clone(),
+                                });
+                            }
+                            if ui.small_button("Copy").clicked() {
+                                self.set_prompt = Some(SetPrompt {
+                                    action: SetAction::Copy(set.id),
+                                    text: format!("{} (copy)", set_label(set)),
+                                });
+                            }
+                            if !is_active && ui.small_button("Activate").clicked() {
+                                actions.push(SkillAction::ActivateSet(set.id));
+                            }
+                        });
+                    });
+                }
+                ui.separator();
+
+                if let Some(prompt) = &mut self.set_prompt {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.add(egui::TextEdit::singleline(&mut prompt.text).desired_width(200.0));
+                    });
+                }
+
+                ui.horizontal(|ui| {
+                    if let Some(prompt) = &self.set_prompt {
+                        let name = prompt.text.trim().to_string();
+                        if ui
+                            .add_enabled(!name.is_empty(), egui::Button::new("OK"))
+                            .clicked()
+                        {
+                            match prompt.action {
+                                SetAction::New => actions.push(SkillAction::NewSet(name)),
+                                SetAction::Copy(id) => actions.push(SkillAction::CopySet(id, name)),
+                                SetAction::Rename(id) => {
+                                    actions.push(SkillAction::RenameSet(id, name))
+                                }
+                            }
+                            self.set_prompt = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.set_prompt = None;
+                        }
+                    } else {
+                        if ui.button("New Set").clicked() {
+                            self.set_prompt = Some(SetPrompt {
+                                action: SetAction::New,
+                                text: String::new(),
+                            });
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    }
+                });
+
+                // Delete confirmation
+                if let Some(id) = self.confirm_delete_set {
+                    let title = self
+                        .sets
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map(set_label)
+                        .unwrap_or_default();
+                    ui.separator();
+                    ui.colored_label(
+                        super::theme::Theme::ERROR,
+                        format!("Delete '{title}'? Its socket groups are lost."),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            actions.push(SkillAction::DeleteSet(id));
+                            self.confirm_delete_set = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_delete_set = None;
+                        }
+                    });
+                }
+            });
+        if close {
+            self.manage_sets_open = false;
+        }
     }
 
     fn apply_actions(&mut self, bridge: &LuaBridge, actions: Vec<SkillAction>) -> bool {
@@ -240,6 +427,11 @@ impl SkillsPanel {
                     Err(e) => Err(e),
                 },
                 SkillAction::RemoveGem(group, gem) => skills::remove_gem(lua, group, gem),
+                SkillAction::ActivateSet(id) => skill_sets::set_active_skill_set(lua, id),
+                SkillAction::NewSet(ref name) => skill_sets::new_skill_set(lua, name),
+                SkillAction::CopySet(id, ref name) => skill_sets::copy_skill_set(lua, id, name),
+                SkillAction::RenameSet(id, ref name) => skill_sets::rename_skill_set(lua, id, name),
+                SkillAction::DeleteSet(id) => skill_sets::delete_skill_set(lua, id),
             };
             match result {
                 Ok(()) => changed = true,
@@ -572,6 +764,14 @@ fn show_socket_group(
 /// change made without dragging (typed edit / arrow buttons).
 fn drag_value_committed(response: &egui::Response) -> bool {
     response.drag_stopped() || (response.changed() && !response.dragged())
+}
+
+fn set_label(set: &SkillSetInfo) -> String {
+    if set.title.is_empty() {
+        "Default".to_string()
+    } else {
+        set.title.clone()
+    }
 }
 
 fn socket_group_title(group: &SocketGroup) -> String {

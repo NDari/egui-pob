@@ -90,15 +90,18 @@ pub fn extract_equipped_items(lua: &Lua) -> Result<Vec<EquippedItem>, mlua::Erro
                 if slot.nodeId and not spec.allocNodes[slot.nodeId] then
                     goto continue
                 end
-                -- Skip weapon swap slots unless they have an item equipped
+                -- Skip weapon swap slots unless they have an item equipped or
+                -- the active item set uses the second weapon set
                 if slot.slotName:find("Swap") then
+                    local swapActive = itemsTab.activeItemSet
+                        and itemsTab.activeItemSet.useSecondWeaponSet == true
                     local swapItemId = 0
                     if itemsTab.activeItemSet and itemsTab.activeItemSet[slot.slotName] then
                         swapItemId = itemsTab.activeItemSet[slot.slotName].selItemId or 0
                     elseif slot.selItemId then
                         swapItemId = slot.selItemId
                     end
-                    if swapItemId <= 0 then
+                    if swapItemId <= 0 and not swapActive then
                         goto continue
                     end
                 end
