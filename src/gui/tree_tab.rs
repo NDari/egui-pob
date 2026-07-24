@@ -1,9 +1,10 @@
 //! Tree tab: passive tree view with pan/zoom and node interaction.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use pob_egui::data::jewels::{self, RadiusDef, SocketInfo};
+use pob_egui::data::node_power;
 use pob_egui::data::tree::{self, HoverInfo, MasteryEffectList, NodeType, TreeData};
 use pob_egui::data::tree_specs::{self, CompareDiff, SpecAllocation, SpecInfo, TreeVersion};
 use pob_egui::data::tree_sprites::TreeSpriteAtlas;
@@ -41,6 +42,54 @@ struct ConvertPopup {
     /// (ruthless/alternate) when matching the target version.
     ignore_sub_type: bool,
 }
+
+/// Node power heatmap + report state.
+struct NodePowerState {
+    enabled: bool,
+    /// Available power stats (entry 0 is the Offence/Defence default).
+    stats: Vec<node_power::PowerStat>,
+    /// Selected index into `stats`.
+    stat_sel: usize,
+    /// Selected index into `POWER_DEPTHS`.
+    depth_sel: usize,
+    /// True while the builder coroutine is running.
+    building: bool,
+    /// Builder progress percentage (0-100).
+    progress: i64,
+    /// Heatmap tint per unallocated node id.
+    colors: HashMap<u32, egui::Color32>,
+    report_open: bool,
+    report: Vec<node_power::ReportRow>,
+    /// Report sort column (0 name, 1 power, 2 power/point, 3 distance).
+    sort_col: usize,
+    sort_desc: bool,
+}
+
+impl Default for NodePowerState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stats: Vec::new(),
+            stat_sel: 0,
+            depth_sel: 0,
+            building: false,
+            progress: 0,
+            colors: HashMap::new(),
+            report_open: false,
+            report: Vec::new(),
+            sort_col: 1,
+            sort_desc: true,
+        }
+    }
+}
+
+/// Max path depth options for the node power calculation.
+const POWER_DEPTHS: [(&str, Option<i64>); 4] = [
+    ("All", None),
+    ("5", Some(5)),
+    ("10", Some(10)),
+    ("15", Some(15)),
+];
 
 /// State for the passive tree tab.
 pub struct TreePanel {
@@ -90,6 +139,10 @@ pub struct TreePanel {
     current_cache: Option<SpecAllocation>,
     /// Computed diff shown by the renderer.
     compare_diff: Option<CompareDiff>,
+    /// Node power heatmap + report.
+    power: NodePowerState,
+    /// Show stat difference previews in node tooltips (Ctrl+D toggles).
+    show_stat_diffs: bool,
 }
 
 impl TreePanel {
@@ -136,6 +189,8 @@ impl TreePanel {
                     compare_cache: None,
                     current_cache: None,
                     compare_diff: None,
+                    power: NodePowerState::default(),
+                    show_stat_diffs: true,
                 };
             }
         };
@@ -196,6 +251,8 @@ impl TreePanel {
             compare_cache: None,
             current_cache: None,
             compare_diff: None,
+            power: NodePowerState::default(),
+            show_stat_diffs: true,
         }
     }
 
@@ -445,6 +502,118 @@ impl TreePanel {
             }
         }
 
+        // Node power heatmap controls
+        ui.horizontal(|ui| {
+            let was_enabled = self.power.enabled;
+            ui.checkbox(&mut self.power.enabled, "Node power")
+                .on_hover_text(
+                    "Color unallocated nodes by their impact on the selected stat \
+                     (default: red = offence, blue = defence)",
+                );
+            if self.power.enabled && !was_enabled {
+                if self.power.stats.is_empty() {
+                    match node_power::list_power_stats(bridge.lua()) {
+                        Ok(stats) => self.power.stats = stats,
+                        Err(e) => log::error!("Failed to list power stats: {e}"),
+                    }
+                }
+                apply_power_selection(&self.power, bridge);
+            }
+            if self.power.enabled {
+                let mut selection_changed = false;
+                let sel_label = self
+                    .power
+                    .stats
+                    .get(self.power.stat_sel)
+                    .map(|s| s.label.as_str())
+                    .unwrap_or("?");
+                egui::ComboBox::from_id_salt("power_stat_select")
+                    .selected_text(sel_label)
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for i in 0..self.power.stats.len() {
+                            let label = self.power.stats[i].label.clone();
+                            if ui
+                                .selectable_label(i == self.power.stat_sel, label)
+                                .clicked()
+                                && i != self.power.stat_sel
+                            {
+                                self.power.stat_sel = i;
+                                selection_changed = true;
+                            }
+                        }
+                    });
+                ui.label("Depth:");
+                egui::ComboBox::from_id_salt("power_depth_select")
+                    .selected_text(POWER_DEPTHS[self.power.depth_sel].0)
+                    .width(50.0)
+                    .show_ui(ui, |ui| {
+                        for (i, (label, _)) in POWER_DEPTHS.iter().enumerate() {
+                            if ui
+                                .selectable_label(i == self.power.depth_sel, *label)
+                                .clicked()
+                                && i != self.power.depth_sel
+                            {
+                                self.power.depth_sel = i;
+                                selection_changed = true;
+                            }
+                        }
+                    });
+                if selection_changed {
+                    apply_power_selection(&self.power, bridge);
+                }
+                if ui.button("Power report").clicked() {
+                    self.power.report_open = !self.power.report_open;
+                    if self.power.report_open && !self.power.building {
+                        refresh_power_report(&mut self.power, bridge);
+                    }
+                }
+                if self.power.building {
+                    ui.spinner();
+                    ui.label(format!("Calculating... {}%", self.power.progress));
+                }
+            }
+        });
+
+        // Drive the power builder coroutine (one ~100ms slice per frame)
+        if self.power.enabled {
+            match node_power::power_dirty(bridge.lua()) {
+                Ok(true) => {
+                    self.power.building = true;
+                    match node_power::power_step(bridge.lua()) {
+                        Ok((done, progress)) => {
+                            self.power.progress = progress;
+                            if done {
+                                self.power.building = false;
+                                match node_power::heatmap_colors(bridge.lua()) {
+                                    Ok(colors) => self.power.colors = colors,
+                                    Err(e) => log::error!("Failed to read heatmap: {e}"),
+                                }
+                                if self.power.report_open {
+                                    refresh_power_report(&mut self.power, bridge);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Power build step failed: {e}");
+                            self.power.enabled = false;
+                            self.power.building = false;
+                        }
+                    }
+                    ui.ctx().request_repaint();
+                }
+                Ok(false) => self.power.building = false,
+                Err(e) => log::error!("Power dirty check failed: {e}"),
+            }
+        }
+
+        // Power report window; clicking a row pans the camera to that node
+        if let Some((x, y)) = show_power_report(&mut self.power, ui) {
+            camera.center_x = x;
+            camera.center_y = y;
+            camera.zoom = camera.zoom.max(0.25);
+        }
+
         // Cycle to the next/previous match and center the camera on it
         if let Some(dir) = jump
             && !self.search_matches.is_empty()
@@ -474,6 +643,11 @@ impl TreePanel {
         // Undo/redo (Ctrl+Z / Ctrl+Y), only when no widget (e.g. the search
         // field) has keyboard focus
         if ui.ctx().memory(|m| m.focused().is_none()) {
+            // Ctrl+D: toggle stat difference previews in node tooltips
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::D)) {
+                self.show_stat_diffs = !self.show_stat_diffs;
+                self.hover_cache = None;
+            }
             let undo_pressed =
                 ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
             let redo_pressed =
@@ -554,6 +728,12 @@ impl TreePanel {
                 compare,
                 jewel_radii: &self.jewel_radii,
                 jewel_sockets: &self.jewel_sockets,
+                heatmap: self.power.enabled.then_some(&self.power.colors),
+                hover_diff: self
+                    .hover_cache
+                    .as_ref()
+                    .map(|(_, info)| info.diff.as_slice())
+                    .unwrap_or(&[]),
             },
         );
 
@@ -658,15 +838,15 @@ impl TreePanel {
         }
         let cached_id = self.hover_cache.as_ref().map(|(id, _)| *id);
         if view.hovered != cached_id {
-            self.hover_cache =
-                view.hovered
-                    .and_then(|id| match tree::fetch_hover_info(bridge.lua(), id) {
-                        Ok(info) => Some((id, info)),
-                        Err(e) => {
-                            log::error!("Failed to fetch hover info for node {id}: {e}");
-                            None
-                        }
-                    });
+            self.hover_cache = view.hovered.and_then(|id| {
+                match tree::fetch_hover_info(bridge.lua(), id, self.show_stat_diffs) {
+                    Ok(info) => Some((id, info)),
+                    Err(e) => {
+                        log::error!("Failed to fetch hover info for node {id}: {e}");
+                        None
+                    }
+                }
+            });
         }
 
         // Any tree change invalidates the comparison snapshot of the active
@@ -975,6 +1155,158 @@ impl TreePanel {
 }
 
 /// Display label for a spec: "[3.25] Title" for non-latest tree versions.
+/// Push the current power stat/depth selection to Lua and flag a rebuild.
+fn apply_power_selection(power: &NodePowerState, bridge: &LuaBridge) {
+    let Some(stat) = power.stats.get(power.stat_sel) else {
+        return;
+    };
+    let depth = POWER_DEPTHS[power.depth_sel].1;
+    if let Err(e) = node_power::set_power_stat(bridge.lua(), stat.index, depth) {
+        log::error!("Failed to set power stat: {e}");
+    }
+}
+
+/// Rebuild the power report rows from Lua and apply the current sort.
+fn refresh_power_report(power: &mut NodePowerState, bridge: &LuaBridge) {
+    match node_power::power_report(bridge.lua()) {
+        Ok(mut rows) => {
+            sort_power_report(&mut rows, power.sort_col, power.sort_desc);
+            power.report = rows;
+        }
+        Err(e) => log::error!("Failed to build power report: {e}"),
+    }
+}
+
+fn sort_power_report(report: &mut [node_power::ReportRow], col: usize, desc: bool) {
+    report.sort_by(|a, b| {
+        let ord = match col {
+            0 => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            2 => a.path_power.total_cmp(&b.path_power),
+            3 => a.path_dist.cmp(&b.path_dist),
+            _ => a.power.total_cmp(&b.power),
+        };
+        if desc { ord.reverse() } else { ord }
+    });
+}
+
+/// Draw the power report window. Returns the tree position to pan to when a
+/// row was clicked.
+fn show_power_report(power: &mut NodePowerState, ui: &mut egui::Ui) -> Option<(f32, f32)> {
+    if !power.report_open {
+        return None;
+    }
+    let mut pan = None;
+    let mut open = power.report_open;
+    let mut new_sort: Option<usize> = None;
+
+    const COLS: [(&str, f32); 4] = [
+        ("Node", 200.0),
+        ("Power", 90.0),
+        ("Power/Point", 90.0),
+        ("Dist", 40.0),
+    ];
+
+    egui::Window::new("Power Report")
+        .open(&mut open)
+        .default_size([470.0, 420.0])
+        .resizable(true)
+        .show(ui.ctx(), |ui| {
+            if power.building {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!(
+                        "Calculating... {}% (results update when done)",
+                        power.progress
+                    ));
+                });
+            }
+            ui.horizontal(|ui| {
+                for (i, (label, width)) in COLS.iter().enumerate() {
+                    let marker = if power.sort_col == i {
+                        if power.sort_desc { " ▼" } else { " ▲" }
+                    } else {
+                        ""
+                    };
+                    if ui
+                        .add_sized(
+                            [*width, 18.0],
+                            egui::Button::new(format!("{label}{marker}")).small(),
+                        )
+                        .clicked()
+                    {
+                        new_sort = Some(i);
+                    }
+                }
+            });
+            ui.separator();
+
+            egui::ScrollArea::vertical()
+                .id_salt("power_report_scroll")
+                .show_rows(ui, 18.0, power.report.len(), |ui, range| {
+                    for row in &power.report[range] {
+                        ui.horizontal(|ui| {
+                            let name_color = if row.allocated {
+                                egui::Color32::from_rgb(120, 220, 120)
+                            } else {
+                                egui::Color32::WHITE
+                            };
+                            let clickable = row.id != 0;
+                            let name = egui::RichText::new(&row.name).color(name_color).size(12.0);
+                            let label = egui::Label::new(name).truncate();
+                            let resp = if clickable {
+                                let resp = ui.add_sized(
+                                    [COLS[0].1, 16.0],
+                                    label.sense(egui::Sense::click()),
+                                );
+                                resp.clone().on_hover_text("Click to show on the tree");
+                                resp
+                            } else {
+                                ui.add_sized([COLS[0].1, 16.0], label)
+                            };
+                            if clickable && resp.clicked() {
+                                pan = Some((row.x as f32, row.y as f32));
+                            }
+                            ui.add_sized(
+                                [COLS[1].1, 16.0],
+                                egui::Label::new(super::theme::pob_layout_job(
+                                    &row.power_str,
+                                    12.0,
+                                    egui::Color32::WHITE,
+                                )),
+                            );
+                            ui.add_sized(
+                                [COLS[2].1, 16.0],
+                                egui::Label::new(super::theme::pob_layout_job(
+                                    &row.path_power_str,
+                                    12.0,
+                                    egui::Color32::WHITE,
+                                )),
+                            );
+                            ui.add_sized(
+                                [COLS[3].1, 16.0],
+                                egui::Label::new(
+                                    egui::RichText::new(row.path_dist.to_string()).size(12.0),
+                                ),
+                            );
+                        });
+                    }
+                });
+        });
+
+    if let Some(col) = new_sort {
+        if power.sort_col == col {
+            power.sort_desc = !power.sort_desc;
+        } else {
+            power.sort_col = col;
+            // Name sorts ascending by default, numbers descending
+            power.sort_desc = col != 0;
+        }
+        sort_power_report(&mut power.report, power.sort_col, power.sort_desc);
+    }
+    power.report_open = open;
+    pan
+}
+
 fn spec_label(spec: &SpecInfo) -> String {
     if spec.is_latest_version {
         spec.title.clone()

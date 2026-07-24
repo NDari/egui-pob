@@ -63,12 +63,18 @@ pub struct TreeOverlays<'a> {
     pub hover_path: &'a HashSet<u32>,
     /// Nodes that would disconnect if `hover_node` were deallocated.
     pub hover_depends: &'a HashSet<u32>,
+    /// Stat difference lines for `hover_node` (PoB color-coded), appended to
+    /// its tooltip.
+    pub hover_diff: &'a [String],
     /// Spec comparison diff (None when compare mode is off).
     pub compare: Option<&'a pob_egui::data::tree_specs::CompareDiff>,
     /// Jewel radius definitions for the active tree version.
     pub jewel_radii: &'a [pob_egui::data::jewels::RadiusDef],
     /// Jewel sockets with socketed-jewel info.
     pub jewel_sockets: &'a [pob_egui::data::jewels::SocketInfo],
+    /// Node power heatmap tints per node id (None = heatmap off). Applied to
+    /// unallocated nodes.
+    pub heatmap: Option<&'a std::collections::HashMap<u32, egui::Color32>>,
 }
 
 /// Border color for passive tooltips (upstream default: rgb(128, 77, 0)).
@@ -383,10 +389,19 @@ pub fn draw_tree(
         let is_hovered = hovered_node.is_some_and(|h| h.id == node.id);
         let is_dependent = hover_depends.contains(&node.id) && Some(node.id) != hovered_id;
 
+        // Node power heatmap tint (unallocated nodes only, like upstream)
+        let heat_tint = if node.is_allocated {
+            None
+        } else {
+            overlays.heatmap.and_then(|hm| hm.get(&node.id)).copied()
+        };
+
         // Dependent nodes get a red tint: they would disconnect if the
         // hovered node were deallocated.
         let tint = if is_dependent {
             Palette::DEPENDENT_TINT
+        } else if let Some(heat) = heat_tint {
+            heat
         } else {
             egui::Color32::WHITE
         };
@@ -401,6 +416,8 @@ pub fn draw_tree(
             // Fallback: colored circle
             let color = if is_dependent {
                 Palette::DEPENDENT
+            } else if let Some(heat) = heat_tint {
+                heat
             } else if node.is_allocated {
                 Palette::ALLOCATED
             } else if node.ascendancy_name.is_some() {
@@ -517,8 +534,15 @@ pub fn draw_tree(
             s.visuals.popup_shadow = egui::epaint::Shadow::NONE;
             s.visuals.window_corner_radius = egui::CornerRadius::ZERO;
         });
+        // Diff lines belong to the node the caller's hover cache is for;
+        // it can lag a frame behind the node hovered right now
+        let diff: &[String] = if overlays.hover_node == Some(node.id) {
+            overlays.hover_diff
+        } else {
+            &[]
+        };
         response.clone().on_hover_ui_at_pointer(|ui| {
-            show_node_tooltip(ui, node, tooltip_headers);
+            show_node_tooltip(ui, node, tooltip_headers, diff);
         });
         ui.ctx().style_mut(|s| s.visuals = saved);
     }
@@ -758,23 +782,28 @@ fn node_type_color(node_type: NodeType) -> egui::Color32 {
 }
 
 /// Rich tooltip for a passive tree node, styled to match upstream PoB.
-fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&TooltipHeaders>) {
+fn show_node_tooltip(
+    ui: &mut egui::Ui,
+    node: &TreeNode,
+    headers: Option<&TooltipHeaders>,
+    diff: &[String],
+) {
     let frame = egui::Frame::NONE
         .fill(TOOLTIP_BG)
         .stroke(egui::Stroke::new(
             TOOLTIP_BORDER_WIDTH,
             TOOLTIP_BORDER_COLOR,
         ))
-        .inner_margin(egui::Margin::same(8));
+        .inner_margin(egui::Margin::same(6));
 
     frame.show(ui, |ui| {
-        ui.set_max_width(400.0);
+        ui.set_max_width(300.0);
 
         // Draw the header image strip behind the title text
         let header_strip = headers.and_then(|h| h.get(node));
         if let Some(strip) = header_strip {
             // Scale the header down so it doesn't dominate the tooltip
-            let scale = 0.7;
+            let scale = 0.55;
             let h = strip.height * scale;
             let side_w = strip.side_width * scale;
             let mid_w = strip.middle_width * scale;
@@ -819,7 +848,7 @@ fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&Toolti
             // Paint twice with 1px offset to simulate bold
             let name_galley = ui.painter().layout_no_wrap(
                 node.name.clone(),
-                egui::FontId::proportional(22.0),
+                egui::FontId::proportional(17.0),
                 egui::Color32::WHITE,
             );
             let text_pos = egui::pos2(
@@ -856,21 +885,21 @@ fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&Toolti
                 _ => egui::Color32::from_rgb(170, 170, 170),
             };
             ui.label(egui::RichText::new(type_label).small().color(type_color));
-            ui.label(egui::RichText::new(&node.name).strong().size(22.0));
+            ui.label(egui::RichText::new(&node.name).strong().size(17.0));
         }
 
         // Oil recipe (for notables) — show oil name + icon for each
         if !node.recipe.is_empty() {
             let oil_color = egui::Color32::from_rgb(248, 230, 202);
-            let icon_size = 20.0;
+            let icon_size = 15.0;
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 for (i, oil_name) in node.recipe.iter().enumerate() {
                     if i > 0 {
-                        ui.label(egui::RichText::new("+").size(14.0).color(oil_color));
+                        ui.label(egui::RichText::new("+").size(11.0).color(oil_color));
                     }
                     let short = oil_name.strip_suffix("Oil").unwrap_or(oil_name);
-                    ui.label(egui::RichText::new(short).size(14.0).color(oil_color));
+                    ui.label(egui::RichText::new(short).size(11.0).color(oil_color));
                     if let Some(tex) = headers.and_then(|h| h.oil_icons.get(oil_name.as_str())) {
                         ui.image(egui::load::SizedTexture::new(
                             tex.id(),
@@ -887,7 +916,7 @@ fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&Toolti
             for stat in &node.stats {
                 ui.label(
                     egui::RichText::new(stat)
-                        .size(16.0)
+                        .size(12.0)
                         .color(egui::Color32::from_rgb(136, 136, 255)),
                 );
             }
@@ -899,7 +928,7 @@ fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&Toolti
             for line in &node.reminder_text {
                 ui.label(
                     egui::RichText::new(line)
-                        .size(14.0)
+                        .size(11.0)
                         .italics()
                         .color(egui::Color32::from_rgb(160, 160, 128)),
                 );
@@ -912,11 +941,28 @@ fn show_node_tooltip(ui: &mut egui::Ui, node: &TreeNode, headers: Option<&Toolti
             for line in &node.flavour_text {
                 ui.label(
                     egui::RichText::new(line)
-                        .size(16.0)
+                        .size(12.0)
                         .italics()
                         .color(egui::Color32::from_rgb(175, 96, 37)),
                 );
             }
+        }
+
+        // Stat difference preview ("Allocating this node will give you: ...")
+        if !diff.is_empty() {
+            ui.separator();
+            for line in diff {
+                ui.label(super::theme::pob_layout_job(
+                    line,
+                    10.0,
+                    egui::Color32::WHITE,
+                ));
+            }
+            ui.label(
+                egui::RichText::new("Tip: Ctrl+D toggles stat differences")
+                    .size(9.0)
+                    .color(egui::Color32::from_rgb(120, 120, 120)),
+            );
         }
 
         // Allocation status

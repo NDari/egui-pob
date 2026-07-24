@@ -76,6 +76,8 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 ### Interaction
 - [x] Click to allocate/deallocate node
 - [x] Hover tooltip with stats, name, type, recipe, flavour text
+- [x] Stat difference preview in hover tooltip ("Allocating this node will give you: ..." via upstream AddStatComparesToTooltip; Ctrl+D toggle)
+- [x] Path stat difference in hover tooltip ("Allocating this node and all nodes leading to it will give you: ..." with per-point values; "unallocating ... and all nodes depending on it" for allocated nodes)
 - [ ] Right-click context menu (jump to items for jewel sockets, modify node for tattoos)
 - [x] Mastery popup (select mastery effect on click; right-click allocated mastery to change effect)
 - [ ] Shift+drag path tracing mode
@@ -90,12 +92,12 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Ctrl+F to focus search
 
 ### Node Power
-- [ ] Show node power heatmap toggle
-- [ ] Power stat selection dropdown (DPS, Defense, etc.)
-- [ ] Node power max depth controls
-- [ ] Power report list (sortable table of node values)
-- [ ] Click node in power report to pan to it
-- [ ] Color-coded power visualization (red=offense, blue=defense)
+- [x] Show node power heatmap toggle
+- [x] Power stat selection dropdown (DPS, Defense, etc.; upstream powerStatList)
+- [x] Node power max depth controls (All/5/10/15; no custom depth input yet)
+- [x] Power report list (sortable table of node values)
+- [x] Click node in power report to pan to it
+- [x] Color-coded power visualization (red=offense, blue=defense; RED/BLUE theme only)
 
 ### Jewel Sockets
 - [x] Jewel radius display (ring overlay on allocated sockets; hover previews all radii)
@@ -404,7 +406,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Ctrl+V: Paste item (in items tab)
 - [ ] Ctrl+C: Copy (context-dependent)
 - [ ] Ctrl+E: Edit equipped item
-- [ ] Ctrl+D: Toggle stat differences
+- [x] Ctrl+D: Toggle stat differences (in node tooltips, on the tree tab)
 - [ ] F1: Open wiki for hovered item/gem
 - [x] Mouse4: Close build
 
@@ -436,7 +438,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Gem data access (tags, requirements, stats, descriptions)
 - [ ] Build XML round-trip fidelity (load → save → load produces same build)
 - [ ] Sub-script system (LaunchSubScript for background tasks)
-- [ ] Power calculation coroutine (async node power evaluation)
+- [x] Power calculation coroutine (upstream PowerBuilder driven via per-frame stepping with progress display)
 - [ ] Config condition evaluation (mainEnv tracking)
 - [ ] Asset extraction pipeline (Rust tool to extract from PoE GGPK/bundles)
 

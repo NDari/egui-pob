@@ -9,6 +9,7 @@ pub mod gems;
 pub mod item_db;
 pub mod items;
 pub mod jewels;
+pub mod node_power;
 pub mod skills;
 pub mod tree;
 pub mod tree_specs;

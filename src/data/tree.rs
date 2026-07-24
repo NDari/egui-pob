@@ -496,15 +496,27 @@ pub struct HoverInfo {
     pub path: HashSet<u32>,
     /// Allocated nodes that would disconnect if this node were deallocated.
     pub depends: HashSet<u32>,
+    /// Stat difference preview lines ("Allocating this node will give you:
+    /// ..."), pre-formatted with PoB color codes. Empty when diffs are off.
+    pub diff: Vec<String>,
 }
 
-/// Fetch path and dependency info for a node from Lua.
-pub fn fetch_hover_info(lua: &Lua, node_id: u32) -> Result<HoverInfo, mlua::Error> {
+/// Fetch path and dependency info for a node from Lua. With `with_diffs`,
+/// also runs upstream's stat-difference comparison (one or two throwaway calc
+/// passes: the node alone, and the whole path to/from it) and returns the
+/// formatted tooltip lines, mirroring PassiveTreeView:AddNodeTooltip.
+pub fn fetch_hover_info(
+    lua: &Lua,
+    node_id: u32,
+    with_diffs: bool,
+) -> Result<HoverInfo, mlua::Error> {
     let result: LuaTable = lua
-        .load(format!(
+        .load(
             r#"
-            local node = mainObject_ref.main.modes['BUILD'].spec.nodes[{node_id}]
-            local path, depends = {{}}, {{}}
+            local nodeId, withDiffs = ...
+            local build = mainObject_ref.main.modes['BUILD']
+            local node = build.spec.nodes[nodeId]
+            local path, depends, diff = {}, {}, {}
             if node then
                 local leap = node.intuitiveLeapLikesAffecting
                 if node.path and (leap == nil or #leap == 0) then
@@ -517,19 +529,84 @@ pub fn fetch_hover_info(lua: &Lua, node_id: u32) -> Result<HoverInfo, mlua::Erro
                         table.insert(depends, d.id)
                     end
                 end
+                if withDiffs and node.type ~= "ClassStart" and node.type ~= "AscendClassStart" then
+                    local ok, err = pcall(function()
+                        local calcFunc, calcBase = build.calcsTab:GetMiscCalculator(build)
+                        if not calcFunc then
+                            return
+                        end
+                        local tt = new("Tooltip")
+                        local pathList = (node.alloc and node.depends) or node.path or { }
+                        local pathLength = #pathList
+                        local pathNodes = { }
+                        for _, n in pairs(pathList) do
+                            pathNodes[n] = true
+                        end
+                        local nodeOutput, pathOutput
+                        local isGranted = build.calcsTab.mainEnv.grantedPassives[node.id]
+                        if node.alloc then
+                            nodeOutput = calcFunc({ removeNodes = { [node] = true } })
+                            if pathLength > 1 then
+                                pathOutput = calcFunc({ removeNodes = pathNodes })
+                            end
+                        elseif isGranted then
+                            nodeOutput = calcFunc({ removeNodes = { [node.id] = true } })
+                        else
+                            if node.type == "Mastery" and node.allMasteryOptions then
+                                pathNodes[node] = nil
+                                nodeOutput = calcFunc()
+                            else
+                                nodeOutput = calcFunc({ addNodes = { [node] = true } })
+                            end
+                            if pathLength > 1 then
+                                pathOutput = calcFunc({ addNodes = pathNodes })
+                            end
+                        end
+                        local count = build:AddStatComparesToTooltip(tt, calcBase, nodeOutput,
+                            node.alloc and "^7Unallocating this node will give you:"
+                            or isGranted and "^7This node is granted by an item. Removing it will give you:"
+                            or "^7Allocating this node will give you:")
+                        if pathLength > 1 and not isGranted
+                           and (#(node.intuitiveLeapLikesAffecting or { }) == 0 or node.alloc) then
+                            count = count + build:AddStatComparesToTooltip(tt, calcBase, pathOutput,
+                                node.alloc and "^7Unallocating this node and all nodes depending on it will give you:"
+                                or "^7Allocating this node and all nodes leading to it will give you:", pathLength)
+                        end
+                        if count == 0 then
+                            if isGranted then
+                                tt:AddLine(14, "^7This node is granted by an item. Removing it will cause no changes")
+                            else
+                                tt:AddLine(14, string.format("^7No changes from %s this node%s.",
+                                    node.alloc and "unallocating" or "allocating",
+                                    (#(node.intuitiveLeapLikesAffecting or { }) == 0 and pathLength > 1)
+                                        and " or the nodes leading to it" or ""))
+                            end
+                        end
+                        for _, line in ipairs(tt.lines) do
+                            if line.text then
+                                table.insert(diff, line.text)
+                            end
+                        end
+                    end)
+                    if not ok then
+                        table.insert(diff, "^1Stat comparison failed: " .. tostring(err))
+                    end
+                end
             end
-            return {{ path = path, depends = depends }}
-        "#
-        ))
-        .eval()?;
+            return { path = path, depends = depends, diff = diff }
+        "#,
+        )
+        .call((node_id, with_diffs))?;
 
     let read_ids = |key: &str| -> Result<HashSet<u32>, mlua::Error> {
         let list: LuaTable = result.get(key)?;
         Ok(list.sequence_values::<u32>().flatten().collect())
     };
+    let diff_list: LuaTable = result.get("diff")?;
     Ok(HoverInfo {
         path: read_ids("path")?,
         depends: read_ids("depends")?,
+        diff: diff_list.sequence_values::<String>().flatten().collect(),
     })
 }
 

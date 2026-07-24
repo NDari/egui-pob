@@ -250,7 +250,7 @@ fn test_hover_info_and_undo_redo() {
     assert!(node_id > 0, "should find an unallocated reachable node");
 
     // Unallocated: path leads to it, nothing depends on it
-    let info = pob_egui::data::tree::fetch_hover_info(bridge.lua(), node_id)
+    let info = pob_egui::data::tree::fetch_hover_info(bridge.lua(), node_id, true)
         .expect("failed to fetch hover info");
     assert!(
         info.path.contains(&node_id),
@@ -259,6 +259,21 @@ fn test_hover_info_and_undo_redo() {
     assert!(
         info.depends.is_empty(),
         "unallocated node should have no dependents"
+    );
+    assert!(
+        info.diff
+            .iter()
+            .any(|l| l.contains("Allocating this node") || l.contains("No changes from allocating")),
+        "diff should describe allocating the node, got: {:?}",
+        info.diff
+    );
+
+    // Diffs off: no comparison lines
+    let info_no_diff = pob_egui::data::tree::fetch_hover_info(bridge.lua(), node_id, false)
+        .expect("failed to fetch hover info without diffs");
+    assert!(
+        info_no_diff.diff.is_empty(),
+        "diffs disabled should be empty"
     );
 
     let alloc_count = |lua: &mlua::Lua| -> u32 {
@@ -281,11 +296,19 @@ fn test_hover_info_and_undo_redo() {
     let after_count = alloc_count(bridge.lua());
     assert!(after_count > before_count, "allocation should add node(s)");
 
-    let info = pob_egui::data::tree::fetch_hover_info(bridge.lua(), node_id)
+    let info = pob_egui::data::tree::fetch_hover_info(bridge.lua(), node_id, true)
         .expect("failed to fetch hover info after alloc");
     assert!(
         info.depends.contains(&node_id),
         "allocated node should depend on itself"
+    );
+    assert!(
+        info.diff
+            .iter()
+            .any(|l| l.contains("Unallocating this node")
+                || l.contains("No changes from unallocating")),
+        "diff should describe unallocating the node, got: {:?}",
+        info.diff
     );
 
     // Undo restores the previous allocation state; redo reapplies it
@@ -1796,4 +1819,89 @@ fn test_item_db_extraction() {
         .expect("list failed")
         .len();
     assert_eq!(after, before + 1, "item should be added to the build");
+}
+
+// ---------------------------------------------------------------------------
+// Node power calculation (heatmap + report)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_node_power_build() {
+    use pob_egui::data::node_power;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let stats = node_power::list_power_stats(lua).expect("stat list failed");
+    assert!(
+        stats.len() > 10,
+        "expected a power stat list, got {}",
+        stats.len()
+    );
+    assert_eq!(stats[0].label, "Offence/Defence");
+    assert!(
+        !stats.iter().any(|s| s.label == "Name"),
+        "item-only stats filtered"
+    );
+
+    // Default offence/defence mode with a small depth so the test stays fast
+    node_power::set_power_stat(lua, stats[0].index, Some(3)).expect("set stat failed");
+    assert!(node_power::power_dirty(lua).expect("dirty failed"));
+
+    let mut done = false;
+    for _ in 0..600 {
+        let (d, _progress) = node_power::power_step(lua).expect("step failed");
+        if d {
+            done = true;
+            break;
+        }
+    }
+    assert!(done, "power build should finish");
+    assert!(!node_power::power_dirty(lua).expect("dirty failed"));
+
+    let colors = node_power::heatmap_colors(lua).expect("colors failed");
+    assert!(
+        colors.len() > 100,
+        "expected heatmap colors for unallocated nodes, got {}",
+        colors.len()
+    );
+    assert!(
+        colors.values().any(|c| c.r() > 0 || c.g() > 0 || c.b() > 0),
+        "at least some nodes should have non-black power colors"
+    );
+
+    // Single-stat mode: Hit DPS produces a report
+    let hit_dps = stats
+        .iter()
+        .find(|s| s.label == "Hit DPS")
+        .expect("Hit DPS in stat list");
+    node_power::set_power_stat(lua, hit_dps.index, Some(3)).expect("set stat failed");
+    let mut done = false;
+    for _ in 0..600 {
+        let (d, _) = node_power::power_step(lua).expect("step failed");
+        if d {
+            done = true;
+            break;
+        }
+    }
+    assert!(done, "stat-mode power build should finish");
+
+    let report = node_power::power_report(lua).expect("report failed");
+    assert!(
+        report.len() > 100,
+        "report should cover the tree, got {} rows",
+        report.len()
+    );
+    let with_power = report.iter().filter(|r| r.power != 0.0).count();
+    assert!(
+        with_power > 0,
+        "some nodes should have nonzero Hit DPS power"
+    );
+    assert!(
+        report
+            .iter()
+            .any(|r| r.id > 0 && (r.x != 0.0 || r.y != 0.0)),
+        "report rows should carry node positions for panning"
+    );
 }
