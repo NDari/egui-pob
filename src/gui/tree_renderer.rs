@@ -79,6 +79,9 @@ pub struct TreeOverlays<'a> {
 
 /// Border color for passive tooltips (upstream default: rgb(128, 77, 0)).
 const TOOLTIP_BORDER_COLOR: egui::Color32 = egui::Color32::from_rgb(128, 77, 0);
+/// Node name color in tooltips: slightly dimmer than the allocated-path
+/// yellow (`Palette::CONNECTION_ALLOCATED`, rgb(200, 170, 50)).
+const TOOLTIP_NAME_COLOR: egui::Color32 = egui::Color32::from_rgb(178, 150, 44);
 const TOOLTIP_BORDER_WIDTH: f32 = 3.0;
 const TOOLTIP_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 217);
 
@@ -797,7 +800,61 @@ fn show_node_tooltip(
         .inner_margin(egui::Margin::same(6));
 
     frame.show(ui, |ui| {
-        ui.set_max_width(300.0);
+        // Oil (anoint) vials + names are drawn right of the node name in the
+        // header
+        const OIL_ICON_SIZE: f32 = 15.0;
+        const OIL_ICON_GAP: f32 = 2.0;
+        const OIL_SPACING: f32 = 6.0;
+        let oil_color = egui::Color32::from_rgb(248, 230, 202);
+        let oil_items: Vec<(&egui::TextureHandle, std::sync::Arc<egui::Galley>)> = node
+            .recipe
+            .iter()
+            .filter_map(|oil| {
+                headers
+                    .and_then(|h| h.oil_icons.get(oil.as_str()))
+                    .map(|tex| {
+                        let short = oil.strip_suffix("Oil").unwrap_or(oil).trim();
+                        let galley = ui.fonts(|f| {
+                            f.layout_no_wrap(
+                                short.to_string(),
+                                egui::FontId::proportional(11.0),
+                                oil_color,
+                            )
+                        });
+                        (tex, galley)
+                    })
+            })
+            .collect();
+        let oils_w: f32 = if oil_items.is_empty() {
+            0.0
+        } else {
+            oil_items
+                .iter()
+                .map(|(_, g)| OIL_ICON_SIZE + OIL_ICON_GAP + g.size().x)
+                .sum::<f32>()
+                + (oil_items.len() - 1) as f32 * OIL_SPACING
+        };
+
+        // Widen the tooltip when the centered name + oils to its right need
+        // more room (the name stays truly centered, so the oil block's width
+        // must fit on both sides)
+        let name_w = ui.fonts(|f| {
+            f.layout_no_wrap(
+                node.name.clone(),
+                egui::FontId::proportional(17.0),
+                egui::Color32::WHITE,
+            )
+            .size()
+            .x
+        });
+        // Horizontal breathing room on each side of the centered title group
+        const TITLE_SIDE_PAD: f32 = 40.0;
+        let needed = if oil_items.is_empty() {
+            name_w + 2.0 * TITLE_SIDE_PAD
+        } else {
+            name_w + 8.0 + oils_w + 2.0 * TITLE_SIDE_PAD
+        };
+        ui.set_max_width(300.0_f32.max(needed));
 
         // Draw the header image strip behind the title text
         let header_strip = headers.and_then(|h| h.get(node));
@@ -844,23 +901,48 @@ fn show_node_tooltip(
             );
             painter.image(strip.right.id(), right_rect, full_uv, egui::Color32::WHITE);
 
-            // Draw the node name centered over the header (upstream uses size 24)
-            // Paint twice with 1px offset to simulate bold
+            // Draw the node name + oil vials centered as one group over the
+            // header. Paint the name twice with 1px offset to simulate bold
             let name_galley = ui.painter().layout_no_wrap(
                 node.name.clone(),
                 egui::FontId::proportional(17.0),
-                egui::Color32::WHITE,
+                TOOLTIP_NAME_COLOR,
             );
+            let center = header_rect.center();
+            let group_w = if oil_items.is_empty() {
+                name_galley.size().x
+            } else {
+                name_galley.size().x + 8.0 + oils_w
+            };
+            // Optical centering: box-centered text reads ~8% of the font size
+            // too low because the (mostly empty) descender zone counts toward
+            // the box height; raise it by that much
+            let optical_raise = 17.0 * 0.08;
             let text_pos = egui::pos2(
-                header_rect.center().x - name_galley.size().x / 2.0,
-                header_rect.center().y - name_galley.size().y / 2.0,
+                center.x - group_w / 2.0,
+                center.y - name_galley.size().y / 2.0 - optical_raise,
             );
-            painter.galley(text_pos, name_galley.clone(), egui::Color32::WHITE);
+            painter.galley(text_pos, name_galley.clone(), TOOLTIP_NAME_COLOR);
             painter.galley(
                 text_pos + egui::vec2(1.0, 0.0),
-                name_galley,
-                egui::Color32::WHITE,
+                name_galley.clone(),
+                TOOLTIP_NAME_COLOR,
             );
+            let mut x = text_pos.x + name_galley.size().x + 8.0;
+            for (tex, galley) in &oil_items {
+                let icon_rect = egui::Rect::from_min_size(
+                    egui::pos2(x, center.y - OIL_ICON_SIZE / 2.0),
+                    egui::vec2(OIL_ICON_SIZE, OIL_ICON_SIZE),
+                );
+                painter.image(tex.id(), icon_rect, full_uv, egui::Color32::WHITE);
+                x += OIL_ICON_SIZE + OIL_ICON_GAP;
+                painter.galley(
+                    egui::pos2(x, center.y - galley.size().y / 2.0 - 11.0 * 0.08),
+                    galley.clone(),
+                    oil_color,
+                );
+                x += galley.size().x + OIL_SPACING;
+            }
         } else {
             // Fallback: plain text header
             let type_label = match node.node_type {
@@ -885,13 +967,30 @@ fn show_node_tooltip(
                 _ => egui::Color32::from_rgb(170, 170, 170),
             };
             ui.label(egui::RichText::new(type_label).small().color(type_color));
-            ui.label(egui::RichText::new(&node.name).strong().size(17.0));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = OIL_ICON_GAP;
+                ui.label(
+                    egui::RichText::new(&node.name)
+                        .strong()
+                        .size(17.0)
+                        .color(TOOLTIP_NAME_COLOR),
+                );
+                for (tex, galley) in &oil_items {
+                    ui.image(egui::load::SizedTexture::new(
+                        tex.id(),
+                        egui::vec2(OIL_ICON_SIZE, OIL_ICON_SIZE),
+                    ));
+                    ui.label(
+                        egui::RichText::new(galley.text())
+                            .size(11.0)
+                            .color(oil_color),
+                    );
+                }
+            });
         }
 
-        // Oil recipe (for notables) — show oil name + icon for each
-        if !node.recipe.is_empty() {
-            let oil_color = egui::Color32::from_rgb(248, 230, 202);
-            let icon_size = 15.0;
+        // Oil recipe text fallback: only when the icon textures are missing
+        if !node.recipe.is_empty() && oil_items.is_empty() {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 for (i, oil_name) in node.recipe.iter().enumerate() {
@@ -900,12 +999,6 @@ fn show_node_tooltip(
                     }
                     let short = oil_name.strip_suffix("Oil").unwrap_or(oil_name);
                     ui.label(egui::RichText::new(short).size(11.0).color(oil_color));
-                    if let Some(tex) = headers.and_then(|h| h.oil_icons.get(oil_name.as_str())) {
-                        ui.image(egui::load::SizedTexture::new(
-                            tex.id(),
-                            egui::vec2(icon_size, icon_size),
-                        ));
-                    }
                 }
             });
         }
