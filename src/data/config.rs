@@ -330,6 +330,38 @@ pub fn set_config_value(lua: &Lua, var: &str, value: LuaValue) -> Result<(), mlu
     Ok(())
 }
 
+/// Reset every config option in the active config set to its default value,
+/// mirroring upstream's `ConfigTab:NewConfigSet` default initialization.
+pub fn reset_config_to_defaults(lua: &Lua) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        local configTab = build.configTab
+        local varList = LoadModule("Modules/ConfigOptions")
+        wipeTable(configTab.input)
+        wipeTable(configTab.placeholder)
+        for _, varData in ipairs(varList) do
+            if varData.var then
+                configTab.input[varData.var] = varData.defaultState
+                configTab.placeholder[varData.var] = varData.defaultPlaceholderState
+                if varData.defaultIndex then
+                    configTab.input[varData.var] = varData.list[varData.defaultIndex].val
+                end
+            end
+        end
+        configTab:UpdateControls()
+        configTab:BuildModList()
+        configTab:AddUndoState()
+        build.buildFlag = true
+    "#,
+    )
+    .exec()?;
+
+    // Run a frame to trigger recalculation
+    lua.load("_runCallback('OnFrame')").exec()?;
+    Ok(())
+}
+
 fn parse_list_options(entry: &LuaTable) -> Result<Vec<ListEntry>, mlua::Error> {
     let list: LuaTable = entry.get("list")?;
     let mut entries = Vec::new();

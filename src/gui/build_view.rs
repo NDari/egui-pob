@@ -1,6 +1,7 @@
 //! Build view: container for an open build with stat sidebar and tabs.
 
 use pob_egui::data::CalcOutput;
+use pob_egui::data::display_stats::{self, SidebarStats};
 use pob_egui::lua_bridge::LuaBridge;
 
 use super::calcs_tab::CalcsPanel;
@@ -45,6 +46,8 @@ struct SecondaryAscendEntry {
 pub struct BuildView {
     pub build_name: String,
     pub calc_output: Option<CalcOutput>,
+    /// Full sidebar stat list + warnings, pre-formatted by upstream Lua.
+    pub sidebar_stats: Option<SidebarStats>,
     pub config_panel: Option<ConfigPanel>,
     pub tree_panel: Option<TreePanel>,
     pub items_panel: Option<ItemsPanel>,
@@ -89,6 +92,9 @@ impl BuildView {
         let calc_output = CalcOutput::extract(bridge.lua())
             .map_err(|e| log::error!("Failed to extract calc output: {e}"))
             .ok();
+        let sidebar_stats = display_stats::extract_sidebar_stats(bridge.lua())
+            .map_err(|e| log::error!("Failed to extract sidebar stats: {e}"))
+            .ok();
 
         let config_panel = Some(ConfigPanel::new(bridge.lua()));
         let tree_panel = Some(TreePanel::new(bridge.lua()));
@@ -106,6 +112,7 @@ impl BuildView {
         Self {
             build_name,
             calc_output,
+            sidebar_stats,
             config_panel,
             tree_panel,
             items_panel,
@@ -144,16 +151,69 @@ impl BuildView {
         }
     }
 
+    /// Start closing the build: opens the save-as dialog or save prompt if
+    /// there are unsaved changes. Returns true when it's safe to close now.
+    fn request_close(&mut self, bridge: &LuaBridge) -> bool {
+        let dirty = bridge.is_build_dirty();
+        if bridge.build_file_name().is_none() && (self.is_unsaved_new || dirty) {
+            // Never saved: needs a name before it can be kept
+            self.save_as_dialog = Some(SaveAsDialog {
+                name: self.build_name.clone(),
+                error: None,
+                then_close: true,
+            });
+            false
+        } else if dirty {
+            self.save_prompt = true;
+            false
+        } else {
+            true
+        }
+    }
+
     /// Draw the build view. Returns true if the user wants to go back to the build list.
     pub fn show(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
         let mut go_back = false;
 
-        // Ctrl+S: save (unless a modal is already open)
-        if self.save_as_dialog.is_none()
-            && !self.save_prompt
-            && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S))
-        {
-            self.request_save(bridge);
+        // Keyboard shortcuts (skipped while a modal is open)
+        let modal_open = self.save_as_dialog.is_some() || self.save_prompt;
+        if !modal_open {
+            // Ctrl+S: save (no-op when there is nothing to save, like the button)
+            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S))
+                && (bridge.is_build_dirty() || bridge.build_file_name().is_none())
+            {
+                self.request_save(bridge);
+            }
+
+            // Ctrl+1-7: switch tabs
+            let tab_keys = [
+                (egui::Key::Num1, BuildTab::Tree),
+                (egui::Key::Num2, BuildTab::Skills),
+                (egui::Key::Num3, BuildTab::Items),
+                (egui::Key::Num4, BuildTab::Calcs),
+                (egui::Key::Num5, BuildTab::Config),
+                (egui::Key::Num6, BuildTab::Notes),
+                (egui::Key::Num7, BuildTab::Import),
+            ];
+            for (key, tab) in tab_keys {
+                if ui.input(|i| i.modifiers.command && i.key_pressed(key)) {
+                    self.active_tab = tab;
+                }
+            }
+
+            // Ctrl+I: open Import/Export
+            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::I)) {
+                self.active_tab = BuildTab::Import;
+            }
+
+            // Ctrl+W or Mouse4: close build (with save prompt)
+            let close_pressed = ui.input(|i| {
+                (i.modifiers.command && i.key_pressed(egui::Key::W))
+                    || i.pointer.button_pressed(egui::PointerButton::Extra1)
+            });
+            if close_pressed && self.request_close(bridge) {
+                return true;
+            }
         }
 
         // Handle save-as dialog (modal)
@@ -266,19 +326,8 @@ impl BuildView {
         let dirty = bridge.is_build_dirty();
         let mut request_save = false;
         ui.horizontal(|ui| {
-            if ui.button("< Builds").clicked() {
-                if bridge.build_file_name().is_none() && (self.is_unsaved_new || dirty) {
-                    // Never saved: needs a name before it can be kept
-                    self.save_as_dialog = Some(SaveAsDialog {
-                        name: self.build_name.clone(),
-                        error: None,
-                        then_close: true,
-                    });
-                } else if dirty {
-                    self.save_prompt = true;
-                } else {
-                    go_back = true;
-                }
+            if ui.button("< Builds").clicked() && self.request_close(bridge) {
+                go_back = true;
             }
             let title = if dirty {
                 format!("{} *", self.build_name)
@@ -289,8 +338,15 @@ impl BuildView {
 
             ui.separator();
 
-            // Save buttons
-            if ui.button("Save").on_hover_text("Ctrl+S").clicked() {
+            // Save buttons (Save is inactive when there is nothing to save;
+            // a never-saved build can always be saved to give it a file)
+            let can_save = dirty || bridge.build_file_name().is_none();
+            if ui
+                .add_enabled(can_save, egui::Button::new("Save"))
+                .on_hover_text("Ctrl+S")
+                .on_disabled_hover_text("No unsaved changes")
+                .clicked()
+            {
                 request_save = true;
             }
             if ui.button("Save As").clicked() {
@@ -496,7 +552,14 @@ impl BuildView {
                         && items.show(ui, bridge)
                     {
                         self.refresh_calc_output(bridge);
-                        self.items_panel = Some(ItemsPanel::new(bridge.lua()));
+                        // Rebuild the panel but keep the DB browser (its
+                        // loaded lists and open window survive item changes)
+                        let db = self.items_panel.take().map(|p| p.item_db);
+                        let mut panel = ItemsPanel::new(bridge.lua());
+                        if let Some(db) = db {
+                            panel.item_db = db;
+                        }
+                        self.items_panel = Some(panel);
                         // Items can grant skills and socket jewels into the tree
                         self.skills_panel = Some(SkillsPanel::new(bridge.lua()));
                         if let Some(ref mut tree) = self.tree_panel {
@@ -554,6 +617,10 @@ impl BuildView {
             Err(e) => {
                 log::error!("Failed to refresh calc output: {e}");
             }
+        }
+        match display_stats::extract_sidebar_stats(bridge.lua()) {
+            Ok(stats) => self.sidebar_stats = Some(stats),
+            Err(e) => log::error!("Failed to refresh sidebar stats: {e}"),
         }
         self.calcs_stale = true;
     }
@@ -743,13 +810,94 @@ impl BuildView {
         ui.strong("Stats");
         ui.separator();
 
-        let Some(ref output) = self.calc_output else {
-            ui.label("No calc output available.");
-            return;
-        };
+        // Warnings bar (always visible above the scrolling stat list)
+        if let Some(ref stats) = self.sidebar_stats
+            && !stats.warnings.is_empty()
+        {
+            let header = egui::RichText::new(format!(
+                "⚠ {} warning{}",
+                stats.warnings.len(),
+                if stats.warnings.len() == 1 { "" } else { "s" }
+            ))
+            .color(egui::Color32::from_rgb(255, 100, 80));
+            egui::CollapsingHeader::new(header)
+                .id_salt("build_warnings")
+                .show(ui, |ui| {
+                    for warning in &stats.warnings {
+                        ui.colored_label(egui::Color32::from_rgb(255, 100, 80), warning);
+                    }
+                });
+            ui.separator();
+        }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            super::show_stat_table(ui, output);
+            match self.sidebar_stats {
+                Some(ref stats) if !stats.lines.is_empty() => {
+                    show_stat_lines(ui, stats);
+                }
+                // Fallback: hardcoded key-stat table from raw calc output
+                _ => {
+                    if let Some(ref output) = self.calc_output {
+                        super::show_stat_table(ui, output);
+                    } else {
+                        ui.label("No calc output available.");
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Render the upstream-formatted sidebar stat lines.
+fn show_stat_lines(ui: &mut egui::Ui, stats: &SidebarStats) {
+    use super::theme;
+
+    ui.spacing_mut().item_spacing.y = 2.0;
+    for line in &stats.lines {
+        if line.is_spacer() {
+            // Section separator (upstream emits height-6 breaks between the
+            // DPS, cost, attribute, defence, resistance, ... blocks); render
+            // it as a visible empty line.
+            ui.add_space(line.height * 1.5);
+            continue;
+        }
+        let size = if line.height <= 14.0 { 11.0 } else { 13.0 };
+        if line.center {
+            // Centered annotation line (skill part, DPS source, info message)
+            if let Some(ref lhs) = line.lhs {
+                ui.vertical_centered(|ui| {
+                    ui.add(
+                        egui::Label::new(theme::pob_layout_job(lhs, size, egui::Color32::GRAY))
+                            .truncate(),
+                    );
+                });
+            }
+            continue;
+        }
+        ui.horizontal(|ui| {
+            if let Some(ref rhs) = line.rhs {
+                // Value flush right, label taking the remaining width
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(theme::pob_layout_job(rhs, size, egui::Color32::WHITE));
+                    if let Some(ref lhs) = line.lhs {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(
+                                egui::Label::new(theme::pob_layout_job(
+                                    lhs,
+                                    size,
+                                    egui::Color32::WHITE,
+                                ))
+                                .truncate(),
+                            );
+                        });
+                    }
+                });
+            } else if let Some(ref lhs) = line.lhs {
+                ui.add(
+                    egui::Label::new(theme::pob_layout_job(lhs, size, egui::Color32::WHITE))
+                        .truncate(),
+                );
+            }
         });
     }
 }

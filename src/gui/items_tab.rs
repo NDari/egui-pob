@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use pob_egui::data::item_db::{self, DbItem};
 use pob_egui::data::items::{self, EquippedItem, ItemListEntry, TooltipLine};
 use pob_egui::lua_bridge::LuaBridge;
 
@@ -21,6 +22,8 @@ pub struct ItemsPanel {
     edit_dialog: Option<EditItemDialog>,
     /// Cached tooltip lines keyed by (item id, slot context).
     tooltip_cache: HashMap<(i64, Option<String>), Vec<TooltipLine>>,
+    /// Unique / rare-template database browser (survives panel rebuilds).
+    pub item_db: ItemDbBrowser,
 }
 
 /// Raw-text item editor state. `item_id` is None when creating a new item.
@@ -31,6 +34,8 @@ struct EditItemDialog {
     /// Result of validating `validated_text` (avoids re-parsing every frame).
     valid: bool,
     validated_text: String,
+    /// Editable properties (variants, quality, influence) of the current text.
+    info: Option<items::ItemEditInfo>,
 }
 
 impl ItemsPanel {
@@ -61,6 +66,7 @@ impl ItemsPanel {
             confirm_delete: None,
             edit_dialog: None,
             tooltip_cache: HashMap::new(),
+            item_db: ItemDbBrowser::default(),
         }
     }
 
@@ -95,12 +101,22 @@ impl ItemsPanel {
                     error: None,
                     valid: false,
                     validated_text: String::new(),
+                    info: None,
                 });
+            }
+            if ui
+                .button("Item DB")
+                .on_hover_text("Browse the unique and rare-template item databases")
+                .clicked()
+            {
+                self.item_db.open = !self.item_db.open;
             }
             if let Some(ref err) = self.paste_error {
                 ui.colored_label(Theme::ERROR, err);
             }
         });
+
+        changed |= self.item_db.show(ui, bridge);
 
         // Ctrl+V anywhere in the tab (egui delivers clipboard text as Paste events)
         let pasted: Option<String> = ui.input(|i| {
@@ -275,6 +291,7 @@ impl ItemsPanel {
                                     error: None,
                                     valid: true,
                                     validated_text: String::new(),
+                                    info: None,
                                 });
                             }
                             Ok(_) => log::error!("Item {} has no raw text", entry.id),
@@ -313,6 +330,7 @@ impl ItemsPanel {
 
         let mut changed = false;
         let mut close = false;
+        let mut pending_op: Option<items::ItemEditOp> = None;
         let is_edit = dialog.item_id.is_some();
         let title = if is_edit {
             "Edit Item Text"
@@ -341,6 +359,13 @@ impl ItemsPanel {
                     dialog.valid =
                         items::validate_item_raw(bridge.lua(), &dialog.text).unwrap_or(false);
                     dialog.validated_text = dialog.text.clone();
+                    dialog.info = if dialog.valid {
+                        items::item_edit_info(bridge.lua(), &dialog.text)
+                            .map_err(|e| log::error!("Failed to read item edit info: {e}"))
+                            .ok()
+                    } else {
+                        None
+                    };
                 }
                 if !dialog.valid {
                     ui.colored_label(
@@ -351,6 +376,12 @@ impl ItemsPanel {
                 }
                 if let Some(ref err) = dialog.error {
                     ui.colored_label(Theme::ERROR, err);
+                }
+
+                // Variant / influence / quality dropdowns (like upstream's
+                // edit popup); edits rebuild the raw text above.
+                if let Some(ref info) = dialog.info {
+                    pending_op = show_item_edit_controls(ui, info);
                 }
 
                 ui.horizontal(|ui| {
@@ -379,6 +410,14 @@ impl ItemsPanel {
                     }
                 });
             });
+
+        if let Some(op) = pending_op {
+            match items::apply_item_edit(bridge.lua(), &dialog.text, &op) {
+                Ok(Some(new_raw)) => dialog.text = new_raw,
+                Ok(None) => log::error!("Item edit produced unparseable text"),
+                Err(e) => log::error!("Failed to apply item edit: {e}"),
+            }
+        }
 
         if close {
             self.edit_dialog = None;
@@ -419,6 +458,330 @@ impl ItemsPanel {
     }
 }
 
+/// How the item DB search box matches (like upstream's search-mode dropdown).
+#[derive(Clone, Copy, PartialEq, Default)]
+enum DbSearchMode {
+    #[default]
+    Anywhere,
+    Names,
+    Modifiers,
+}
+
+/// Browser window for the unique and rare-template item databases.
+#[derive(Default)]
+pub struct ItemDbBrowser {
+    pub open: bool,
+    loaded: bool,
+    uniques: Vec<DbItem>,
+    rares: Vec<DbItem>,
+    /// False = uniques tab, true = rare templates tab.
+    show_rares: bool,
+    search: String,
+    search_mode: DbSearchMode,
+    /// Selected base type filter ("" = any type).
+    type_filter: String,
+    unique_types: Vec<String>,
+    rare_types: Vec<String>,
+    /// Tooltip lines cached by item name.
+    tooltip_cache: HashMap<String, Vec<TooltipLine>>,
+}
+
+impl ItemDbBrowser {
+    /// Draw the browser window if open. Returns true if an item was added.
+    fn show(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
+        if !self.open {
+            return false;
+        }
+        let mut changed = false;
+        let mut open = self.open;
+
+        egui::Window::new("Item Database")
+            .open(&mut open)
+            .default_size([420.0, 500.0])
+            .resizable(true)
+            .show(ui.ctx(), |ui| {
+                // The DBs load via an upstream coroutine resumed once per
+                // frame; pump it in bigger steps until done.
+                if !self.loaded {
+                    match item_db::pump_loading(bridge.lua(), 200) {
+                        Ok(true) => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Loading item databases...");
+                            });
+                            ui.ctx().request_repaint();
+                            return;
+                        }
+                        Ok(false) => {
+                            self.uniques = item_db::extract_db(bridge.lua(), true)
+                                .map_err(|e| log::error!("Failed to load unique DB: {e}"))
+                                .unwrap_or_default();
+                            self.rares = item_db::extract_db(bridge.lua(), false)
+                                .map_err(|e| log::error!("Failed to load rare DB: {e}"))
+                                .unwrap_or_default();
+                            self.unique_types = distinct_types(&self.uniques);
+                            self.rare_types = distinct_types(&self.rares);
+                            self.loaded = true;
+                        }
+                        Err(e) => {
+                            ui.colored_label(Theme::ERROR, format!("DB load failed: {e}"));
+                            return;
+                        }
+                    }
+                }
+
+                // Tab selector + filters
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(!self.show_rares, "Uniques").clicked() {
+                        self.show_rares = false;
+                        self.type_filter.clear();
+                    }
+                    if ui
+                        .selectable_label(self.show_rares, "Rare Templates")
+                        .clicked()
+                    {
+                        self.show_rares = true;
+                        self.type_filter.clear();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.search)
+                            .hint_text("Search")
+                            .desired_width(160.0),
+                    );
+                    egui::ComboBox::from_id_salt("item_db_search_mode")
+                        .selected_text(match self.search_mode {
+                            DbSearchMode::Anywhere => "Anywhere",
+                            DbSearchMode::Names => "Names",
+                            DbSearchMode::Modifiers => "Modifiers",
+                        })
+                        .width(100.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.search_mode,
+                                DbSearchMode::Anywhere,
+                                "Anywhere",
+                            );
+                            ui.selectable_value(
+                                &mut self.search_mode,
+                                DbSearchMode::Names,
+                                "Names",
+                            );
+                            ui.selectable_value(
+                                &mut self.search_mode,
+                                DbSearchMode::Modifiers,
+                                "Modifiers",
+                            );
+                        });
+                    let types = if self.show_rares {
+                        &self.rare_types
+                    } else {
+                        &self.unique_types
+                    };
+                    egui::ComboBox::from_id_salt("item_db_type_filter")
+                        .selected_text(if self.type_filter.is_empty() {
+                            "Any type"
+                        } else {
+                            self.type_filter.as_str()
+                        })
+                        .width(130.0)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(self.type_filter.is_empty(), "Any type")
+                                .clicked()
+                            {
+                                self.type_filter.clear();
+                            }
+                            for t in types {
+                                if ui.selectable_label(self.type_filter == *t, t).clicked() {
+                                    self.type_filter = t.clone();
+                                }
+                            }
+                        });
+                });
+                ui.separator();
+
+                // Filtered list (virtualized; the unique DB has ~1500 entries)
+                let items = if self.show_rares {
+                    &self.rares
+                } else {
+                    &self.uniques
+                };
+                let search = self.search.trim().to_lowercase();
+                let filtered: Vec<&DbItem> = items
+                    .iter()
+                    .filter(|item| {
+                        if !self.type_filter.is_empty() && item.item_type != self.type_filter {
+                            return false;
+                        }
+                        if search.is_empty() {
+                            return true;
+                        }
+                        match self.search_mode {
+                            DbSearchMode::Names => item.search_name.contains(&search),
+                            DbSearchMode::Modifiers => item.search_mods.contains(&search),
+                            DbSearchMode::Anywhere => {
+                                item.search_name.contains(&search)
+                                    || item.search_mods.contains(&search)
+                            }
+                        }
+                    })
+                    .collect();
+
+                ui.label(format!("{} items", filtered.len()));
+                let color = items::rarity_color(if self.show_rares { "RARE" } else { "UNIQUE" });
+                egui::ScrollArea::vertical()
+                    .id_salt("item_db_scroll")
+                    .show_rows(ui, 20.0, filtered.len(), |ui, range| {
+                        for &item in &filtered[range] {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("+").on_hover_text("Add to build").clicked() {
+                                    match items::add_item_from_raw(bridge.lua(), &item.raw) {
+                                        Ok(None) => changed = true,
+                                        Ok(Some(err)) => {
+                                            log::error!("Failed to add DB item: {err}")
+                                        }
+                                        Err(e) => log::error!("Failed to add DB item: {e}"),
+                                    }
+                                }
+                                let resp = ui.label(egui::RichText::new(&item.name).color(color));
+                                if resp.hovered() {
+                                    if !self.tooltip_cache.contains_key(&item.name) {
+                                        let lines =
+                                            item_db::tooltip_from_raw(bridge.lua(), &item.raw)
+                                                .unwrap_or_else(|e| {
+                                                    log::error!("DB tooltip failed: {e}");
+                                                    Vec::new()
+                                                });
+                                        self.tooltip_cache.insert(item.name.clone(), lines);
+                                    }
+                                    let lines = &self.tooltip_cache[&item.name];
+                                    if !lines.is_empty() {
+                                        resp.on_hover_ui(|ui| show_tooltip_lines(ui, lines));
+                                    }
+                                }
+                            });
+                        }
+                    });
+            });
+
+        self.open = open;
+        changed
+    }
+}
+
+/// Distinct base types present in a DB list, sorted.
+fn distinct_types(items: &[DbItem]) -> Vec<String> {
+    let mut types: Vec<String> = items
+        .iter()
+        .map(|i| i.item_type.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    types.retain(|t| !t.is_empty());
+    types
+}
+
+/// Draw variant, influence, and quality controls for the item edit dialog.
+/// Returns the edit to apply this frame, if any.
+fn show_item_edit_controls(
+    ui: &mut egui::Ui,
+    info: &items::ItemEditInfo,
+) -> Option<items::ItemEditOp> {
+    let mut op = None;
+
+    // Variant dropdowns: the main one plus one per alt-variant slot
+    if info.variants.len() > 1 {
+        let variant_combo = |ui: &mut egui::Ui, label: &str, id: &str, selected: usize| {
+            let mut picked = None;
+            ui.horizontal(|ui| {
+                ui.label(label);
+                egui::ComboBox::from_id_salt(id)
+                    .selected_text(
+                        info.variants
+                            .get(selected.wrapping_sub(1))
+                            .map(String::as_str)
+                            .unwrap_or("?"),
+                    )
+                    .width(300.0)
+                    .show_ui(ui, |ui| {
+                        for (i, name) in info.variants.iter().enumerate() {
+                            if ui.selectable_label(i + 1 == selected, name).clicked()
+                                && i + 1 != selected
+                            {
+                                picked = Some(i + 1);
+                            }
+                        }
+                    });
+            });
+            picked
+        };
+
+        if let Some(v) = variant_combo(ui, "Variant:", "item_edit_variant", info.variant) {
+            op = Some(items::ItemEditOp::Variant(v));
+        }
+        for (slot0, &selected) in info.alt_variants.iter().enumerate() {
+            let label = format!("Variant {}:", slot0 + 2);
+            let id = format!("item_edit_alt_variant_{slot0}");
+            if let Some(v) = variant_combo(ui, &label, &id, selected) {
+                op = Some(items::ItemEditOp::AltVariant(slot0 as u8 + 1, v));
+            }
+        }
+    }
+
+    // Influence dropdowns (Shaper/Elder/conqueror/exarch-eater)
+    if info.can_be_influenced {
+        ui.horizontal(|ui| {
+            ui.label("Influence:");
+            let influence_combo = |ui: &mut egui::Ui, id: &str, selected: usize| {
+                let mut picked = None;
+                egui::ComboBox::from_id_salt(id)
+                    .selected_text(
+                        info.influence_names
+                            .get(selected.wrapping_sub(1))
+                            .map(String::as_str)
+                            .unwrap_or("None"),
+                    )
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(selected == 0, "None").clicked() && selected != 0 {
+                            picked = Some(0);
+                        }
+                        for (i, name) in info.influence_names.iter().enumerate() {
+                            if ui.selectable_label(i + 1 == selected, name).clicked()
+                                && i + 1 != selected
+                            {
+                                picked = Some(i + 1);
+                            }
+                        }
+                    });
+                picked
+            };
+            if let Some(v) = influence_combo(ui, "item_edit_influence1", info.influence1) {
+                op = Some(items::ItemEditOp::Influence(v, info.influence2));
+            }
+            if let Some(v) = influence_combo(ui, "item_edit_influence2", info.influence2) {
+                op = Some(items::ItemEditOp::Influence(info.influence1, v));
+            }
+        });
+    }
+
+    // Quality edit
+    if let Some(quality) = info.quality {
+        ui.horizontal(|ui| {
+            ui.label("Quality:");
+            let mut q = quality;
+            let resp = ui.add(egui::DragValue::new(&mut q).range(0..=100).suffix("%"));
+            if resp.changed() && q != quality {
+                op = Some(items::ItemEditOp::Quality(q));
+            }
+        });
+    }
+
+    op
+}
+
 /// Attach the full upstream item tooltip to a response, computing and caching
 /// the lines on first hover.
 fn hover_tooltip(
@@ -444,17 +807,20 @@ fn hover_tooltip(
     if lines.is_empty() {
         return resp;
     }
-    resp.on_hover_ui(|ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        for line in lines {
-            if line.is_separator {
-                ui.separator();
-            } else if line.text.is_empty() {
-                ui.add_space(line.size * 0.4);
-            } else {
-                let size = (line.size * 0.75).clamp(10.0, 20.0);
-                ui.label(theme::pob_layout_job(&line.text, size, Theme::TEXT_DEFAULT));
-            }
+    resp.on_hover_ui(|ui| show_tooltip_lines(ui, lines))
+}
+
+/// Render item tooltip lines (shared by build items and DB items).
+fn show_tooltip_lines(ui: &mut egui::Ui, lines: &[TooltipLine]) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    for line in lines {
+        if line.is_separator {
+            ui.separator();
+        } else if line.text.is_empty() {
+            ui.add_space(line.size * 0.4);
+        } else {
+            let size = (line.size * 0.75).clamp(10.0, 20.0);
+            ui.label(theme::pob_layout_job(&line.text, size, Theme::TEXT_DEFAULT));
         }
-    })
+    }
 }

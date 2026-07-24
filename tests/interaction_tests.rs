@@ -1517,3 +1517,283 @@ fn test_jewel_socket_radii() {
     assert!(filled[0].allocated);
     assert!(!filled[0].is_variable, "plain jewel is not Thread of Hope");
 }
+
+// ---------------------------------------------------------------------------
+// Config reset restores default values
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_config_reset_to_defaults() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+
+    // Change resistancePenalty away from whatever it currently is
+    pob_egui::data::config::set_config_value(
+        bridge.lua(),
+        "resistancePenalty",
+        LuaValue::Number(0.0),
+    )
+    .expect("failed to set config value");
+    let cur: f64 = bridge
+        .lua()
+        .load("return mainObject_ref.main.modes['BUILD'].configTab.input['resistancePenalty']")
+        .eval()
+        .expect("failed to read config value");
+    assert_eq!(cur, 0.0, "config value should be set");
+
+    // Reset and compare against the upstream default (list defaultIndex)
+    pob_egui::data::config::reset_config_to_defaults(bridge.lua()).expect("failed to reset config");
+    let (after, expected): (f64, f64) = bridge
+        .lua()
+        .load(
+            r#"
+            local input = mainObject_ref.main.modes['BUILD'].configTab.input
+            local varList = LoadModule("Modules/ConfigOptions")
+            for _, v in ipairs(varList) do
+                if v.var == 'resistancePenalty' then
+                    return input['resistancePenalty'], v.list[v.defaultIndex or 1].val
+                end
+            end
+            error("resistancePenalty not found in varList")
+            "#,
+        )
+        .eval()
+        .expect("failed to read values after reset");
+    assert_eq!(
+        after, expected,
+        "resistancePenalty should be back to its default after reset"
+    );
+    assert_ne!(after, 0.0, "default resistance penalty is not 0");
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar display stats extraction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sidebar_stats_extraction() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+
+    let stats = pob_egui::data::display_stats::extract_sidebar_stats(bridge.lua())
+        .expect("failed to extract sidebar stats");
+    assert!(
+        stats.lines.len() > 20,
+        "expected a full stat list, got {} lines",
+        stats.lines.len()
+    );
+
+    // The list should contain the staples every build has
+    for expected in ["Life:", "Mana:", "Evasion rating:"] {
+        assert!(
+            stats
+                .lines
+                .iter()
+                .any(|l| l.lhs.as_deref().is_some_and(|s| s.contains(expected))),
+            "stat list should contain a '{expected}' line"
+        );
+    }
+    // Values are present on stat lines
+    let life_line = stats
+        .lines
+        .iter()
+        .find(|l| l.lhs.as_deref().is_some_and(|s| s.contains("Life:")))
+        .unwrap();
+    assert!(life_line.rhs.is_some(), "Life line should have a value");
+
+    // Allocate way too many passive points to trigger the warning path
+    bridge
+        .lua()
+        .load(
+            r#"
+            local build = mainObject_ref.main.modes['BUILD']
+            local spec = build.spec
+            spec:BuildAllDependsAndPaths()
+            local added = 0
+            for id, node in pairs(spec.nodes) do
+                if not spec.allocNodes[id] and node.type == "Normal"
+                   and not node.ascendancyName and node.path and #node.path > 0 then
+                    spec:AllocNode(node)
+                    spec:BuildAllDependsAndPaths()
+                    added = added + 1
+                    if added >= 130 then break end
+                end
+            end
+            build.buildFlag = true
+            _runCallback('OnFrame')
+            "#,
+        )
+        .exec()
+        .expect("failed to over-allocate nodes");
+
+    let stats = pob_egui::data::display_stats::extract_sidebar_stats(bridge.lua())
+        .expect("failed to re-extract sidebar stats");
+    assert!(
+        stats
+            .warnings
+            .iter()
+            .any(|w| w.contains("too many passive points")),
+        "expected a too-many-points warning, got: {:?}",
+        stats.warnings
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Item edit operations: variants, quality, influence
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_item_edit_operations() {
+    use pob_egui::data::items::{self, ItemEditOp};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Multi-variant unique: Vessel of Vinktar has 4 variants. Variant lines
+    // only exist in database raws (game-copied text has none), so fetch the
+    // unique's raw text from upstream's unique database.
+    let raw: String = lua
+        .load(
+            r#"
+            -- The unique DB loads via a coroutine resumed once per frame;
+            -- pump frames until it finishes
+            local main = mainObject_ref.main
+            for i = 1, 1000 do
+                if not main.uniqueDB.loading then break end
+                _runCallback('OnFrame')
+            end
+            for name, item in pairs(main.uniqueDB.list) do
+                if name:find("Vessel of Vinktar", 1, true) then
+                    return item:BuildRaw()
+                end
+            end
+            error("Vessel of Vinktar not found in uniqueDB")
+            "#,
+        )
+        .eval()
+        .expect("failed to fetch unique raw");
+    let raw = raw.as_str();
+    let info = items::item_edit_info(lua, raw).expect("edit info failed");
+    assert!(
+        info.variants.len() >= 4,
+        "Vessel of Vinktar should have variants, got {:?}",
+        info.variants
+    );
+    assert!(info.variant > 0, "a variant should be selected by default");
+
+    let new_raw = items::apply_item_edit(lua, raw, &ItemEditOp::Variant(1))
+        .expect("apply variant failed")
+        .expect("variant edit should produce raw text");
+    assert!(
+        new_raw.contains("Selected Variant: 1"),
+        "raw should record the selected variant"
+    );
+    let info = items::item_edit_info(lua, &new_raw).expect("edit info failed");
+    assert_eq!(info.variant, 1, "round-trip should keep the selection");
+
+    // Quality and influence on an armour base
+    let raw = "Rarity: RARE\nTest Plate\nAstral Plate\nQuality: 20";
+    let info = items::item_edit_info(lua, raw).expect("edit info failed");
+    assert_eq!(info.quality, Some(20));
+    assert!(info.can_be_influenced, "body armour can be influenced");
+    assert_eq!(info.influence_names.len(), 8);
+    assert_eq!(info.influence1, 0, "no influence initially");
+
+    let new_raw = items::apply_item_edit(lua, raw, &ItemEditOp::Quality(30))
+        .expect("apply quality failed")
+        .expect("quality edit should produce raw text");
+    assert!(new_raw.contains("Quality: 30"), "quality should be updated");
+
+    let new_raw = items::apply_item_edit(lua, &new_raw, &ItemEditOp::Influence(1, 2))
+        .expect("apply influence failed")
+        .expect("influence edit should produce raw text");
+    assert!(new_raw.contains("Shaper Item"), "raw: {new_raw}");
+    assert!(new_raw.contains("Elder Item"), "raw: {new_raw}");
+    let info = items::item_edit_info(lua, &new_raw).expect("edit info failed");
+    assert_eq!(info.influence1, 1);
+    assert_eq!(info.influence2, 2);
+
+    // Clearing influence works too
+    let cleared = items::apply_item_edit(lua, &new_raw, &ItemEditOp::Influence(0, 0))
+        .expect("clear influence failed")
+        .expect("influence clear should produce raw text");
+    assert!(!cleared.contains("Shaper Item"));
+    let info = items::item_edit_info(lua, &cleared).expect("edit info failed");
+    assert_eq!(info.influence1, 0);
+    assert_eq!(info.influence2, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Item database extraction (uniques + rare templates)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_item_db_extraction() {
+    use pob_egui::data::item_db;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Pump the loading coroutine to completion (bounded)
+    let mut loading = item_db::is_loading(lua).expect("is_loading failed");
+    for _ in 0..200 {
+        if !loading {
+            break;
+        }
+        loading = item_db::pump_loading(lua, 100).expect("pump failed");
+    }
+    assert!(!loading, "item DBs should finish loading");
+
+    let uniques = item_db::extract_db(lua, true).expect("unique extract failed");
+    let rares = item_db::extract_db(lua, false).expect("rare extract failed");
+    assert!(
+        uniques.len() > 1000,
+        "expected a full unique DB, got {}",
+        uniques.len()
+    );
+    assert!(
+        rares.len() > 50,
+        "expected rare templates, got {}",
+        rares.len()
+    );
+
+    // A staple unique exists, has a type, raw text, and searchable mods
+    let shavs = uniques
+        .iter()
+        .find(|i| i.name.starts_with("Shavronne's Wrappings"))
+        .expect("Shavronne's Wrappings in unique DB");
+    assert_eq!(shavs.item_type, "Body Armour");
+    assert!(shavs.raw.contains("Rarity: UNIQUE"));
+    assert!(
+        shavs.search_mods.contains("chaos damage"),
+        "mods searchable: {}",
+        shavs.search_mods
+    );
+
+    // Tooltip renders from raw text
+    let lines = item_db::tooltip_from_raw(lua, &shavs.raw).expect("tooltip failed");
+    assert!(
+        lines.len() > 5,
+        "tooltip should have lines, got {}",
+        lines.len()
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.text.contains("Shavronne's Wrappings")),
+        "tooltip should contain the item name"
+    );
+
+    // DB raw text can be added to the build
+    let before = pob_egui::data::items::extract_item_list(lua)
+        .expect("list failed")
+        .len();
+    let err = pob_egui::data::items::add_item_from_raw(lua, &shavs.raw).expect("add failed");
+    assert!(err.is_none(), "DB item should parse when added: {err:?}");
+    let after = pob_egui::data::items::extract_item_list(lua)
+        .expect("list failed")
+        .len();
+    assert_eq!(after, before + 1, "item should be added to the build");
+}

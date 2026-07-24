@@ -9,6 +9,8 @@ pub struct ConfigPanel {
     pub error: Option<String>,
     pub search: String,
     pub show_ineligible: bool,
+    /// True while the reset-to-defaults confirmation popup is open.
+    confirm_reset: bool,
 }
 
 impl ConfigPanel {
@@ -21,6 +23,7 @@ impl ConfigPanel {
                     error: None,
                     search: String::new(),
                     show_ineligible: false,
+                    confirm_reset: false,
                 }
             }
             Err(e) => Self {
@@ -28,6 +31,7 @@ impl ConfigPanel {
                 error: Some(format!("Failed to load config options: {e}")),
                 search: String::new(),
                 show_ineligible: false,
+                confirm_reset: false,
             },
         }
     }
@@ -58,8 +62,35 @@ impl ConfigPanel {
             }
             ui.separator();
             ui.checkbox(&mut self.show_ineligible, "Show ineligible options");
+            ui.separator();
+            if ui.button("Reset to defaults").clicked() {
+                self.confirm_reset = true;
+            }
         });
         ui.separator();
+
+        // Reset-to-defaults confirmation popup
+        if self.confirm_reset {
+            egui::Window::new("Reset Configuration")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label("Reset all configuration options to their default values?");
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset").clicked() {
+                            match config::reset_config_to_defaults(bridge.lua()) {
+                                Ok(()) => changed = true,
+                                Err(e) => log::error!("Failed to reset config: {e}"),
+                            }
+                            self.confirm_reset = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_reset = false;
+                        }
+                    });
+                });
+        }
 
         let search_lower = self.search.to_lowercase();
         let show_ineligible = self.show_ineligible;

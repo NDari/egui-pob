@@ -264,19 +264,22 @@ pub fn draw_tree(
         camera.center_y -= delta.y / camera.zoom;
     }
 
-    // Handle zoom (scroll)
-    let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
-    if scroll_delta != 0.0 {
-        let zoom_factor = 1.0 + scroll_delta * 0.002;
-        let old_zoom = camera.zoom;
-        camera.zoom = (camera.zoom * zoom_factor).clamp(0.01, 2.0);
+    // Handle zoom (scroll) - only while the pointer is over the tree itself
+    // (not the sidebar or a window on top of it)
+    if response.hovered() {
+        let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll_delta != 0.0 {
+            let zoom_factor = 1.0 + scroll_delta * 0.002;
+            let old_zoom = camera.zoom;
+            camera.zoom = (camera.zoom * zoom_factor).clamp(0.01, 2.0);
 
-        if let Some(mouse_pos) = ui.input(|i| i.pointer.hover_pos())
-            && rect.contains(mouse_pos)
-        {
-            let (tree_x, tree_y) = camera.screen_to_tree(mouse_pos, &rect);
-            camera.center_x += (tree_x - camera.center_x) * (1.0 - old_zoom / camera.zoom);
-            camera.center_y += (tree_y - camera.center_y) * (1.0 - old_zoom / camera.zoom);
+            if let Some(mouse_pos) = ui.input(|i| i.pointer.hover_pos())
+                && rect.contains(mouse_pos)
+            {
+                let (tree_x, tree_y) = camera.screen_to_tree(mouse_pos, &rect);
+                camera.center_x += (tree_x - camera.center_x) * (1.0 - old_zoom / camera.zoom);
+                camera.center_y += (tree_y - camera.center_y) * (1.0 - old_zoom / camera.zoom);
+            }
         }
     }
 

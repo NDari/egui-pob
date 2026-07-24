@@ -218,12 +218,12 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 ### Item Editing
 - [x] Edit item text (raw editor popup with live validation; also creates custom items)
-- [ ] Variant selection dropdown (for multi-variant uniques)
-- [ ] Alt variant dropdowns (up to 5)
+- [x] Variant selection dropdown (for multi-variant uniques; in the edit dialog, rebuilds raw text via BuildAndParseRaw)
+- [x] Alt variant dropdowns (up to 5)
 - [ ] Socket color selection (R/G/B/W per socket)
 - [ ] Link toggles between sockets
-- [ ] Quality edit
-- [ ] Influence selection (2 dropdowns: Shaper, Elder, Warlord, etc.)
+- [x] Quality edit (in the edit dialog)
+- [x] Influence selection (2 dropdowns: Shaper, Elder, Warlord, etc.; in the edit dialog)
 - [ ] Catalyst type and quality
 
 ### Item Creation
@@ -254,9 +254,9 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Side-by-side comparison view
 
 ### Item Database
-- [ ] Unique item database browser
-- [ ] Rare template database browser
-- [ ] Search and filter in databases
+- [x] Unique item database browser (window from Items tab; add to build, full tooltips)
+- [x] Rare template database browser (same window, second tab)
+- [x] Search and filter in databases (search with Anywhere/Names/Modifiers modes + base type filter; league/requirement/obtainable filters not yet)
 
 ### Item Sets
 - [ ] Multiple item sets per build
@@ -296,7 +296,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Tooltips for config option explanations
 - [ ] Config sets (multiple independent configs per build)
 - [ ] Config set management popup
-- [ ] Reset to defaults
+- [x] Reset to defaults (button + confirmation; restores upstream varList defaults)
 - [ ] Undo/redo for config changes
 
 ---
@@ -377,36 +377,36 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Key stats in sidebar (DPS, Life, ES, Mana, Resistances, etc.)
 - [x] Number formatting (commas, percentages, decimals)
 - [x] Color-coded stats
-- [ ] Full stat list (all 203+ stats from BuildDisplayStats.lua)
-- [ ] Conditional stat display (condFunc filtering)
-- [ ] Warning messages panel:
-  - [ ] Too many passive/ascendancy points
-  - [ ] Missing item requirements
-  - [ ] Skill cost vs. pool warnings
-  - [ ] Gem socket limit warnings
-  - [ ] Jewel limit warnings
-  - [ ] Aspect skill conflicts
+- [x] Full stat list (reads upstream's pre-built statBox list from RefreshStatList, so all display stats, formatting, and colors match upstream)
+- [x] Conditional stat display (condFunc filtering runs in Lua via RefreshStatList)
+- [x] Warning messages panel (collapsible bar above stats; lines come from upstream's warnings control):
+  - [x] Too many passive/ascendancy points
+  - [x] Missing item requirements (upstream shows these as red text in item tooltips, which we render; not a warnings-bar item upstream either)
+  - [x] Skill cost vs. pool warnings
+  - [x] Gem socket limit warnings
+  - [x] Jewel limit warnings
+  - [x] Aspect skill conflicts
 - [ ] Clickable warnings (jump to relevant tab)
-- [ ] Minion stat display toggle
-- [ ] DPS breakdown by source/trigger in stat list
+- [x] Minion stat display toggle (minion/player sections appear automatically when a minion exists, like upstream)
+- [x] DPS breakdown by source/trigger in stat list (SkillDPS entries with source/trigger annotation lines)
 
 ---
 
 ## 13. Keyboard Shortcuts
 
 - [x] Ctrl+S: Save build (opens Save As when the build has no file)
-- [ ] Ctrl+W: Close build (with save prompt)
+- [x] Ctrl+W: Close build (with save prompt)
 - [~] Ctrl+Z: Undo (tree done; items, config pending)
 - [~] Ctrl+Y: Redo (tree done; items, config pending)
 - [~] Ctrl+F: Focus search (tree, calcs done; config pending)
-- [ ] Ctrl+I: Open Import/Export
-- [ ] Ctrl+1-7: Switch tabs (Tree, Skills, Items, Calcs, Config, Notes, Party)
+- [x] Ctrl+I: Open Import/Export
+- [x] Ctrl+1-7: Switch tabs (Tree, Skills, Items, Calcs, Config, Notes, Import/Export; no Party tab yet)
 - [x] Ctrl+V: Paste item (in items tab)
 - [ ] Ctrl+C: Copy (context-dependent)
 - [ ] Ctrl+E: Edit equipped item
 - [ ] Ctrl+D: Toggle stat differences
 - [ ] F1: Open wiki for hovered item/gem
-- [ ] Mouse4: Close build
+- [x] Mouse4: Close build
 
 ---
 

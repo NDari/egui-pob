@@ -409,6 +409,153 @@ pub fn replace_item_from_raw(
     .call((item_id, raw))
 }
 
+/// Editable properties parsed from raw item text: variants, quality, and
+/// influence. Drives the dropdowns in the item edit dialog.
+#[derive(Debug, Clone, Default)]
+pub struct ItemEditInfo {
+    /// Variant names (empty when the item has no variants).
+    pub variants: Vec<String>,
+    /// Selected variant, 1-based (0 = unset).
+    pub variant: usize,
+    /// Selected variant per alt-variant slot, 1-based. One entry per
+    /// `hasAltVariant`..`hasAltVariant5` flag present on the item.
+    pub alt_variants: Vec<usize>,
+    /// Item quality (None when the base has no quality field).
+    pub quality: Option<i64>,
+    pub can_be_influenced: bool,
+    /// Influence display names ("Shaper", "Elder", ...).
+    pub influence_names: Vec<String>,
+    /// Selected influences, 1-based into `influence_names` (0 = none).
+    pub influence1: usize,
+    pub influence2: usize,
+}
+
+/// A single edit applied to raw item text via the edit dialog.
+#[derive(Debug, Clone)]
+pub enum ItemEditOp {
+    /// Select a variant (1-based).
+    Variant(usize),
+    /// Select an alt variant: (alt slot 1-5, selection 1-based).
+    AltVariant(u8, usize),
+    /// Set item quality.
+    Quality(i64),
+    /// Set influences (0 = none, else 1-based into `influence_names`).
+    Influence(usize, usize),
+}
+
+/// Parse raw item text into its editable properties.
+pub fn item_edit_info(lua: &Lua, raw: &str) -> Result<ItemEditInfo, mlua::Error> {
+    let t: LuaTable = lua
+        .load(
+            r#"
+        local raw = ...
+        local out = { variants = {}, altVariants = {}, influenceNames = {} }
+        local item = new("Item", raw)
+        if not item or not item.base then
+            return out
+        end
+        if item.variantList then
+            for _, name in ipairs(item.variantList) do
+                table.insert(out.variants, name)
+            end
+            out.variant = item.variant or #item.variantList
+            for i = 1, 5 do
+                local hasKey = i == 1 and "hasAltVariant" or ("hasAltVariant" .. i)
+                local selKey = i == 1 and "variantAlt" or ("variantAlt" .. i)
+                if item[hasKey] then
+                    table.insert(out.altVariants, item[selKey] or #item.variantList)
+                end
+            end
+        end
+        out.quality = item.quality
+        out.canBeInfluenced = item.canBeInfluenced or false
+        local found = {}
+        for i, info in ipairs(itemLib.influenceInfo.all) do
+            table.insert(out.influenceNames, info.display)
+            if item[info.key] then
+                table.insert(found, i)
+            end
+        end
+        out.influence1 = found[1] or 0
+        out.influence2 = found[2] or 0
+        return out
+    "#,
+        )
+        .call(raw)?;
+
+    let get_vec = |key: &str| -> Vec<String> {
+        t.get::<LuaTable>(key)
+            .map(|tbl| {
+                tbl.sequence_values::<String>()
+                    .filter_map(|r| r.ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let alt_variants: Vec<usize> = t
+        .get::<LuaTable>("altVariants")
+        .map(|tbl| {
+            tbl.sequence_values::<usize>()
+                .filter_map(|r| r.ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(ItemEditInfo {
+        variants: get_vec("variants"),
+        variant: t.get("variant").unwrap_or(0),
+        alt_variants,
+        quality: t.get("quality").ok(),
+        can_be_influenced: t.get("canBeInfluenced").unwrap_or(false),
+        influence_names: get_vec("influenceNames"),
+        influence1: t.get("influence1").unwrap_or(0),
+        influence2: t.get("influence2").unwrap_or(0),
+    })
+}
+
+/// Apply an edit to raw item text and return the rebuilt text (upstream's
+/// `BuildAndParseRaw`). Returns None when the text does not parse.
+pub fn apply_item_edit(
+    lua: &Lua,
+    raw: &str,
+    op: &ItemEditOp,
+) -> Result<Option<String>, mlua::Error> {
+    let (kind, a, b): (&str, i64, i64) = match op {
+        ItemEditOp::Variant(v) => ("variant", *v as i64, 0),
+        ItemEditOp::AltVariant(slot, v) => ("altvariant", *slot as i64, *v as i64),
+        ItemEditOp::Quality(q) => ("quality", *q, 0),
+        ItemEditOp::Influence(i1, i2) => ("influence", *i1 as i64, *i2 as i64),
+    };
+    lua.load(
+        r#"
+        local raw, kind, a, b = ...
+        local item = new("Item", raw)
+        if not item or not item.base then
+            return nil
+        end
+        if kind == "variant" then
+            item.variant = a
+        elseif kind == "altvariant" then
+            local selKey = a == 1 and "variantAlt" or ("variantAlt" .. a)
+            item[selKey] = b
+        elseif kind == "quality" then
+            item.quality = a
+        elseif kind == "influence" then
+            item:ResetInfluence()
+            local influenceInfo = itemLib.influenceInfo.all
+            for _, idx in ipairs({ a, b }) do
+                if idx > 0 and influenceInfo[idx] then
+                    item[influenceInfo[idx].key] = true
+                end
+            end
+        end
+        item:BuildAndParseRaw()
+        return item:BuildRaw()
+    "#,
+    )
+    .call((raw, kind, a, b))
+}
+
 /// Sort the item list with upstream's SortItemList (by slot order, equipped
 /// first, then by name).
 pub fn sort_item_list(lua: &Lua) -> Result<(), mlua::Error> {
