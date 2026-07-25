@@ -78,7 +78,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Hover tooltip with stats, name, type, recipe, flavour text
 - [x] Stat difference preview in hover tooltip ("Allocating this node will give you: ..." via upstream AddStatComparesToTooltip; Ctrl+D toggle)
 - [x] Path stat difference in hover tooltip ("Allocating this node and all nodes leading to it will give you: ..." with per-point values; "unallocating ... and all nodes depending on it" for allocated nodes)
-- [ ] Right-click context menu (jump to items for jewel sockets, modify node for tattoos)
+- [x] Right-click context menu (jump to items for jewel sockets, modify node for tattoos)
 - [x] Mastery popup (select mastery effect on click; right-click allocated mastery to change effect)
 - [ ] Shift+drag path tracing mode
 - [ ] Ascendancy node click → class/ascendancy switching with confirmation
@@ -129,19 +129,19 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Conversion confirmation popup (Convert / Copy + Convert / Cancel)
 
 ### Tattoos
-- [ ] Modify node popup (tattoo selection)
-- [ ] Tattoo modifier dropdown
-- [ ] Legacy tattoo toggle
-- [ ] Tattoo count tracking (max 50)
-- [ ] Remove tattoo from node
+- [x] Modify node popup (right-click an eligible node; upstream target-type filter)
+- [x] Tattoo modifier dropdown (with stat descriptions)
+- [x] Legacy tattoo toggle
+- [x] Tattoo count tracking (max 50, red when over)
+- [x] Remove tattoo from node ("Reset node")
 
 ### Timeless Jewels
-- [ ] Find Timeless Jewel dialog
-- [ ] Jewel type selection (6 types)
-- [ ] Conqueror variant selection
-- [ ] Socket selection (multi or specific)
-- [ ] Devotion modifier selection
-- [ ] Node search and weighting system
+- [x] Find Timeless Jewel dialog (seed search over upstream readLUT; creates the jewel from a result)
+- [x] Jewel type selection (6 types)
+- [x] Conqueror variant selection
+- [~] Socket selection (specific socket; "All Sockets" multi-search not implemented)
+- [ ] Devotion modifier selection (Militant Faith devotion totals not modelled)
+- [x] Node search and weighting system (weights; GV secondary-stat weight)
 - [ ] Fallback weight mode
 
 ### Undo/Redo
@@ -184,12 +184,12 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Vaal gem global effect toggles
 
 ### Gem Options
-- [~] Sort gems by DPS toggle with stat selector (toggle done; stat selector pending)
-- [ ] Default gem level dropdown (Normal Max, Corrupted Max, etc.)
-- [ ] Default gem quality input
-- [ ] Show support gem type filter
-- [ ] Show quality variants toggle
-- [ ] Show legacy gems toggle
+- [x] Sort gems by DPS toggle with stat selector (all upstream sort stats)
+- [x] Default gem level dropdown (Normal/Corrupted/Awakened Max, Match Character Level, Level 1; applied on gem add via upstream ProcessGemLevel)
+- [x] Default gem quality input
+- [x] Show support gem type filter (All / Non-Exceptional / Exceptional)
+- [x] Show quality variants toggle
+- [x] Show legacy gems toggle
 
 ### Skill Sets
 - [x] Multiple skill sets per build (upstream skillSets; XML round-trip via upstream save/load)
@@ -222,11 +222,11 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Edit item text (raw editor popup with live validation; also creates custom items)
 - [x] Variant selection dropdown (for multi-variant uniques; in the edit dialog, rebuilds raw text via BuildAndParseRaw)
 - [x] Alt variant dropdowns (up to 5)
-- [ ] Socket color selection (R/G/B/W per socket)
-- [ ] Link toggles between sockets
+- [x] Socket color selection (R/G/B/W per socket; "Sockets & catalyst" dialog, add-socket to base cap)
+- [x] Link toggles between sockets (group shifting like upstream)
 - [x] Quality edit (in the edit dialog)
 - [x] Influence selection (2 dropdowns: Shaper, Elder, Warlord, etc.; in the edit dialog)
-- [ ] Catalyst type and quality
+- [x] Catalyst type and quality (amulets/rings/belts; re-crafts affixes for the catalyst scalar)
 
 ### Item Creation
 - [x] Craft item popup (select base type, rarity; rare gets a name; opens the affix editor)
@@ -242,8 +242,8 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Stat comparison preview for anoints (upstream AppendAnointTooltip: repItem calc diff, already-allocated/anointed detection)
 
 ### Corruption & Influence
-- [ ] Corrupt item popup (implicit mod selection)
-- [ ] Add implicit popup (Exarch, Eater, Delve, Synthesis, Custom)
+- [x] Corrupt item popup (two group-exclusive implicit dropdowns; corrupting with none marks Corrupted only)
+- [x] Add implicit popup (Exarch/Eater when influenced, Delve, Custom; tiered groups; eldritch replaces in place. Synthesis omitted like upstream; Scourge not implemented)
 - [ ] Crucible modifier popup (5-node tree selection)
 
 ### Cluster Jewels

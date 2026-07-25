@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use pob_egui::data::jewels::{self, RadiusDef, SocketInfo};
 use pob_egui::data::node_power;
+use pob_egui::data::tattoos::{self, TattooOption};
+use pob_egui::data::timeless::{self, SeedResult, TimelessSocket, TimelessStat};
 use pob_egui::data::tree::{self, HoverInfo, MasteryEffectList, NodeType, TreeData};
 use pob_egui::data::tree_specs::{self, CompareDiff, SpecAllocation, SpecInfo, TreeVersion};
 use pob_egui::data::tree_sprites::TreeSpriteAtlas;
@@ -16,6 +18,31 @@ use super::tree_renderer::{self, TooltipHeaders, TreeCamera};
 struct MasteryPopup {
     node_id: u32,
     list: MasteryEffectList,
+}
+
+/// State for the tattoo (modify node) popup.
+struct TattooPopup {
+    node_id: u32,
+    node_name: String,
+    options: Vec<TattooOption>,
+    selected: usize,
+    show_legacy: bool,
+    is_tattooed: bool,
+    count: i64,
+}
+
+/// Find Timeless Jewel dialog state.
+struct TimelessPopup {
+    jewel_type_idx: usize,
+    conqueror_idx: usize,
+    socket_idx: usize,
+    sockets: Vec<TimelessSocket>,
+    stats: Vec<TimelessStat>,
+    stat_filter: String,
+    /// (stat id, display name, weight, secondary weight).
+    desired: Vec<(String, String, f64, f64)>,
+    results: Vec<SeedResult>,
+    searched: bool,
 }
 
 /// A pending name prompt in the spec manager.
@@ -145,6 +172,10 @@ pub struct TreePanel {
     show_stat_diffs: bool,
     /// Item tooltip of the jewel in the hovered socket (node id, lines).
     socket_tooltip: Option<(u32, Vec<pob_egui::data::items::TooltipLine>)>,
+    /// Tattoo (modify node) popup.
+    tattoo_popup: Option<TattooPopup>,
+    /// Find Timeless Jewel dialog.
+    timeless_popup: Option<TimelessPopup>,
 }
 
 impl TreePanel {
@@ -194,6 +225,8 @@ impl TreePanel {
                     power: NodePowerState::default(),
                     show_stat_diffs: true,
                     socket_tooltip: None,
+                    tattoo_popup: None,
+                    timeless_popup: None,
                 };
             }
         };
@@ -257,6 +290,8 @@ impl TreePanel {
             power: NodePowerState::default(),
             show_stat_diffs: true,
             socket_tooltip: None,
+            tattoo_popup: None,
+            timeless_popup: None,
         }
     }
 
@@ -288,6 +323,12 @@ impl TreePanel {
             self.textures_uploaded = true;
         }
 
+        if self.tattoo_popup.is_some() {
+            changed |= self.show_tattoo_popup(ui, bridge);
+        }
+        if self.timeless_popup.is_some() {
+            changed |= self.show_timeless_popup(ui, bridge);
+        }
         if self.manage_specs_open {
             changed |= self.show_manage_dialog(ui, bridge);
         }
@@ -577,6 +618,28 @@ impl TreePanel {
                     ui.label(format!("Calculating... {}%", self.power.progress));
                 }
             }
+            ui.separator();
+            if ui
+                .button("Timeless jewel...")
+                .on_hover_text("Search timeless jewel seeds for desired notables")
+                .clicked()
+            {
+                let sockets = timeless::timeless_sockets(bridge.lua()).unwrap_or_default();
+                let stats =
+                    timeless::timeless_stats(bridge.lua(), timeless::TIMELESS_JEWEL_TYPES[0].2)
+                        .unwrap_or_default();
+                self.timeless_popup = Some(TimelessPopup {
+                    jewel_type_idx: 0,
+                    conqueror_idx: 0,
+                    socket_idx: 0,
+                    sockets,
+                    stats,
+                    stat_filter: String::new(),
+                    desired: Vec::new(),
+                    results: Vec::new(),
+                    searched: false,
+                });
+            }
         });
 
         // Drive the power builder coroutine (one ~100ms slice per frame)
@@ -759,6 +822,28 @@ impl TreePanel {
 
             if is_socket && click.is_right {
                 self.request_items_tab = true;
+            } else if click.is_right && !is_mastery {
+                // Modify node (tattoos/runegrafts), like upstream's
+                // right-click on eligible nodes
+                match tattoos::tattoo_options(bridge.lua(), click.node_id, false) {
+                    Ok(options) if !options.is_empty() => {
+                        let node_name = node.map(|n| n.name.clone()).unwrap_or_default();
+                        let is_tattooed =
+                            tattoos::is_tattooed(bridge.lua(), click.node_id).unwrap_or(false);
+                        let count = tattoos::tattoo_count(bridge.lua()).unwrap_or(0);
+                        self.tattoo_popup = Some(TattooPopup {
+                            node_id: click.node_id,
+                            node_name,
+                            options,
+                            selected: 0,
+                            show_legacy: false,
+                            is_tattooed,
+                            count,
+                        });
+                    }
+                    Ok(_) => {} // node cannot be modified - inert
+                    Err(e) => log::error!("Failed to fetch tattoo options: {e}"),
+                }
             } else if is_mastery && (!is_allocated || click.is_right) {
                 // Unallocated mastery click, or right-click to change the
                 // effect on an allocated one: open the popup.
@@ -890,6 +975,370 @@ impl TreePanel {
 
     /// Re-read jewel socket contents from Lua. Called after tree changes and
     /// by the parent after item changes (equipping jewels).
+    /// Find Timeless Jewel dialog. Returns true when a jewel was created.
+    fn show_timeless_popup(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
+        let Some(popup) = &mut self.timeless_popup else {
+            return false;
+        };
+        let mut changed = false;
+        let mut close = false;
+        let mut new_type: Option<usize> = None;
+        let mut do_search = false;
+        let mut create_seed: Option<i64> = None;
+
+        egui::Window::new("Find Timeless Jewel")
+            .id(egui::Id::new("timeless_popup"))
+            .collapsible(false)
+            .resizable(true)
+            .default_size([620.0, 520.0])
+            .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Jewel:");
+                    let (_, type_label, _) = timeless::TIMELESS_JEWEL_TYPES[popup.jewel_type_idx];
+                    egui::ComboBox::from_id_salt("timeless_type")
+                        .selected_text(type_label)
+                        .width(140.0)
+                        .show_ui(ui, |ui| {
+                            for (i, (_, label, _)) in
+                                timeless::TIMELESS_JEWEL_TYPES.iter().enumerate()
+                            {
+                                if ui
+                                    .selectable_label(i == popup.jewel_type_idx, *label)
+                                    .clicked()
+                                    && i != popup.jewel_type_idx
+                                {
+                                    new_type = Some(i);
+                                }
+                            }
+                        });
+                    ui.label("Conqueror:");
+                    let conquerors = &timeless::CONQUERORS[popup.jewel_type_idx];
+                    let current = conquerors
+                        .get(popup.conqueror_idx)
+                        .copied()
+                        .unwrap_or(conquerors[0]);
+                    egui::ComboBox::from_id_salt("timeless_conqueror")
+                        .selected_text(current)
+                        .width(200.0)
+                        .show_ui(ui, |ui| {
+                            for (i, name) in conquerors.iter().enumerate() {
+                                ui.selectable_value(&mut popup.conqueror_idx, i, *name);
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Socket:");
+                    let current = popup
+                        .sockets
+                        .get(popup.socket_idx)
+                        .map(|s| {
+                            if s.allocated {
+                                format!("# {}", s.label)
+                            } else {
+                                s.label.clone()
+                            }
+                        })
+                        .unwrap_or_else(|| "-".to_string());
+                    egui::ComboBox::from_id_salt("timeless_socket")
+                        .selected_text(current)
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            for (i, socket) in popup.sockets.iter().enumerate() {
+                                let label = if socket.allocated {
+                                    format!("# {}", socket.label)
+                                } else {
+                                    socket.label.clone()
+                                };
+                                ui.selectable_value(&mut popup.socket_idx, i, label);
+                            }
+                        });
+                });
+                ui.separator();
+
+                // Desired stat picker
+                ui.horizontal(|ui| {
+                    ui.label("Add stat:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut popup.stat_filter)
+                            .hint_text("filter notables/additions")
+                            .desired_width(220.0),
+                    );
+                });
+                let filter = popup.stat_filter.trim().to_lowercase();
+                let matching: Vec<(String, String)> = popup
+                    .stats
+                    .iter()
+                    .filter(|s| {
+                        !popup.desired.iter().any(|(id, _, _, _)| *id == s.id)
+                            && (filter.is_empty() || s.name.to_lowercase().contains(&filter))
+                    })
+                    .take(80)
+                    .map(|s| {
+                        let tag = if s.is_notable { "" } else { " (small)" };
+                        (s.id.clone(), format!("{}{}", s.name, tag))
+                    })
+                    .collect();
+                egui::ScrollArea::vertical()
+                    .id_salt("timeless_stat_list")
+                    .max_height(110.0)
+                    .show(ui, |ui| {
+                        for (id, label) in &matching {
+                            if ui.selectable_label(false, label).clicked() {
+                                popup.desired.push((id.clone(), label.clone(), 1.0, 0.0));
+                            }
+                        }
+                    });
+                if !popup.desired.is_empty() {
+                    ui.separator();
+                    ui.label("Desired stats (weight ranks seeds):");
+                    let is_gv = popup.jewel_type_idx == 0;
+                    let mut remove: Option<usize> = None;
+                    for (i, (_, name, w1, w2)) in popup.desired.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("✕").clicked() {
+                                remove = Some(i);
+                            }
+                            ui.label(name.as_str());
+                            ui.add(
+                                egui::DragValue::new(w1)
+                                    .range(0.0..=100.0)
+                                    .speed(0.1)
+                                    .prefix("w "),
+                            );
+                            if is_gv {
+                                ui.add(
+                                    egui::DragValue::new(w2)
+                                        .range(0.0..=100.0)
+                                        .speed(0.1)
+                                        .prefix("w2 "),
+                                )
+                                .on_hover_text("Weight of the node's second stat");
+                            }
+                        });
+                    }
+                    if let Some(i) = remove {
+                        popup.desired.remove(i);
+                    }
+                }
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !popup.desired.is_empty() && !popup.sockets.is_empty(),
+                            egui::Button::new("Search seeds"),
+                        )
+                        .on_hover_text("Evaluates every seed; can take a few seconds")
+                        .clicked()
+                    {
+                        do_search = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+                if popup.searched {
+                    ui.separator();
+                    if popup.results.is_empty() {
+                        ui.colored_label(
+                            super::theme::Theme::TEXT_DIM,
+                            "No seeds matched the desired stats at this socket.",
+                        );
+                    } else {
+                        ui.label(format!("Top {} seeds:", popup.results.len()));
+                        egui::ScrollArea::vertical()
+                            .id_salt("timeless_results")
+                            .max_height(180.0)
+                            .show(ui, |ui| {
+                                for result in &popup.results {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Create").clicked() {
+                                            create_seed = Some(result.seed);
+                                        }
+                                        ui.label(format!(
+                                            "Seed {}  (score {:.1})",
+                                            result.seed, result.weight
+                                        ));
+                                        ui.label(
+                                            egui::RichText::new(result.matches.join(", "))
+                                                .small()
+                                                .color(super::theme::Theme::TEXT_MUTED),
+                                        );
+                                    });
+                                }
+                            });
+                    }
+                }
+            });
+
+        if let Some(i) = new_type {
+            popup.jewel_type_idx = i;
+            popup.conqueror_idx = 0;
+            popup.desired.clear();
+            popup.results.clear();
+            popup.searched = false;
+            popup.stats =
+                timeless::timeless_stats(bridge.lua(), timeless::TIMELESS_JEWEL_TYPES[i].2)
+                    .unwrap_or_default();
+        }
+        if do_search {
+            let jewel_type_id = timeless::TIMELESS_JEWEL_TYPES[popup.jewel_type_idx].0;
+            let socket_id = popup
+                .sockets
+                .get(popup.socket_idx)
+                .map(|s| s.node_id)
+                .unwrap_or(0);
+            let desired: Vec<(String, f64, f64)> = popup
+                .desired
+                .iter()
+                .map(|(id, _, w1, w2)| (id.clone(), *w1, *w2))
+                .collect();
+            match timeless::find_timeless_seeds(
+                bridge.lua(),
+                jewel_type_id,
+                socket_id,
+                &desired,
+                20,
+            ) {
+                Ok(results) => {
+                    popup.results = results;
+                    popup.searched = true;
+                }
+                Err(e) => log::error!("Timeless search failed: {e}"),
+            }
+        }
+        if let Some(seed) = create_seed {
+            let jewel_type_id = timeless::TIMELESS_JEWEL_TYPES[popup.jewel_type_idx].0;
+            match timeless::create_timeless_jewel(
+                bridge.lua(),
+                jewel_type_id,
+                popup.conqueror_idx,
+                seed,
+            ) {
+                Ok(None) => changed = true,
+                Ok(Some(err)) => log::error!("Failed to create jewel: {err}"),
+                Err(e) => log::error!("Failed to create jewel: {e}"),
+            }
+        }
+        if close {
+            self.timeless_popup = None;
+        }
+        changed
+    }
+
+    /// Tattoo (modify node) popup. Returns true when the tree changed.
+    fn show_tattoo_popup(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
+        let Some(popup) = &mut self.tattoo_popup else {
+            return false;
+        };
+        let mut changed = false;
+        let mut close = false;
+        let mut apply: Option<String> = None;
+        let mut remove = false;
+        let mut refetch_legacy: Option<bool> = None;
+
+        egui::Window::new(format!("Modify Node: {}", popup.node_name))
+            .id(egui::Id::new("tattoo_popup"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Modifier:");
+                    let selected_name = popup
+                        .options
+                        .get(popup.selected)
+                        .map(|o| o.name.as_str())
+                        .unwrap_or("-");
+                    egui::ComboBox::from_id_salt("tattoo_select")
+                        .selected_text(selected_name)
+                        .width(280.0)
+                        .show_ui(ui, |ui| {
+                            for (i, option) in popup.options.iter().enumerate() {
+                                if ui
+                                    .selectable_label(i == popup.selected, &option.name)
+                                    .clicked()
+                                {
+                                    popup.selected = i;
+                                }
+                            }
+                        });
+                    let mut legacy = popup.show_legacy;
+                    if ui.checkbox(&mut legacy, "Show legacy tattoos").changed() {
+                        refetch_legacy = Some(legacy);
+                    }
+                });
+                if let Some(option) = popup.options.get(popup.selected) {
+                    ui.separator();
+                    for line in &option.descriptions {
+                        ui.label(
+                            egui::RichText::new(line)
+                                .size(13.0)
+                                .color(egui::Color32::from_rgb(136, 136, 255)),
+                        );
+                    }
+                }
+                ui.separator();
+                let count_color = if popup.count > 50 {
+                    super::theme::Theme::ERROR
+                } else {
+                    super::theme::Theme::TEXT_MUTED
+                };
+                ui.colored_label(count_color, format!("Tattoo count: {}/50", popup.count));
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked()
+                        && let Some(option) = popup.options.get(popup.selected)
+                    {
+                        apply = Some(option.id.clone());
+                    }
+                    if popup.is_tattooed && ui.button("Reset node").clicked() {
+                        remove = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if let Some(legacy) = refetch_legacy {
+            popup.show_legacy = legacy;
+            match tattoos::tattoo_options(bridge.lua(), popup.node_id, legacy) {
+                Ok(options) => {
+                    popup.options = options;
+                    popup.selected = 0;
+                }
+                Err(e) => log::error!("Failed to refetch tattoo options: {e}"),
+            }
+        }
+        let node_id = popup.node_id;
+        if let Some(tattoo_id) = apply {
+            match tattoos::apply_tattoo(bridge.lua(), node_id, &tattoo_id) {
+                Ok(()) => {
+                    changed = true;
+                    close = true;
+                }
+                Err(e) => log::error!("Failed to apply tattoo: {e}"),
+            }
+        }
+        if remove {
+            match tattoos::remove_tattoo(bridge.lua(), node_id) {
+                Ok(()) => {
+                    changed = true;
+                    close = true;
+                }
+                Err(e) => log::error!("Failed to remove tattoo: {e}"),
+            }
+        }
+        if close {
+            self.tattoo_popup = None;
+        }
+        if changed {
+            self.refresh_tree_data(bridge);
+        }
+        changed
+    }
+
     pub fn refresh_jewels(&mut self, bridge: &LuaBridge) {
         match jewels::socket_jewels(bridge.lua()) {
             Ok(sockets) => self.jewel_sockets = sockets,

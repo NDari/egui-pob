@@ -2857,3 +2857,451 @@ fn test_anoint_slots_and_preview() {
     let anoints = crafting::get_anoints(lua, sg_id).expect("get failed");
     assert_eq!(anoints.len(), 2, "two anoints on stranglegasp: {anoints:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Corruption and implicit popups
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_corrupt_and_implicits() {
+    use pob_egui::data::{crafting, items};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let helm_id = crafting::craft_item(lua, "RARE", "Helmet: Armour", 1, "Corrupt Helm")
+        .expect("craft failed")
+        .expect("id");
+
+    // Corrupted implicit options exist and applying one corrupts the item
+    let options = crafting::corrupt_options(lua, helm_id).expect("options failed");
+    assert!(
+        options.len() > 5,
+        "helmet has corrupted implicits, got {}",
+        options.len()
+    );
+    let first = &options[0];
+    let second = options
+        .iter()
+        .find(|o| o.group != first.group)
+        .expect("a second option in another group");
+    crafting::corrupt_item(lua, helm_id, Some(first.index), Some(second.index))
+        .expect("corrupt failed");
+    let raw = items::get_item_raw(lua, helm_id).expect("raw failed");
+    assert!(raw.contains("Corrupted"), "item is corrupted: {raw}");
+
+    // Implicit sources: no eldritch without influence, Delve + Custom present
+    let sources = crafting::implicit_sources(lua, helm_id).expect("sources failed");
+    let ids: Vec<&str> = sources.iter().map(|(_, id)| id.as_str()).collect();
+    assert!(ids.contains(&"DelveImplicit"));
+    assert!(ids.contains(&"CUSTOM"));
+    assert!(!ids.contains(&"EXARCH"), "no exarch without influence");
+
+    // Adding Searing Exarch influence exposes the eldritch source
+    let raw = items::get_item_raw(lua, helm_id).expect("raw failed");
+    let info = items::item_edit_info(lua, &raw).expect("edit info failed");
+    let exarch_idx = info
+        .influence_names
+        .iter()
+        .position(|n| n == "Searing Exarch")
+        .expect("exarch influence listed")
+        + 1;
+    let new_raw = items::apply_item_edit(lua, &raw, &items::ItemEditOp::Influence(exarch_idx, 0))
+        .expect("apply failed")
+        .expect("raw");
+    let err = items::replace_item_from_raw(lua, helm_id, &new_raw).expect("replace failed");
+    assert!(err.is_none(), "influenced helm should parse: {err:?}");
+
+    let sources = crafting::implicit_sources(lua, helm_id).expect("sources failed");
+    assert!(
+        sources.iter().any(|(_, id)| id == "EXARCH"),
+        "exarch source available with influence, got {sources:?}"
+    );
+
+    // Eldritch implicit groups have tiers; applying one lands on the item
+    let groups = crafting::implicit_mods(lua, helm_id, "EXARCH").expect("mods failed");
+    assert!(!groups.is_empty(), "exarch implicits exist");
+    let group = &groups[0];
+    assert!(!group.tiers.is_empty());
+    crafting::add_implicit(lua, helm_id, "EXARCH", 1, 1).expect("add failed");
+    let raw = items::get_item_raw(lua, helm_id).expect("raw failed");
+    let tier_line = group.tiers[0].split('/').next().unwrap();
+    // Compare ignoring rolled numbers: match the alpha suffix of the line
+    let pattern: String = tier_line
+        .chars()
+        .filter(|c| c.is_alphabetic() || c.is_whitespace())
+        .collect();
+    let pattern = pattern.split_whitespace().collect::<Vec<_>>().join(" ");
+    let raw_normalized: String = raw
+        .chars()
+        .filter(|c| c.is_alphabetic() || c.is_whitespace())
+        .collect();
+    let raw_normalized = raw_normalized
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        raw_normalized.contains(&pattern),
+        "eldritch implicit '{tier_line}' should be on the item: {raw}"
+    );
+
+    // Replacing with another tier keeps a single eldritch implicit
+    let implicits_before = raw.matches("Implicits:").count();
+    crafting::add_implicit(lua, helm_id, "EXARCH", 1, group.tiers.len()).expect("add failed");
+    let raw2 = items::get_item_raw(lua, helm_id).expect("raw failed");
+    assert_eq!(
+        raw2.matches("Implicits:").count(),
+        implicits_before,
+        "replacement does not duplicate implicits"
+    );
+
+    // Custom implicit appends
+    crafting::add_custom_implicit(lua, helm_id, "+13 to maximum Life").expect("custom failed");
+    let raw3 = items::get_item_raw(lua, helm_id).expect("raw failed");
+    assert!(
+        raw3.contains("+13 to maximum Life"),
+        "custom implicit: {raw3}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Socket editing and catalysts
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sockets_and_catalysts() {
+    use pob_egui::data::{crafting, items};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let body_id = crafting::craft_item(lua, "RARE", "Body Armour: Armour", 1, "Socket Test")
+        .expect("craft failed")
+        .expect("id");
+
+    let sockets = crafting::item_sockets(lua, body_id)
+        .expect("sockets failed")
+        .expect("body armour has sockets");
+    assert_eq!(sockets.selectable_count, 6, "body armour allows 6 sockets");
+    let initial = sockets.sockets.len();
+
+    // Add sockets to the cap
+    while crafting::item_sockets(lua, body_id)
+        .expect("sockets failed")
+        .expect("sockets")
+        .sockets
+        .len()
+        < 6
+    {
+        crafting::add_socket(lua, body_id).expect("add socket failed");
+    }
+    let sockets = crafting::item_sockets(lua, body_id)
+        .expect("sockets failed")
+        .expect("sockets");
+    assert_eq!(sockets.sockets.len(), 6);
+    assert!(initial <= 6);
+
+    // Color a socket white and verify in the raw text
+    crafting::set_socket_color(lua, body_id, 1, "W").expect("color failed");
+    let raw = items::get_item_raw(lua, body_id).expect("raw failed");
+    assert!(
+        raw.contains("Sockets: W") || raw.contains("W-") || raw.contains("-W"),
+        "white socket in raw: {raw}"
+    );
+
+    // Link the first two sockets, then unlink
+    crafting::set_socket_link(lua, body_id, 1, true).expect("link failed");
+    let sockets = crafting::item_sockets(lua, body_id)
+        .expect("sockets failed")
+        .expect("sockets");
+    assert_eq!(
+        sockets.sockets[0].1, sockets.sockets[1].1,
+        "linked sockets share a group"
+    );
+    crafting::set_socket_link(lua, body_id, 1, false).expect("unlink failed");
+    let sockets = crafting::item_sockets(lua, body_id)
+        .expect("sockets failed")
+        .expect("sockets");
+    assert_ne!(
+        sockets.sockets[0].1, sockets.sockets[1].1,
+        "unlinked sockets have different groups"
+    );
+
+    // Catalysts: not applicable to body armour, applicable to a crafted ring
+    assert!(
+        crafting::catalyst_info(lua, body_id)
+            .expect("info failed")
+            .is_none(),
+        "no catalysts on body armour"
+    );
+    let ring_id = crafting::craft_item(lua, "RARE", "Ring", 1, "Catalyst Ring")
+        .expect("craft failed")
+        .expect("id");
+    let (catalyst, quality) = crafting::catalyst_info(lua, ring_id)
+        .expect("info failed")
+        .expect("rings can take catalysts");
+    assert_eq!((catalyst, quality), (0, 20));
+    crafting::set_catalyst(lua, ring_id, 3, 20).expect("set failed");
+    let (catalyst, _) = crafting::catalyst_info(lua, ring_id)
+        .expect("info failed")
+        .expect("still applicable");
+    assert_eq!(catalyst, 3, "catalyst round-trips");
+    let raw = items::get_item_raw(lua, ring_id).expect("raw failed");
+    assert!(raw.contains("Catalyst"), "catalyst recorded in raw: {raw}");
+}
+
+// ---------------------------------------------------------------------------
+// Gem options: defaults and round-trip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_gem_options() {
+    use pob_egui::data::skills::{self, GemOptions};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let opts = skills::gem_options(lua).expect("options failed");
+    assert_eq!(opts.default_level, "normalMaximum");
+
+    // Set defaults and confirm a newly added gem uses them
+    skills::set_gem_options(
+        lua,
+        &GemOptions {
+            sort_by_dps: true,
+            sort_field: "TotalDPS".to_string(),
+            default_level: "levelOne".to_string(),
+            default_quality: 17,
+            show_support_types: "ALL".to_string(),
+            show_alt_quality: false,
+            show_legacy_gems: false,
+        },
+    )
+    .expect("set failed");
+    let opts = skills::gem_options(lua).expect("options failed");
+    assert_eq!(opts.default_level, "levelOne");
+    assert_eq!(opts.default_quality, 17);
+    assert_eq!(opts.sort_field, "TotalDPS");
+
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    let group = groups
+        .iter()
+        .find(|g| !g.from_item)
+        .expect("a user socket group");
+    let err = skills::add_gem(lua, group.index, "Herald of Ash").expect("add failed");
+    assert!(err.is_none(), "gem should be found: {err:?}");
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    let gem = groups
+        .iter()
+        .find(|g| g.index == group.index)
+        .unwrap()
+        .gems
+        .iter()
+        .find(|g| g.name.contains("Herald of Ash"))
+        .expect("added gem");
+    assert_eq!(gem.level, 1, "levelOne default applies");
+    assert_eq!(gem.quality, 17, "default quality applies");
+
+    // Normal maximum default resolves the natural max level
+    skills::set_gem_options(
+        lua,
+        &GemOptions {
+            default_level: "normalMaximum".to_string(),
+            default_quality: 0,
+            ..opts
+        },
+    )
+    .expect("set failed");
+    let err = skills::add_gem(lua, group.index, "Clarity").expect("add failed");
+    assert!(err.is_none(), "gem should be found: {err:?}");
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    let gem = groups
+        .iter()
+        .find(|g| g.index == group.index)
+        .unwrap()
+        .gems
+        .iter()
+        .find(|g| g.name.contains("Clarity"))
+        .expect("added gem");
+    assert!(
+        gem.level >= 20,
+        "clarity max level is 20+, got {}",
+        gem.level
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tattoos: options, apply, count, remove
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_tattoos() {
+    use pob_egui::data::{tattoos, tree::TreeData};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Find a small attribute node (Strength/Dexterity/Intelligence)
+    let node_id: u32 = lua
+        .load(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            for id, node in pairs(spec.nodes) do
+                if node.dn == "Strength" and node.type == "Normal" and not node.ascendancyName then
+                    return id
+                end
+            end
+            return 0
+            "#,
+        )
+        .eval()
+        .expect("eval failed");
+    assert!(node_id > 0, "found a Strength node");
+
+    let options = tattoos::tattoo_options(lua, node_id, false).expect("options failed");
+    assert!(
+        options.len() > 5,
+        "attribute nodes have many tattoo options, got {}",
+        options.len()
+    );
+    let warrior = options
+        .iter()
+        .find(|o| o.name.contains("Tattoo"))
+        .expect("a tattoo option");
+    assert!(!warrior.descriptions.is_empty());
+
+    // Applying replaces the node's name/stats in the extracted tree
+    assert!(!tattoos::is_tattooed(lua, node_id).expect("check failed"));
+    tattoos::apply_tattoo(lua, node_id, &warrior.id).expect("apply failed");
+    assert!(tattoos::is_tattooed(lua, node_id).expect("check failed"));
+    assert_eq!(tattoos::tattoo_count(lua).expect("count failed"), 1);
+    let tree = TreeData::extract(lua).expect("extract failed");
+    let node = tree.nodes.get(&node_id).expect("node still in tree");
+    assert_eq!(node.name, warrior.name, "node renamed to the tattoo");
+
+    // Removing restores the original node
+    tattoos::remove_tattoo(lua, node_id).expect("remove failed");
+    assert!(!tattoos::is_tattooed(lua, node_id).expect("check failed"));
+    assert_eq!(tattoos::tattoo_count(lua).expect("count failed"), 0);
+    let tree = TreeData::extract(lua).expect("extract failed");
+    let node = tree.nodes.get(&node_id).expect("node still in tree");
+    assert_eq!(node.name, "Strength", "node restored");
+
+    // Legacy toggle expands the pool (or at least never shrinks it)
+    let with_legacy = tattoos::tattoo_options(lua, node_id, true).expect("options failed");
+    assert!(with_legacy.len() >= options.len());
+
+    // A keystone node yields keystone-targeted options only (or none)
+    let keystone_id: u32 = lua
+        .load(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            for id, node in pairs(spec.nodes) do
+                if node.type == "Keystone" and not node.ascendancyName then
+                    return id
+                end
+            end
+            return 0
+            "#,
+        )
+        .eval()
+        .expect("eval failed");
+    if keystone_id > 0 {
+        let keystone_options =
+            tattoos::tattoo_options(lua, keystone_id, false).expect("options failed");
+        // Keystone tattoos exist (Karui runegraft-likes); list may be empty
+        // for some keystones, but must never contain small-attribute tattoos
+        assert!(
+            !keystone_options
+                .iter()
+                .any(|o| o.name.contains("Tattoo of the Arohongui")),
+            "keystones don't take small-node tattoos"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timeless jewel seed search
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_timeless_search() {
+    use pob_egui::data::{items, timeless};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let sockets = timeless::timeless_sockets(lua).expect("sockets failed");
+    assert!(
+        sockets.len() > 10,
+        "the tree has many jewel sockets, got {}",
+        sockets.len()
+    );
+    let socket = &sockets[0];
+
+    // Lethal Pride (karui): presence-weighted notable search
+    let stats = timeless::timeless_stats(lua, "karui").expect("stats failed");
+    assert!(
+        stats.len() > 10,
+        "karui legion stats exist, got {}",
+        stats.len()
+    );
+    let notable = stats
+        .iter()
+        .find(|s| s.is_notable)
+        .expect("a karui notable");
+    let addition = stats
+        .iter()
+        .find(|s| !s.is_notable)
+        .expect("a karui addition");
+    let desired = vec![
+        (notable.id.clone(), 10.0, 0.0),
+        (addition.id.clone(), 1.0, 0.0),
+    ];
+    let results =
+        timeless::find_timeless_seeds(lua, 2, socket.node_id, &desired, 10).expect("search failed");
+    assert!(
+        !results.is_empty(),
+        "some seed should match karui stats at socket {}",
+        socket.label
+    );
+    assert!(
+        results[0].weight >= results[results.len() - 1].weight,
+        "sorted"
+    );
+    assert!(!results[0].matches.is_empty(), "matches described");
+    let (min, max) = (10000, 18000);
+    assert!(
+        results.iter().all(|r| r.seed >= min && r.seed <= max),
+        "karui seeds in range"
+    );
+
+    // Glorious Vanity: value-weighted search also returns results
+    let gv_stats = timeless::timeless_stats(lua, "vaal").expect("stats failed");
+    let gv_first = &gv_stats[0];
+    let gv_results = timeless::find_timeless_seeds(
+        lua,
+        1,
+        socket.node_id,
+        &[(gv_first.id.clone(), 1.0, 0.5)],
+        5,
+    )
+    .expect("search failed");
+    // GV transforms everything; a single desired stat may or may not appear,
+    // but the search must complete without error
+    let _ = gv_results;
+
+    // Creating the jewel from a result adds it to the build
+    let err = timeless::create_timeless_jewel(lua, 2, 0, results[0].seed).expect("create failed");
+    assert!(err.is_none(), "timeless jewel should parse: {err:?}");
+    let list = items::extract_item_list(lua).expect("list failed");
+    assert!(
+        list.iter().any(|e| e.name.contains("Lethal Pride")),
+        "jewel in build"
+    );
+}

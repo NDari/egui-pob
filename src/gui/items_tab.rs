@@ -64,6 +64,17 @@ pub struct CraftUi {
     enchant_all_skills: bool,
     /// (source name, 1-based line index) selected in the enchant dialog.
     enchant_selection: Option<(String, usize)>,
+    /// Item being corrupted; selections are 0 = None else 1-based option idx.
+    corrupt_item: Option<i64>,
+    corrupt_sel: (usize, usize),
+    /// Item whose sockets/catalyst are being edited.
+    socket_item: Option<i64>,
+    /// Item receiving an implicit.
+    implicit_item: Option<i64>,
+    implicit_source_idx: usize,
+    implicit_group_idx: usize,
+    implicit_tier_idx: usize,
+    implicit_custom: String,
 }
 
 const CRAFT_RARITIES: [(&str, &str); 3] =
@@ -71,6 +82,9 @@ const CRAFT_RARITIES: [(&str, &str); 3] =
 
 /// Enchant catalog cache: (item id, skill filter, sources with their lines).
 type EnchantCatalogCache = (i64, Option<String>, Vec<(EnchantSource, Vec<String>)>);
+
+/// Socket dialog cache: (item id, sockets, catalyst state).
+type SocketCache = (i64, Option<crafting::ItemSockets>, Option<(usize, i64)>);
 
 /// State for the items panel.
 pub struct ItemsPanel {
@@ -106,6 +120,14 @@ pub struct ItemsPanel {
     enchant_opts_cache: Option<(i64, EnchantOptions)>,
     /// Cached enchant catalog keyed by (item, skill).
     enchant_catalog_cache: Option<EnchantCatalogCache>,
+    /// Cached corrupted-implicit options.
+    corrupt_opts_cache: Option<(i64, Vec<crafting::CorruptOption>)>,
+    /// Cached socket + catalyst state for the socket dialog.
+    socket_cache: Option<SocketCache>,
+    /// Cached implicit sources.
+    implicit_sources_cache: Option<(i64, Vec<(String, String)>)>,
+    /// Cached implicit mod groups keyed by (item, source).
+    implicit_mods_cache: Option<(i64, String, Vec<crafting::ImplicitGroup>)>,
 }
 
 /// Raw-text item editor state. `item_id` is None when creating a new item.
@@ -164,6 +186,10 @@ impl ItemsPanel {
             anoint_preview_cache: None,
             enchant_opts_cache: None,
             enchant_catalog_cache: None,
+            corrupt_opts_cache: None,
+            socket_cache: None,
+            implicit_sources_cache: None,
+            implicit_mods_cache: None,
         }
     }
 
@@ -1041,6 +1067,485 @@ impl ItemsPanel {
             }
         }
 
+        // Sockets & catalyst dialog
+        if let Some(item_id) = self.craft_ui.socket_item {
+            if self
+                .socket_cache
+                .as_ref()
+                .is_none_or(|(id, _, _)| *id != item_id)
+            {
+                let sockets = crafting::item_sockets(bridge.lua(), item_id).unwrap_or_else(|e| {
+                    log::error!("Failed to read sockets: {e}");
+                    None
+                });
+                let catalyst = crafting::catalyst_info(bridge.lua(), item_id).unwrap_or_else(|e| {
+                    log::error!("Failed to read catalyst: {e}");
+                    None
+                });
+                self.socket_cache = Some((item_id, sockets, catalyst));
+            }
+            let (_, sockets, catalyst) = self.socket_cache.as_ref().unwrap();
+            let item_name = self
+                .item_list
+                .iter()
+                .find(|e| e.id == item_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "Item".to_string());
+            let mut close = false;
+            // Deferred ops
+            let mut set_color: Option<(usize, &'static str)> = None;
+            let mut set_link: Option<(usize, bool)> = None;
+            let mut add_socket = false;
+            let mut set_catalyst: Option<(usize, i64)> = None;
+
+            egui::Window::new(format!("Sockets & Catalyst: {item_name}"))
+                .id(egui::Id::new("socket_dialog"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    if let Some(sockets) = sockets {
+                        let normal_count = sockets.sockets.len() - sockets.abyssal_count as usize;
+                        ui.horizontal(|ui| {
+                            for (i, (color, group)) in sockets.sockets.iter().enumerate() {
+                                if color == "A" {
+                                    ui.label(
+                                        egui::RichText::new("A")
+                                            .color(egui::Color32::from_rgb(120, 220, 120)),
+                                    );
+                                    continue;
+                                }
+                                let color_rich = |c: &str| match c {
+                                    "R" => egui::RichText::new("R")
+                                        .color(egui::Color32::from_rgb(224, 80, 48)),
+                                    "G" => egui::RichText::new("G")
+                                        .color(egui::Color32::from_rgb(112, 255, 112)),
+                                    "B" => egui::RichText::new("B")
+                                        .color(egui::Color32::from_rgb(112, 112, 255)),
+                                    _ => egui::RichText::new("W").color(egui::Color32::WHITE),
+                                };
+                                egui::ComboBox::from_id_salt(format!("socket_color_{i}"))
+                                    .selected_text(color_rich(color))
+                                    .width(44.0)
+                                    .show_ui(ui, |ui| {
+                                        for c in ["R", "G", "B", "W"] {
+                                            if ui
+                                                .selectable_label(color == c, color_rich(c))
+                                                .clicked()
+                                                && color != c
+                                            {
+                                                set_color = Some((i + 1, c));
+                                            }
+                                        }
+                                    });
+                                // Link checkbox between this and the next socket
+                                if i + 1 < normal_count {
+                                    let mut linked =
+                                        sockets.sockets.get(i + 1).is_some_and(|(_, g)| g == group);
+                                    if ui
+                                        .checkbox(&mut linked, "")
+                                        .on_hover_text("Link to the next socket")
+                                        .changed()
+                                    {
+                                        set_link = Some((i + 1, linked));
+                                    }
+                                }
+                            }
+                            let cap = sockets.selectable_count + sockets.abyssal_count;
+                            if (sockets.sockets.len() as i64) < cap
+                                && ui.button("+").on_hover_text("Add a socket").clicked()
+                            {
+                                add_socket = true;
+                            }
+                        });
+                    } else {
+                        ui.colored_label(Theme::TEXT_DIM, "This item has no sockets.");
+                    }
+
+                    if let Some((catalyst, quality)) = catalyst {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Catalyst:");
+                            let current = if *catalyst == 0 {
+                                "None"
+                            } else {
+                                crafting::CATALYSTS
+                                    .get(catalyst - 1)
+                                    .copied()
+                                    .unwrap_or("?")
+                            };
+                            egui::ComboBox::from_id_salt("catalyst_select")
+                                .selected_text(current)
+                                .width(230.0)
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(*catalyst == 0, "None").clicked() {
+                                        set_catalyst = Some((0, *quality));
+                                    }
+                                    for (i, name) in crafting::CATALYSTS.iter().enumerate() {
+                                        if ui.selectable_label(*catalyst == i + 1, *name).clicked()
+                                        {
+                                            set_catalyst = Some((i + 1, *quality));
+                                        }
+                                    }
+                                });
+                            if *catalyst > 0 {
+                                let mut q = *quality;
+                                let resp = ui.add(
+                                    egui::DragValue::new(&mut q)
+                                        .range(1..=20)
+                                        .prefix("Q ")
+                                        .suffix("%"),
+                                );
+                                if (resp.drag_stopped() || (resp.changed() && !resp.dragged()))
+                                    && q != *quality
+                                {
+                                    set_catalyst = Some((*catalyst, q));
+                                }
+                            }
+                        });
+                    }
+
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+            let mut applied = false;
+            if let Some((index, color)) = set_color {
+                match crafting::set_socket_color(bridge.lua(), item_id, index, color) {
+                    Ok(()) => applied = true,
+                    Err(e) => log::error!("Failed to set socket color: {e}"),
+                }
+            }
+            if let Some((index, linked)) = set_link {
+                match crafting::set_socket_link(bridge.lua(), item_id, index, linked) {
+                    Ok(()) => applied = true,
+                    Err(e) => log::error!("Failed to set link: {e}"),
+                }
+            }
+            if add_socket {
+                match crafting::add_socket(bridge.lua(), item_id) {
+                    Ok(()) => applied = true,
+                    Err(e) => log::error!("Failed to add socket: {e}"),
+                }
+            }
+            if let Some((catalyst, quality)) = set_catalyst {
+                match crafting::set_catalyst(bridge.lua(), item_id, catalyst, quality) {
+                    Ok(()) => applied = true,
+                    Err(e) => log::error!("Failed to set catalyst: {e}"),
+                }
+            }
+            if applied {
+                changed = true;
+                self.socket_cache = None;
+            }
+            if close {
+                self.craft_ui.socket_item = None;
+                self.socket_cache = None;
+            }
+        }
+
+        // Corrupt dialog
+        if let Some(item_id) = self.craft_ui.corrupt_item {
+            if self
+                .corrupt_opts_cache
+                .as_ref()
+                .is_none_or(|(id, _)| *id != item_id)
+            {
+                let opts = crafting::corrupt_options(bridge.lua(), item_id).unwrap_or_else(|e| {
+                    log::error!("Failed to load corrupt options: {e}");
+                    Vec::new()
+                });
+                self.corrupt_opts_cache = Some((item_id, opts));
+            }
+            let options = &self.corrupt_opts_cache.as_ref().unwrap().1;
+            let item_name = self
+                .item_list
+                .iter()
+                .find(|e| e.id == item_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "Item".to_string());
+            let mut close = false;
+            let mut do_corrupt = false;
+
+            egui::Window::new(format!("Corrupt: {item_name}"))
+                .id(egui::Id::new("corrupt_dialog"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    let combo = |ui: &mut egui::Ui,
+                                 label: &str,
+                                 sel: usize,
+                                 exclude_group: Option<&str>|
+                     -> Option<usize> {
+                        let mut picked = None;
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            let current = if sel == 0 {
+                                "None".to_string()
+                            } else {
+                                options
+                                    .iter()
+                                    .find(|o| o.index == sel)
+                                    .map(|o| truncate_label(&o.label, 55))
+                                    .unwrap_or_else(|| "?".to_string())
+                            };
+                            egui::ComboBox::from_id_salt(format!("corrupt_{label}"))
+                                .selected_text(current)
+                                .width(420.0)
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(sel == 0, "None").clicked() {
+                                        picked = Some(0);
+                                    }
+                                    for opt in options {
+                                        if exclude_group == Some(opt.group.as_str()) {
+                                            continue;
+                                        }
+                                        if ui
+                                            .selectable_label(sel == opt.index, &opt.label)
+                                            .clicked()
+                                        {
+                                            picked = Some(opt.index);
+                                        }
+                                    }
+                                });
+                        });
+                        picked
+                    };
+                    let group_of = |sel: usize| -> Option<&str> {
+                        options
+                            .iter()
+                            .find(|o| o.index == sel && sel > 0)
+                            .map(|o| o.group.as_str())
+                    };
+                    let (sel1, sel2) = self.craft_ui.corrupt_sel;
+                    if let Some(p) = combo(ui, "Implicit 1:", sel1, group_of(sel2)) {
+                        self.craft_ui.corrupt_sel.0 = p;
+                    }
+                    if let Some(p) = combo(ui, "Implicit 2:", sel2, group_of(sel1)) {
+                        self.craft_ui.corrupt_sel.1 = p;
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "Corrupting with no implicits selected only marks the item Corrupted.",
+                        )
+                        .small()
+                        .color(Theme::TEXT_DIM),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Corrupt").clicked() {
+                            do_corrupt = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if do_corrupt {
+                let (s1, s2) = self.craft_ui.corrupt_sel;
+                match crafting::corrupt_item(
+                    bridge.lua(),
+                    item_id,
+                    (s1 > 0).then_some(s1),
+                    (s2 > 0).then_some(s2),
+                ) {
+                    Ok(()) => {
+                        changed = true;
+                        close = true;
+                    }
+                    Err(e) => log::error!("Failed to corrupt: {e}"),
+                }
+            }
+            if close {
+                self.craft_ui.corrupt_item = None;
+                self.corrupt_opts_cache = None;
+            }
+        }
+
+        // Add implicit dialog
+        if let Some(item_id) = self.craft_ui.implicit_item {
+            if self
+                .implicit_sources_cache
+                .as_ref()
+                .is_none_or(|(id, _)| *id != item_id)
+            {
+                let sources =
+                    crafting::implicit_sources(bridge.lua(), item_id).unwrap_or_else(|e| {
+                        log::error!("Failed to load implicit sources: {e}");
+                        Vec::new()
+                    });
+                self.implicit_sources_cache = Some((item_id, sources));
+            }
+            let sources = self.implicit_sources_cache.as_ref().unwrap().1.clone();
+            let source_idx = self
+                .craft_ui
+                .implicit_source_idx
+                .min(sources.len().saturating_sub(1));
+            let source_id = sources
+                .get(source_idx)
+                .map(|(_, id)| id.clone())
+                .unwrap_or_default();
+            let is_custom = source_id == "CUSTOM";
+            if !is_custom
+                && self
+                    .implicit_mods_cache
+                    .as_ref()
+                    .is_none_or(|(id, src, _)| *id != item_id || *src != source_id)
+            {
+                let groups = crafting::implicit_mods(bridge.lua(), item_id, &source_id)
+                    .unwrap_or_else(|e| {
+                        log::error!("Failed to load implicit mods: {e}");
+                        Vec::new()
+                    });
+                self.implicit_mods_cache = Some((item_id, source_id.clone(), groups));
+            }
+            let item_name = self
+                .item_list
+                .iter()
+                .find(|e| e.id == item_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "Item".to_string());
+            let mut close = false;
+            let mut do_add = false;
+
+            egui::Window::new(format!("Add Implicit: {item_name}"))
+                .id(egui::Id::new("implicit_dialog"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Source:");
+                        let current = sources
+                            .get(source_idx)
+                            .map(|(label, _)| label.as_str())
+                            .unwrap_or("?");
+                        egui::ComboBox::from_id_salt("implicit_source")
+                            .selected_text(current)
+                            .width(160.0)
+                            .show_ui(ui, |ui| {
+                                for (i, (label, _)) in sources.iter().enumerate() {
+                                    if ui.selectable_label(i == source_idx, label).clicked()
+                                        && i != source_idx
+                                    {
+                                        self.craft_ui.implicit_source_idx = i;
+                                        self.craft_ui.implicit_group_idx = 0;
+                                        self.craft_ui.implicit_tier_idx = 0;
+                                    }
+                                }
+                            });
+                    });
+                    if is_custom {
+                        ui.horizontal(|ui| {
+                            ui.label("Modifier:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.craft_ui.implicit_custom)
+                                    .hint_text("e.g. +25 to maximum Life")
+                                    .desired_width(300.0),
+                            );
+                        });
+                    } else if let Some((_, _, groups)) = &self.implicit_mods_cache {
+                        let group_idx = self
+                            .craft_ui
+                            .implicit_group_idx
+                            .min(groups.len().saturating_sub(1));
+                        ui.horizontal(|ui| {
+                            ui.label("Type:");
+                            let current = groups
+                                .get(group_idx)
+                                .map(|g| truncate_label(&g.label, 60))
+                                .unwrap_or_else(|| "-".to_string());
+                            egui::ComboBox::from_id_salt("implicit_group")
+                                .selected_text(current)
+                                .width(440.0)
+                                .show_ui(ui, |ui| {
+                                    for (i, group) in groups.iter().enumerate() {
+                                        if ui
+                                            .selectable_label(i == group_idx, &group.label)
+                                            .clicked()
+                                            && i != group_idx
+                                        {
+                                            self.craft_ui.implicit_group_idx = i;
+                                            self.craft_ui.implicit_tier_idx = 0;
+                                        }
+                                    }
+                                });
+                        });
+                        if let Some(group) = groups.get(group_idx) {
+                            let tier_idx = self
+                                .craft_ui
+                                .implicit_tier_idx
+                                .min(group.tiers.len().saturating_sub(1));
+                            ui.horizontal(|ui| {
+                                ui.label("Tier:");
+                                let current = group
+                                    .tiers
+                                    .get(tier_idx)
+                                    .map(|t| truncate_label(t, 60))
+                                    .unwrap_or_else(|| "-".to_string());
+                                egui::ComboBox::from_id_salt("implicit_tier")
+                                    .selected_text(current)
+                                    .width(440.0)
+                                    .show_ui(ui, |ui| {
+                                        for (i, tier) in group.tiers.iter().enumerate() {
+                                            if ui.selectable_label(i == tier_idx, tier).clicked() {
+                                                self.craft_ui.implicit_tier_idx = i;
+                                            }
+                                        }
+                                    });
+                            });
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        let can_add = if is_custom {
+                            !self.craft_ui.implicit_custom.trim().is_empty()
+                        } else {
+                            self.implicit_mods_cache
+                                .as_ref()
+                                .is_some_and(|(_, _, g)| !g.is_empty())
+                        };
+                        if ui.add_enabled(can_add, egui::Button::new("Add")).clicked() {
+                            do_add = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if do_add {
+                let result = if is_custom {
+                    crafting::add_custom_implicit(
+                        bridge.lua(),
+                        item_id,
+                        self.craft_ui.implicit_custom.trim(),
+                    )
+                } else {
+                    crafting::add_implicit(
+                        bridge.lua(),
+                        item_id,
+                        &source_id,
+                        self.craft_ui.implicit_group_idx + 1,
+                        self.craft_ui.implicit_tier_idx + 1,
+                    )
+                };
+                match result {
+                    Ok(()) => {
+                        changed = true;
+                        self.craft_ui.implicit_custom.clear();
+                    }
+                    Err(e) => log::error!("Failed to add implicit: {e}"),
+                }
+            }
+            if close {
+                self.craft_ui.implicit_item = None;
+                self.implicit_sources_cache = None;
+                self.implicit_mods_cache = None;
+            }
+        }
+
         changed
     }
 
@@ -1287,34 +1792,6 @@ impl ItemsPanel {
                     if ui.small_button("🗑").on_hover_text("Delete item").clicked() {
                         self.confirm_delete = Some(entry.id);
                     }
-                    if entry.crafted
-                        && ui
-                            .small_button("⚒")
-                            .on_hover_text("Edit affixes (crafting)")
-                            .clicked()
-                    {
-                        self.craft_ui.edit_item = Some(entry.id);
-                    }
-                    if entry.item_type == "Amulet"
-                        && ui
-                            .small_button("Anoint")
-                            .on_hover_text("Anoint a notable passive onto this amulet")
-                            .clicked()
-                    {
-                        self.craft_ui.anoint_item = Some(entry.id);
-                        self.craft_ui.anoint_selected = None;
-                        self.craft_ui.anoint_slot = 1;
-                    }
-                    if entry.has_enchantments
-                        && ui
-                            .small_button("Enchant")
-                            .on_hover_text("Apply a labyrinth or other enchantment")
-                            .clicked()
-                    {
-                        self.craft_ui.enchant_item = Some(entry.id);
-                        self.craft_ui.enchant_skill = None;
-                        self.craft_ui.enchant_selection = None;
-                    }
                     if ui
                         .small_button("✏")
                         .on_hover_text("Edit item text")
@@ -1337,9 +1814,46 @@ impl ItemsPanel {
                     }
                 }
 
-                let resp = ui.label(
-                    egui::RichText::new(&entry.name).color(items::rarity_color(&entry.rarity)),
-                );
+                let resp = ui
+                    .label(
+                        egui::RichText::new(&entry.name).color(items::rarity_color(&entry.rarity)),
+                    )
+                    .on_hover_text("Right-click for crafting options");
+                resp.context_menu(|ui| {
+                    if entry.crafted && ui.button("Edit affixes...").clicked() {
+                        self.craft_ui.edit_item = Some(entry.id);
+                        ui.close_menu();
+                    }
+                    if entry.item_type == "Amulet" && ui.button("Anoint...").clicked() {
+                        self.craft_ui.anoint_item = Some(entry.id);
+                        self.craft_ui.anoint_selected = None;
+                        self.craft_ui.anoint_slot = 1;
+                        ui.close_menu();
+                    }
+                    if entry.has_enchantments && ui.button("Enchant...").clicked() {
+                        self.craft_ui.enchant_item = Some(entry.id);
+                        self.craft_ui.enchant_skill = None;
+                        self.craft_ui.enchant_selection = None;
+                        ui.close_menu();
+                    }
+                    if ui.button("Sockets & catalyst...").clicked() {
+                        self.craft_ui.socket_item = Some(entry.id);
+                        ui.close_menu();
+                    }
+                    if ui.button("Corrupt...").clicked() {
+                        self.craft_ui.corrupt_item = Some(entry.id);
+                        self.craft_ui.corrupt_sel = (0, 0);
+                        ui.close_menu();
+                    }
+                    if ui.button("Add implicit...").clicked() {
+                        self.craft_ui.implicit_item = Some(entry.id);
+                        self.craft_ui.implicit_source_idx = 0;
+                        self.craft_ui.implicit_group_idx = 0;
+                        self.craft_ui.implicit_tier_idx = 0;
+                        self.craft_ui.implicit_custom.clear();
+                        ui.close_menu();
+                    }
+                });
                 hover_tooltip(resp, &mut self.tooltip_cache, bridge, entry.id, None);
 
                 if let Some(ref slot) = entry.equipped_slot {

@@ -411,6 +411,631 @@ pub fn set_cluster_jewel(
     .call((item_id, skill_id, node_count))
 }
 
+/// Socket layout of an item.
+#[derive(Debug, Clone, Default)]
+pub struct ItemSockets {
+    /// (color "R"/"G"/"B"/"W"/"A", link group) per socket.
+    pub sockets: Vec<(String, i64)>,
+    /// How many sockets the base can have (excludes abyssal).
+    pub selectable_count: i64,
+    pub abyssal_count: i64,
+}
+
+/// Read an item's sockets (None when the base has no selectable sockets).
+pub fn item_sockets(lua: &Lua, item_id: i64) -> Result<Option<ItemSockets>, mlua::Error> {
+    let result: Option<LuaTable> = lua
+        .load(
+            r#"
+        local itemId = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local item = build.itemsTab.items[itemId]
+        if not item or not item.selectableSocketCount or item.selectableSocketCount == 0 then
+            return nil
+        end
+        local out = {
+            selectable = item.selectableSocketCount,
+            abyssal = item.abyssalSocketCount or 0,
+            sockets = {},
+        }
+        for _, socket in ipairs(item.sockets or {}) do
+            table.insert(out.sockets, { color = socket.color, group = socket.group })
+        end
+        return out
+    "#,
+        )
+        .call(item_id)?;
+
+    let Some(result) = result else {
+        return Ok(None);
+    };
+    let sockets_table: LuaTable = result.get("sockets")?;
+    let mut sockets = Vec::new();
+    for socket in sockets_table.sequence_values::<LuaTable>() {
+        let socket = socket?;
+        sockets.push((
+            socket.get("color").unwrap_or_default(),
+            socket.get("group").unwrap_or(0),
+        ));
+    }
+    Ok(Some(ItemSockets {
+        sockets,
+        selectable_count: result.get("selectable").unwrap_or(0),
+        abyssal_count: result.get("abyssal").unwrap_or(0),
+    }))
+}
+
+/// Set a socket's color (1-based index; "R"/"G"/"B"/"W").
+pub fn set_socket_color(
+    lua: &Lua,
+    item_id: i64,
+    index: usize,
+    color: &str,
+) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local itemId, index, color = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if not item or not item.sockets or not item.sockets[index] then
+            return
+        end
+        item.sockets[index].color = color
+        item:BuildAndParseRaw()
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call((item_id, index, color))
+}
+
+/// Link or unlink sockets `index` and `index + 1` (upstream's group shift).
+pub fn set_socket_link(
+    lua: &Lua,
+    item_id: i64,
+    index: usize,
+    linked: bool,
+) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local itemId, index, linked = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if not item or not item.sockets or not item.sockets[index]
+           or not item.sockets[index + 1] then
+            return
+        end
+        if linked and item.sockets[index].group ~= item.sockets[index + 1].group then
+            for s = index + 1, #item.sockets do
+                item.sockets[s].group = item.sockets[s].group - 1
+            end
+        elseif not linked and item.sockets[index].group == item.sockets[index + 1].group then
+            for s = index + 1, #item.sockets do
+                item.sockets[s].group = item.sockets[s].group + 1
+            end
+        end
+        item:BuildAndParseRaw()
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call((item_id, index, linked))
+}
+
+/// Add a socket (up to the base's selectable count), like upstream's "+".
+pub fn add_socket(lua: &Lua, item_id: i64) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local itemId = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if not item or not item.sockets
+           or #item.sockets >= item.selectableSocketCount + (item.abyssalSocketCount or 0) then
+            return
+        end
+        local insertIndex = #item.sockets - (item.abyssalSocketCount or 0) + 1
+        local prevGroup = item.sockets[insertIndex - 1] and item.sockets[insertIndex - 1].group or -1
+        table.insert(item.sockets, insertIndex, {
+            color = item.defaultSocketColor,
+            group = prevGroup + 1,
+        })
+        for s = insertIndex + 1, #item.sockets do
+            item.sockets[s].group = item.sockets[s].group + 1
+        end
+        item:BuildAndParseRaw()
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call(item_id)
+}
+
+/// Catalyst names, in upstream's index order (index 1 = Abrasive).
+pub const CATALYSTS: [&str; 10] = [
+    "Abrasive (Attack)",
+    "Accelerating (Speed)",
+    "Fertile (Life & Mana)",
+    "Imbued (Caster)",
+    "Intrinsic (Attribute)",
+    "Noxious (Physical & Chaos Damage)",
+    "Prismatic (Resistance)",
+    "Tempering (Defense)",
+    "Turbulent (Elemental)",
+    "Unstable (Critical)",
+];
+
+/// Current catalyst state (None when catalysts don't apply to the item:
+/// upstream shows them for crafted/tagged amulets, rings, and belts).
+pub fn catalyst_info(lua: &Lua, item_id: i64) -> Result<Option<(usize, i64)>, mlua::Error> {
+    let result: Option<LuaTable> = lua
+        .load(
+            r#"
+        local itemId = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local item = build.itemsTab.items[itemId]
+        if not item or not (item.crafted or item.hasModTags)
+           or not (item.base.type == "Amulet" or item.base.type == "Ring"
+                   or item.base.type == "Belt") then
+            return nil
+        end
+        return { catalyst = item.catalyst or 0, quality = item.catalystQuality or 20 }
+    "#,
+        )
+        .call(item_id)?;
+    Ok(result.map(|t| {
+        (
+            t.get::<usize>("catalyst").unwrap_or(0),
+            t.get::<i64>("quality").unwrap_or(20),
+        )
+    }))
+}
+
+/// Set the catalyst (0 = none, else 1-based into CATALYSTS) and quality.
+/// Crafted items re-craft so affix values pick up the catalyst scalar.
+pub fn set_catalyst(
+    lua: &Lua,
+    item_id: i64,
+    catalyst: usize,
+    quality: i64,
+) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local itemId, catalyst, quality = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if not item then
+            return
+        end
+        item.catalyst = catalyst
+        item.catalystQuality = catalyst > 0 and quality or nil
+        if item.crafted then
+            item:Craft()
+        else
+            item:BuildAndParseRaw()
+        end
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call((item_id, catalyst, quality))
+}
+
+/// Lua snippet defining `buildCorruptList(item)`: corrupted implicit mods
+/// with spawn weight, sorted like upstream's CorruptDisplayItem.
+const CORRUPT_LIST_LUA: &str = r#"
+    local function buildCorruptList(item)
+        local list = {}
+        for modId, mod in pairs(item.affixes) do
+            if mod.type == "Corrupted" and item:GetModSpawnWeight(mod) > 0 then
+                table.insert(list, mod)
+            end
+        end
+        table.sort(list, function(a, b)
+            local an = a[1]:lower():gsub("%(.-%)", "$"):gsub("[%+%-%%]", ""):gsub("%d+", "$")
+            local bn = b[1]:lower():gsub("%(.-%)", "$"):gsub("[%+%-%%]", ""):gsub("%d+", "$")
+            if an ~= bn then
+                return an < bn
+            else
+                return a.level < b.level
+            end
+        end)
+        return list
+    end
+"#;
+
+/// A corrupted-implicit choice.
+#[derive(Debug, Clone)]
+pub struct CorruptOption {
+    /// 1-based index into the deterministic list (used to apply).
+    pub index: usize,
+    pub label: String,
+    /// Mod group (the two implicits must differ in group).
+    pub group: String,
+}
+
+/// Corrupted implicit mods available for an item.
+pub fn corrupt_options(lua: &Lua, item_id: i64) -> Result<Vec<CorruptOption>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(format!(
+            r#"
+        local itemId = ...
+        {CORRUPT_LIST_LUA}
+        local build = mainObject_ref.main.modes['BUILD']
+        local item = build.itemsTab.items[itemId]
+        local out = {{}}
+        if not item or not item.affixes then
+            return out
+        end
+        for i, mod in ipairs(buildCorruptList(item)) do
+            table.insert(out, {{
+                index = i,
+                label = table.concat(mod, "/"),
+                group = mod.group or "",
+            }})
+        end
+        return out
+    "#
+        ))
+        .call(item_id)?;
+
+    let mut options = Vec::new();
+    for entry in list.sequence_values::<LuaTable>() {
+        let entry = entry?;
+        options.push(CorruptOption {
+            index: entry.get("index").unwrap_or(0),
+            label: entry.get("label").unwrap_or_default(),
+            group: entry.get("group").unwrap_or_default(),
+        });
+    }
+    Ok(options)
+}
+
+/// Corrupt an item, optionally with one or two corrupted implicits (indices
+/// from [`corrupt_options`]). Mirrors upstream's corruptItem: chosen
+/// implicits replace the item's implicit lines.
+pub fn corrupt_item(
+    lua: &Lua,
+    item_id: i64,
+    first: Option<usize>,
+    second: Option<usize>,
+) -> Result<(), mlua::Error> {
+    lua.load(format!(
+        r#"
+        local itemId, first, second = ...
+        {CORRUPT_LIST_LUA}
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if not item then
+            return
+        end
+        local newItem = new("Item", item:BuildRaw())
+        newItem.id = item.id
+        newItem.corrupted = true
+        local list = item.affixes and buildCorruptList(item) or {{}}
+        local newImplicit = {{}}
+        for _, sel in ipairs({{ first, second }}) do
+            local mod = sel and sel > 0 and list[sel]
+            if mod then
+                for _, modLine in ipairs(mod) do
+                    if mod.modTags[1] then
+                        table.insert(newImplicit,
+                            {{ line = "{{tags:" .. table.concat(mod.modTags, ",") .. "}}" .. modLine }})
+                    else
+                        table.insert(newImplicit, {{ line = modLine }})
+                    end
+                end
+            end
+        end
+        if #newImplicit > 0 then
+            wipeTable(newItem.implicitModLines)
+            for i, implicit in ipairs(newImplicit) do
+                table.insert(newItem.implicitModLines, i, implicit)
+            end
+        end
+        newItem:BuildAndParseRaw()
+        itemsTab:AddItem(newItem, true)
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#
+    ))
+    .call((item_id, first, second))
+}
+
+/// Lua snippet defining `buildImplicitLists(build, item, sourceId)`, a port
+/// of upstream's AddImplicitToDisplayItem buildMods: returns (modGroups,
+/// modList) with the same deterministic ordering.
+const IMPLICIT_LISTS_LUA: &str = r##"
+    local function buildImplicitLists(item, sourceId)
+        local modList, modGroups, groupIndexes = {}, {}, {}
+        if sourceId == "EXARCH" or sourceId == "EATER" then
+            for i, mod in pairs(item.affixes) do
+                if item:GetModSpawnWeight(mod) > 0 and sourceId:lower() == mod.type:lower() then
+                    local modLabel = table.concat(mod, "/")
+                    local group = mod.group:gsub("PinnaclePresence", ""):gsub("UniquePresence", "")
+                    if not groupIndexes[group] then
+                        table.insert(modList, {})
+                        table.insert(modGroups, {
+                            label = modLabel, mod = mod,
+                            modListIndex = #modList, defaultOrder = i,
+                        })
+                        groupIndexes[group] = #modGroups
+                    end
+                    table.insert(modList[groupIndexes[group]], {
+                        label = modLabel, mod = mod, type = sourceId:lower(),
+                        defaultOrder = i,
+                    })
+                end
+            end
+            table.sort(modGroups, function(a, b)
+                local modA, modB = a.mod, b.mod
+                for i = 1, math.max(#modA, #modB) do
+                    if not modA[i] then
+                        return true
+                    elseif not modB[i] then
+                        return false
+                    elseif modA.statOrder[i] ~= modB.statOrder[i] then
+                        return modA.statOrder[i] < modB.statOrder[i]
+                    end
+                end
+                return modA.level > modB.level
+            end)
+            for i, _ in pairs(modList) do
+                table.sort(modList[i], function(a, b)
+                    local modA, modB = a.mod, b.mod
+                    if modA.group ~= modB.group then
+                        if modA.group:match("PinnaclePresence") then
+                            return false
+                        elseif modB.group:match("PinnaclePresence") then
+                            return true
+                        elseif modA.group:match("UniquePresence") then
+                            return false
+                        else
+                            return true
+                        end
+                    end
+                    for j = 1, math.max(#modA, #modB) do
+                        if not modA[j] then
+                            return true
+                        elseif not modB[j] then
+                            return false
+                        elseif modA.statOrder[j] ~= modB.statOrder[j] then
+                            return modA.statOrder[j] < modB.statOrder[j]
+                        else
+                            local modAVal = tonumber(a.defaultOrder:match("%d+$"))
+                            local modBVal = tonumber(b.defaultOrder:match("%d+$"))
+                            return modAVal < modBVal
+                        end
+                    end
+                    return modA.level > modB.level
+                end)
+            end
+            for i, _ in pairs(modGroups) do
+                modGroups[i].label = modList[modGroups[i].modListIndex][1].label
+                    :gsub("%([%d%.]+%-[%d%.]+%)", "#"):gsub("[%d%.]+", "#")
+            end
+        elseif sourceId == "DelveImplicit" then
+            for i, mod in pairs(item.affixes) do
+                if item:GetModSpawnWeight(mod) > 0 and sourceId:lower() == mod.type:lower() then
+                    local modLabel = table.concat(mod, "/")
+                    if not groupIndexes[mod.group] then
+                        table.insert(modList, {})
+                        table.insert(modGroups, {
+                            label = modLabel, mod = mod,
+                            modListIndex = #modList, defaultOrder = i,
+                        })
+                        groupIndexes[mod.group] = #modGroups
+                    end
+                    table.insert(modList[groupIndexes[mod.group]], {
+                        label = modLabel, mod = mod, type = "custom",
+                        defaultOrder = i,
+                    })
+                end
+            end
+            for i, _ in pairs(modList) do
+                table.sort(modList[i], function(a, b)
+                    return a.defaultOrder < b.defaultOrder
+                end)
+            end
+        end
+        return modGroups, modList
+    end
+"##;
+
+/// A group of implicit mods (tiers within share a mod group).
+#[derive(Debug, Clone)]
+pub struct ImplicitGroup {
+    pub label: String,
+    /// Tier labels, in the same order used when applying.
+    pub tiers: Vec<String>,
+}
+
+/// Implicit sources available for an item, per upstream's rules.
+pub fn implicit_sources(lua: &Lua, item_id: i64) -> Result<Vec<(String, String)>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(
+            r#"
+        local itemId = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local item = build.itemsTab.items[itemId]
+        local out = {}
+        if not item then
+            return out
+        end
+        if (item.rarity ~= "UNIQUE" and item.rarity ~= "RELIC")
+           and (item.type == "Helmet" or item.type == "Body Armour"
+                or item.type == "Gloves" or item.type == "Boots") then
+            if item.cleansing then
+                table.insert(out, { label = "Searing Exarch", id = "EXARCH" })
+            end
+            if item.tangle then
+                table.insert(out, { label = "Eater of Worlds", id = "EATER" })
+            end
+        end
+        if item.type ~= "Flask" and item.type ~= "Jewel" and item.type ~= "Graft" then
+            table.insert(out, { label = "Delve", id = "DelveImplicit" })
+        end
+        table.insert(out, { label = "Custom", id = "CUSTOM" })
+        return out
+    "#,
+        )
+        .call(item_id)?;
+
+    let mut sources = Vec::new();
+    for entry in list.sequence_values::<LuaTable>() {
+        let entry = entry?;
+        sources.push((
+            entry.get("label").unwrap_or_default(),
+            entry.get("id").unwrap_or_default(),
+        ));
+    }
+    Ok(sources)
+}
+
+/// Implicit mod groups (with tiers) for a source.
+pub fn implicit_mods(
+    lua: &Lua,
+    item_id: i64,
+    source: &str,
+) -> Result<Vec<ImplicitGroup>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(format!(
+            r#"
+        local itemId, sourceId = ...
+        {IMPLICIT_LISTS_LUA}
+        local build = mainObject_ref.main.modes['BUILD']
+        local item = build.itemsTab.items[itemId]
+        local out = {{}}
+        if not item or not item.affixes then
+            return out
+        end
+        local modGroups, modList = buildImplicitLists(item, sourceId)
+        for _, group in ipairs(modGroups) do
+            local entry = {{ label = group.label, tiers = {{}} }}
+            for _, tier in ipairs(modList[group.modListIndex]) do
+                table.insert(entry.tiers, tier.label)
+            end
+            table.insert(out, entry)
+        end
+        return out
+    "#
+        ))
+        .call((item_id, source))?;
+
+    let mut groups = Vec::new();
+    for entry in list.sequence_values::<LuaTable>() {
+        let entry = entry?;
+        let tiers: LuaTable = entry.get("tiers")?;
+        groups.push(ImplicitGroup {
+            label: entry.get("label").unwrap_or_default(),
+            tiers: tiers.sequence_values::<String>().flatten().collect(),
+        });
+    }
+    Ok(groups)
+}
+
+/// Add an implicit from a source (1-based group and tier indices from
+/// [`implicit_mods`]). Eldritch implicits replace an existing implicit of
+/// the same source, like upstream.
+pub fn add_implicit(
+    lua: &Lua,
+    item_id: i64,
+    source: &str,
+    group_index: usize,
+    tier_index: usize,
+) -> Result<(), mlua::Error> {
+    lua.load(format!(
+        r#"
+        local itemId, sourceId, groupIdx, tierIdx = ...
+        {IMPLICIT_LISTS_LUA}
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if not item or not item.affixes then
+            return
+        end
+        local modGroups, modList = buildImplicitLists(item, sourceId)
+        local group = modGroups[groupIdx]
+        local listMod = group and modList[group.modListIndex][tierIdx]
+        if not listMod then
+            return
+        end
+        local newItem = new("Item", item:BuildRaw())
+        newItem.id = item.id
+        if sourceId == "EXARCH" or sourceId == "EATER" then
+            local index
+            for i, implicitMod in ipairs(newItem.implicitModLines) do
+                if implicitMod[listMod.type] then
+                    index = i
+                    break
+                end
+            end
+            if index then
+                for i, line in ipairs(listMod.mod) do
+                    newItem.implicitModLines[index + i - 1] =
+                        {{ line = line, modTags = listMod.mod.modTags, [listMod.type] = true }}
+                end
+            else
+                for _, line in ipairs(listMod.mod) do
+                    table.insert(newItem.implicitModLines,
+                        {{ line = line, modTags = listMod.mod.modTags, [listMod.type] = true }})
+                end
+            end
+        else
+            for _, line in ipairs(listMod.mod) do
+                table.insert(newItem.implicitModLines,
+                    {{ line = line, modTags = listMod.mod.modTags, [listMod.type] = true }})
+            end
+        end
+        newItem:BuildAndParseRaw()
+        itemsTab:AddItem(newItem, true)
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#
+    ))
+    .call((item_id, source, group_index, tier_index))
+}
+
+/// Add a custom implicit line.
+pub fn add_custom_implicit(lua: &Lua, item_id: i64, line: &str) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local itemId, line = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if not item then
+            return
+        end
+        local newItem = new("Item", item:BuildRaw())
+        newItem.id = item.id
+        table.insert(newItem.implicitModLines, { line = line, custom = true })
+        newItem:BuildAndParseRaw()
+        itemsTab:AddItem(newItem, true)
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call((item_id, line))
+}
+
 /// An enchantment source (labyrinth difficulty, Heist, orbs, ...).
 #[derive(Debug, Clone)]
 pub struct EnchantSource {

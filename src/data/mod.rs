@@ -16,6 +16,8 @@ pub mod loadouts;
 pub mod node_power;
 pub mod skill_sets;
 pub mod skills;
+pub mod tattoos;
+pub mod timeless;
 pub mod tree;
 pub mod tree_specs;
 pub mod tree_sprites;

@@ -146,6 +146,110 @@ pub fn extract_skills(lua: &Lua) -> Result<Vec<SocketGroup>, mlua::Error> {
     Ok(groups)
 }
 
+/// Gem list/default options (upstream SkillsTab fields; persisted with the
+/// build by upstream's save code).
+#[derive(Debug, Clone)]
+pub struct GemOptions {
+    pub sort_by_dps: bool,
+    pub sort_field: String,
+    pub default_level: String,
+    pub default_quality: i64,
+    pub show_support_types: String,
+    pub show_alt_quality: bool,
+    pub show_legacy_gems: bool,
+}
+
+/// Sort-by-DPS stat choices: (label, stat key).
+pub const GEM_SORT_FIELDS: [(&str, &str); 9] = [
+    ("Full DPS", "FullDPS"),
+    ("Combined DPS", "CombinedDPS"),
+    ("Hit DPS", "TotalDPS"),
+    ("Average Hit", "AverageDamage"),
+    ("DoT DPS", "TotalDot"),
+    ("Bleed DPS", "BleedDPS"),
+    ("Ignite DPS", "IgniteDPS"),
+    ("Poison DPS", "TotalPoisonDPS"),
+    ("Effective Hit Pool", "TotalEHP"),
+];
+
+/// Default gem level choices: (label, key).
+pub const GEM_DEFAULT_LEVELS: [(&str, &str); 5] = [
+    ("Normal Maximum", "normalMaximum"),
+    ("Corrupted Maximum", "corruptedMaximum"),
+    ("Awakened Maximum", "awakenedMaximum"),
+    ("Match Character Level", "characterLevel"),
+    ("Level 1", "levelOne"),
+];
+
+/// Support gem type filter choices: (label, key).
+pub const GEM_SUPPORT_TYPES: [(&str, &str); 3] = [
+    ("All", "ALL"),
+    ("Non-Exceptional", "NORMAL"),
+    ("Exceptional", "EXCEPTIONAL"),
+];
+
+/// Read the gem options from the skills tab.
+pub fn gem_options(lua: &Lua) -> Result<GemOptions, mlua::Error> {
+    let t: LuaTable = lua
+        .load(
+            r#"
+        local skillsTab = mainObject_ref.main.modes['BUILD'].skillsTab
+        return {
+            sortByDPS = skillsTab.sortGemsByDPS ~= false,
+            sortField = skillsTab.sortGemsByDPSField or "CombinedDPS",
+            defaultLevel = skillsTab.defaultGemLevel or "normalMaximum",
+            defaultQuality = skillsTab.defaultGemQuality or 0,
+            showSupportTypes = skillsTab.showSupportGemTypes or "ALL",
+            showAltQuality = skillsTab.showAltQualityGems == true,
+            showLegacy = skillsTab.showLegacyGems == true,
+        }
+    "#,
+        )
+        .eval()?;
+    Ok(GemOptions {
+        sort_by_dps: t.get("sortByDPS").unwrap_or(true),
+        sort_field: t
+            .get("sortField")
+            .unwrap_or_else(|_| "CombinedDPS".to_string()),
+        default_level: t
+            .get("defaultLevel")
+            .unwrap_or_else(|_| "normalMaximum".to_string()),
+        default_quality: t.get("defaultQuality").unwrap_or(0),
+        show_support_types: t
+            .get("showSupportTypes")
+            .unwrap_or_else(|_| "ALL".to_string()),
+        show_alt_quality: t.get("showAltQuality").unwrap_or(false),
+        show_legacy_gems: t.get("showLegacy").unwrap_or(false),
+    })
+}
+
+/// Write the gem options to the skills tab.
+pub fn set_gem_options(lua: &Lua, options: &GemOptions) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local sortByDPS, sortField, defaultLevel, defaultQuality, showSupportTypes, showAltQuality, showLegacy = ...
+        local skillsTab = mainObject_ref.main.modes['BUILD'].skillsTab
+        skillsTab.sortGemsByDPS = sortByDPS
+        skillsTab.sortGemsByDPSField = sortField
+        skillsTab.defaultGemLevel = defaultLevel
+        skillsTab.defaultGemQuality = defaultQuality
+        skillsTab.showSupportGemTypes = showSupportTypes
+        skillsTab.showAltQualityGems = showAltQuality
+        skillsTab.showLegacyGems = showLegacy
+        skillsTab.modFlag = true
+    "#,
+    )
+    .call((
+        options.sort_by_dps,
+        options.sort_field.as_str(),
+        options.default_level.as_str(),
+        options.default_quality,
+        options.show_support_types.as_str(),
+        options.show_alt_quality,
+        options.show_legacy_gems,
+    ))
+}
+
 /// Socket group slot choices, matching upstream's groupSlotDropList.
 pub const GROUP_SLOT_LIST: [(&str, Option<&str>); 14] = [
     ("None", None),
@@ -408,6 +512,12 @@ pub fn add_gem(
         if gem.errMsg then
             table.remove(group.gemList)
             return gem.errMsg
+        end
+        -- Apply the default gem level/quality options (upstream ProcessGemLevel)
+        if gem.gemData then
+            gem.level = skillsTab:ProcessGemLevel(gem.gemData)
+            gem.quality = skillsTab.defaultGemQuality or 0
+            skillsTab:ProcessSocketGroup(group)
         end
         skillsTab:AddUndoState()
         build.buildFlag = true

@@ -246,7 +246,12 @@ impl TreeData {
                 Err(_) => continue,
             };
 
-            let name: String = node_table.get("name").unwrap_or_default();
+            // Prefer the display name: node overrides (tattoos) set `dn` but
+            // not `name`
+            let name: String = node_table
+                .get("dn")
+                .or_else(|_| node_table.get("name"))
+                .unwrap_or_default();
             let type_str: String = node_table.get("type").unwrap_or_default();
             let node_type = parse_node_type(&type_str);
 

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use pob_egui::data::gems::{self, GemChoice};
 use pob_egui::data::skill_sets::{self, SkillSetInfo};
-use pob_egui::data::skills::{self, GemProperty, SocketGroup};
+use pob_egui::data::skills::{self, GemOptions, GemProperty, SocketGroup};
 use pob_egui::lua_bridge::LuaBridge;
 
 /// Pending name prompt in the skill set manager.
@@ -77,6 +77,9 @@ pub struct SkillsPanel {
     set_prompt: Option<SetPrompt>,
     /// Set id awaiting delete confirmation.
     confirm_delete_set: Option<i64>,
+    /// Gem list/default options (mirrors upstream SkillsTab fields).
+    options: GemOptions,
+    show_options: bool,
 }
 
 impl SkillsPanel {
@@ -84,6 +87,18 @@ impl SkillsPanel {
         let (sets, active_set) = skill_sets::list_skill_sets(lua).unwrap_or_else(|e| {
             log::error!("Failed to list skill sets: {e}");
             (Vec::new(), 1)
+        });
+        let options = skills::gem_options(lua).unwrap_or_else(|e| {
+            log::error!("Failed to read gem options: {e}");
+            GemOptions {
+                sort_by_dps: true,
+                sort_field: "CombinedDPS".to_string(),
+                default_level: "normalMaximum".to_string(),
+                default_quality: 0,
+                show_support_types: "ALL".to_string(),
+                show_alt_quality: false,
+                show_legacy_gems: false,
+            }
         });
         match skills::extract_skills(lua) {
             Ok(groups) => {
@@ -102,6 +117,8 @@ impl SkillsPanel {
                     manage_sets_open: false,
                     set_prompt: None,
                     confirm_delete_set: None,
+                    options: options.clone(),
+                    show_options: false,
                 }
             }
             Err(e) => {
@@ -120,6 +137,8 @@ impl SkillsPanel {
                     manage_sets_open: false,
                     set_prompt: None,
                     confirm_delete_set: None,
+                    options: options.clone(),
+                    show_options: false,
                 }
             }
         }
@@ -178,7 +197,115 @@ impl SkillsPanel {
                     "Sort gem suggestions by their DPS impact on the socket group \
                      (slower on first use per group)",
                 );
+            if ui
+                .selectable_label(self.show_options, "Gem options")
+                .clicked()
+            {
+                self.show_options = !self.show_options;
+            }
         });
+
+        if self.show_options {
+            let mut options_changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Sort stat:");
+                let current = skills::GEM_SORT_FIELDS
+                    .iter()
+                    .find(|(_, key)| *key == self.options.sort_field)
+                    .map(|(label, _)| *label)
+                    .unwrap_or("?");
+                egui::ComboBox::from_id_salt("gem_sort_field")
+                    .selected_text(current)
+                    .width(130.0)
+                    .show_ui(ui, |ui| {
+                        for (label, key) in skills::GEM_SORT_FIELDS {
+                            if ui
+                                .selectable_label(self.options.sort_field == key, label)
+                                .clicked()
+                                && self.options.sort_field != key
+                            {
+                                self.options.sort_field = key.to_string();
+                                options_changed = true;
+                            }
+                        }
+                    });
+                ui.label("Default level:");
+                let current = skills::GEM_DEFAULT_LEVELS
+                    .iter()
+                    .find(|(_, key)| *key == self.options.default_level)
+                    .map(|(label, _)| *label)
+                    .unwrap_or("?");
+                egui::ComboBox::from_id_salt("gem_default_level")
+                    .selected_text(current)
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for (label, key) in skills::GEM_DEFAULT_LEVELS {
+                            if ui
+                                .selectable_label(self.options.default_level == key, label)
+                                .clicked()
+                                && self.options.default_level != key
+                            {
+                                self.options.default_level = key.to_string();
+                                options_changed = true;
+                            }
+                        }
+                    });
+                ui.label("Default quality:");
+                let resp =
+                    ui.add(egui::DragValue::new(&mut self.options.default_quality).range(0..=23));
+                if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                    options_changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Supports:");
+                let current = skills::GEM_SUPPORT_TYPES
+                    .iter()
+                    .find(|(_, key)| *key == self.options.show_support_types)
+                    .map(|(label, _)| *label)
+                    .unwrap_or("?");
+                egui::ComboBox::from_id_salt("gem_support_types")
+                    .selected_text(current)
+                    .width(130.0)
+                    .show_ui(ui, |ui| {
+                        for (label, key) in skills::GEM_SUPPORT_TYPES {
+                            if ui
+                                .selectable_label(self.options.show_support_types == key, label)
+                                .clicked()
+                                && self.options.show_support_types != key
+                            {
+                                self.options.show_support_types = key.to_string();
+                                options_changed = true;
+                            }
+                        }
+                    });
+                if ui
+                    .checkbox(&mut self.options.show_alt_quality, "Show quality variants")
+                    .on_hover_text(
+                        "Include Anomalous/Divergent/Phantasmal variants in gem \
+                         suggestions",
+                    )
+                    .changed()
+                {
+                    options_changed = true;
+                }
+                if ui
+                    .checkbox(&mut self.options.show_legacy_gems, "Show legacy gems")
+                    .on_hover_text("Include legacy (removed) gems in suggestions")
+                    .changed()
+                {
+                    options_changed = true;
+                }
+            });
+            if options_changed {
+                self.options.sort_by_dps = self.suggest.sort_by_dps;
+                if let Err(e) = skills::set_gem_options(bridge.lua(), &self.options) {
+                    log::error!("Failed to set gem options: {e}");
+                }
+                // Filters affect suggestion contents
+                self.suggest.query_key = None;
+            }
+        }
 
         if self.manage_sets_open {
             self.show_set_manager(ui, &mut actions);
