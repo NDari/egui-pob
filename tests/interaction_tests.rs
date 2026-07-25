@@ -2502,3 +2502,358 @@ fn test_loadouts() {
     // Unknown names are rejected
     assert!(!loadouts::activate_loadout(lua, "Nope").expect("activate failed"));
 }
+
+// ---------------------------------------------------------------------------
+// Crafting: create item, select affixes, roll range, custom mods
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_crafting() {
+    use pob_egui::data::{crafting, items};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let types = crafting::base_type_list(lua).expect("types failed");
+    assert!(
+        types.iter().any(|t| t == "Body Armour: Armour"),
+        "type list should contain Body Armour: Armour, got {types:?}"
+    );
+    let bases = crafting::base_list(lua, "Body Armour: Armour").expect("bases failed");
+    let astral_idx = bases
+        .iter()
+        .position(|b| b.contains("Astral Plate"))
+        .expect("Astral Plate in base list");
+
+    // Craft a rare Astral Plate
+    let item_id = crafting::craft_item(
+        lua,
+        "RARE",
+        "Body Armour: Armour",
+        astral_idx + 1,
+        "Test Craft",
+    )
+    .expect("craft failed")
+    .expect("craft should return an id");
+    let list = items::extract_item_list(lua).expect("list failed");
+    assert!(
+        list.iter()
+            .any(|e| e.id == item_id && e.name.contains("Test Craft")),
+        "crafted item in build list"
+    );
+
+    // Affix slots: 3 prefixes + 3 suffixes with populated option lists
+    let info = crafting::craft_info(lua, item_id)
+        .expect("info failed")
+        .expect("crafted item has craft info");
+    assert_eq!(info.slots.len(), 6, "3 prefixes + 3 suffixes");
+    let prefix_count = info.slots.iter().filter(|s| s.is_prefix).count();
+    assert_eq!(prefix_count, 3);
+    let first = &info.slots[0];
+    assert!(
+        first.options.len() > 20,
+        "body armour prefixes should have many options, got {}",
+        first.options.len()
+    );
+    assert_eq!(first.selected, "None");
+
+    // Select a life prefix and confirm it lands on the item text
+    let life = first
+        .options
+        .iter()
+        .find(|o| o.label.contains("to maximum Life") && !o.label.contains("Mana"))
+        .expect("a life prefix option");
+    crafting::set_affix(lua, item_id, true, 1, &life.mod_id, 1.0).expect("set affix failed");
+    let raw = items::get_item_raw(lua, item_id).expect("raw failed");
+    assert!(
+        raw.contains("to maximum Life"),
+        "life affix should appear in the item: {raw}"
+    );
+    let info = crafting::craft_info(lua, item_id)
+        .expect("info failed")
+        .expect("still crafted");
+    assert_eq!(info.slots[0].selected, life.mod_id, "selection round-trips");
+    assert!((info.slots[0].range - 1.0).abs() < 0.001, "range kept");
+
+    // Clearing the slot removes the mod
+    crafting::set_affix(lua, item_id, true, 1, "None", 0.5).expect("clear failed");
+    let raw = items::get_item_raw(lua, item_id).expect("raw failed");
+    assert!(!raw.contains("to maximum Life"), "cleared: {raw}");
+
+    // Custom (bench) mod appends and survives re-crafting
+    crafting::add_custom_mod(lua, item_id, "+1 to Level of Socketed Gems", true)
+        .expect("custom failed");
+    let raw = items::get_item_raw(lua, item_id).expect("raw failed");
+    assert!(
+        raw.contains("+1 to Level of Socketed Gems"),
+        "custom mod present: {raw}"
+    );
+    if let Some(other) = info.slots[0]
+        .options
+        .iter()
+        .find(|o| o.label.contains("to maximum Mana"))
+    {
+        crafting::set_affix(lua, item_id, true, 1, &other.mod_id, 0.5).expect("set failed");
+        let raw = items::get_item_raw(lua, item_id).expect("raw failed");
+        assert!(
+            raw.contains("+1 to Level of Socketed Gems"),
+            "custom mod survives Craft(): {raw}"
+        );
+    }
+
+    // Non-crafted items have no craft info
+    let plain = list.iter().find(|e| e.id != item_id).unwrap();
+    assert!(
+        crafting::craft_info(lua, plain.id)
+            .expect("info failed")
+            .is_none(),
+        "non-crafted items are not craftable"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cluster jewel crafting and anoints
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cluster_craft_and_anoint() {
+    use pob_egui::data::{crafting, items};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Craft a large cluster jewel and pick a skill + node count
+    let bases = crafting::base_list(lua, "Jewel: Cluster").expect("bases failed");
+    let large_idx = bases
+        .iter()
+        .position(|b| b.contains("Large Cluster Jewel"))
+        .expect("large cluster base");
+    let jewel_id = crafting::craft_item(lua, "RARE", "Jewel: Cluster", large_idx + 1, "Cluster")
+        .expect("craft failed")
+        .expect("id");
+
+    let info = crafting::cluster_craft_info(lua, jewel_id)
+        .expect("info failed")
+        .expect("crafted cluster has cluster info");
+    assert!(
+        info.skills.len() > 10,
+        "large cluster should offer many skills, got {}",
+        info.skills.len()
+    );
+    assert!(info.min_nodes < info.max_nodes);
+
+    let attack_skill = info
+        .skills
+        .iter()
+        .find(|(_, name)| name.contains("Attack Damage while Dual Wielding"))
+        .expect("dual wield skill listed");
+    crafting::set_cluster_jewel(lua, jewel_id, &attack_skill.0, 8).expect("set failed");
+    let raw = items::get_item_raw(lua, jewel_id).expect("raw failed");
+    assert!(raw.contains("Adds 8 Passive Skills"), "node count: {raw}");
+    assert!(
+        raw.contains("2 Added Passive Skills are Jewel Sockets"),
+        "large sockets: {raw}"
+    );
+    assert!(
+        raw.contains("Attack Damage while Dual Wielding"),
+        "skill enchant: {raw}"
+    );
+    let info = crafting::cluster_craft_info(lua, jewel_id)
+        .expect("info failed")
+        .expect("still cluster");
+    assert_eq!(info.selected_skill, attack_skill.0);
+    assert_eq!(info.node_count, 8);
+
+    // Anoints: the notable list is populated and applying one works
+    let notables = crafting::anoint_notables(lua).expect("notables failed");
+    assert!(
+        notables.len() > 100,
+        "many anointable notables, got {}",
+        notables.len()
+    );
+    let notable = &notables[0];
+    assert!(!notable.oils.is_empty(), "notables carry oil recipes");
+
+    // Find an amulet to anoint (craft one if none present)
+    let amulet_bases = crafting::base_list(lua, "Amulet").expect("amulet bases failed");
+    let amulet_id = crafting::craft_item(lua, "RARE", "Amulet", 1, "Anoint Target")
+        .expect("craft failed")
+        .expect("id");
+    let _ = amulet_bases;
+
+    crafting::anoint_item(lua, amulet_id, Some(&notable.name), 1).expect("anoint failed");
+    let anoints = crafting::get_anoints(lua, amulet_id).expect("get failed");
+    assert_eq!(anoints, vec![notable.name.clone()]);
+    let raw = items::get_item_raw(lua, amulet_id).expect("raw failed");
+    assert!(
+        raw.contains(&format!("Allocates {}", notable.name)),
+        "anoint line present: {raw}"
+    );
+
+    // Replacing and removing
+    let other = &notables[1];
+    crafting::anoint_item(lua, amulet_id, Some(&other.name), 1).expect("re-anoint failed");
+    let anoints = crafting::get_anoints(lua, amulet_id).expect("get failed");
+    assert_eq!(anoints, vec![other.name.clone()], "anoint replaced");
+    crafting::anoint_item(lua, amulet_id, None, 1).expect("remove failed");
+    assert!(
+        crafting::get_anoints(lua, amulet_id)
+            .expect("get failed")
+            .is_empty(),
+        "anoint removed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Enchantments: catalog, apply, remove
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_enchantments() {
+    use pob_egui::data::{crafting, items};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Craft boots: boot enchants are not skill-keyed
+    let boots_id = crafting::craft_item(lua, "RARE", "Boots: Armour", 1, "Enchant Boots")
+        .expect("craft failed")
+        .expect("id");
+    let opts = crafting::enchant_options(lua, boots_id)
+        .expect("options failed")
+        .expect("boots have an enchant catalog");
+    assert!(!opts.has_skills, "boot enchants are not per-skill");
+
+    let catalog = crafting::enchant_catalog(lua, boots_id, None).expect("catalog failed");
+    assert!(!catalog.is_empty(), "boot enchant sources exist");
+    let (source, lines) = catalog
+        .iter()
+        .find(|(_, lines)| !lines.is_empty())
+        .expect("a source with lines");
+    crafting::apply_enchant(lua, boots_id, None, &source.name, 1, 1).expect("apply failed");
+    let raw = items::get_item_raw(lua, boots_id).expect("raw failed");
+    let applied_line = lines[0].split('/').next().unwrap();
+    assert!(
+        raw.contains(applied_line.trim()),
+        "enchant line '{applied_line}' should be on the item: {raw}"
+    );
+
+    crafting::remove_enchant(lua, boots_id, 1).expect("remove failed");
+    let raw = items::get_item_raw(lua, boots_id).expect("raw failed");
+    assert!(!raw.contains(applied_line.trim()), "enchant removed: {raw}");
+
+    // Helmets: skill-keyed catalog
+    let helm_id = crafting::craft_item(lua, "RARE", "Helmet: Armour", 1, "Enchant Helm")
+        .expect("craft failed")
+        .expect("id");
+    let opts = crafting::enchant_options(lua, helm_id)
+        .expect("options failed")
+        .expect("helmets have an enchant catalog");
+    assert!(opts.has_skills, "helmet enchants are per-skill");
+    assert!(
+        opts.skills.len() > 100,
+        "many skills have helmet enchants, got {}",
+        opts.skills.len()
+    );
+    let skill = &opts.skills[0];
+    let catalog = crafting::enchant_catalog(lua, helm_id, Some(skill)).expect("catalog failed");
+    assert!(
+        catalog.iter().any(|(_, lines)| !lines.is_empty()),
+        "skill '{skill}' has enchant lines"
+    );
+
+    // Non-enchantable items return None
+    let plain = items::extract_item_list(lua)
+        .expect("list failed")
+        .iter()
+        .find(|e| !e.has_enchantments)
+        .map(|e| e.id);
+    if let Some(id) = plain {
+        assert!(
+            crafting::enchant_options(lua, id)
+                .expect("options failed")
+                .is_none()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-anoint slots and anoint preview
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_anoint_slots_and_preview() {
+    use pob_egui::data::crafting;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Plain amulet: single slot
+    let amulet_id = crafting::craft_item(lua, "RARE", "Amulet", 1, "Slots Test")
+        .expect("craft failed")
+        .expect("id");
+    assert_eq!(
+        crafting::anoint_slot_count(lua, amulet_id).expect("count failed"),
+        1
+    );
+
+    // Preview reports stat differences before committing
+    let notables = crafting::anoint_notables(lua).expect("notables failed");
+    // Find a life notable that is not already allocated in the test build
+    let (notable, preview) = notables
+        .iter()
+        .filter(|n| n.stats.iter().any(|s| s.contains("maximum Life")))
+        .find_map(|n| {
+            let preview =
+                crafting::anoint_preview(lua, amulet_id, &n.name, 1).expect("preview failed");
+            preview
+                .iter()
+                .any(|l| l.contains("will give you"))
+                .then_some((n, preview))
+        })
+        .expect("an unallocated life notable with a preview");
+    // A life notable on an unallocated node should show a Life change
+    assert!(
+        preview.iter().any(|l| l.contains("Life")),
+        "life notable preview mentions Life: {preview:?}"
+    );
+
+    // Anointing the same notable then previewing it reports no change
+    crafting::anoint_item(lua, amulet_id, Some(&notable.name), 1).expect("anoint failed");
+    let preview =
+        crafting::anoint_preview(lua, amulet_id, &notable.name, 1).expect("preview failed");
+    assert!(
+        preview.iter().any(|l| l.contains("already anointed")),
+        "duplicate anoint detected: {preview:?}"
+    );
+
+    // Stranglegasp-style flag opens further slots as previous ones fill
+    let stranglegasp =
+        "Rarity: UNIQUE\nStranglegasp\nOnyx Amulet\nCan have 3 additional Enchantment Modifiers";
+    let err = pob_egui::data::items::add_item_from_raw(lua, stranglegasp).expect("add failed");
+    assert!(err.is_none(), "stranglegasp should parse: {err:?}");
+    let sg_id = pob_egui::data::items::extract_item_list(lua)
+        .expect("list failed")
+        .iter()
+        .find(|e| e.name.contains("Stranglegasp"))
+        .expect("stranglegasp in list")
+        .id;
+    assert_eq!(
+        crafting::anoint_slot_count(lua, sg_id).expect("count failed"),
+        1,
+        "empty stranglegasp starts with one open slot"
+    );
+    crafting::anoint_item(lua, sg_id, Some(&notables[0].name), 1).expect("anoint failed");
+    assert_eq!(
+        crafting::anoint_slot_count(lua, sg_id).expect("count failed"),
+        2,
+        "second slot opens after the first is filled"
+    );
+    crafting::anoint_item(lua, sg_id, Some(&notables[1].name), 2).expect("anoint failed");
+    let anoints = crafting::get_anoints(lua, sg_id).expect("get failed");
+    assert_eq!(anoints.len(), 2, "two anoints on stranglegasp: {anoints:?}");
+}

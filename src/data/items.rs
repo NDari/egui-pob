@@ -31,6 +31,12 @@ pub struct ItemListEntry {
     pub rarity: String,
     /// Slot label if the item is currently equipped in the active item set.
     pub equipped_slot: Option<String>,
+    /// True for crafted items (affixes editable via the crafting UI).
+    pub crafted: bool,
+    /// Base type ("Amulet", "Body Armour", ...).
+    pub item_type: String,
+    /// True when the base has an enchantment catalog (helmet/boots/gloves...).
+    pub has_enchantments: bool,
 }
 
 /// One line of an item tooltip, produced by upstream's AddItemTooltip.
@@ -263,6 +269,9 @@ pub fn extract_item_list(lua: &Lua) -> Result<Vec<ItemListEntry>, mlua::Error> {
                         name = item.name or "",
                         rarity = item.rarity or "NORMAL",
                         slot = equipped[id],
+                        crafted = item.crafted == true,
+                        itemType = item.type or "",
+                        hasEnchantments = item.enchantments ~= nil,
                     })
                 end
             end
@@ -279,6 +288,9 @@ pub fn extract_item_list(lua: &Lua) -> Result<Vec<ItemListEntry>, mlua::Error> {
             name: entry.get("name").unwrap_or_default(),
             rarity: entry.get("rarity").unwrap_or_default(),
             equipped_slot: entry.get("slot").ok(),
+            crafted: entry.get("crafted").unwrap_or(false),
+            item_type: entry.get("itemType").unwrap_or_default(),
+            has_enchantments: entry.get("hasEnchantments").unwrap_or(false),
         });
     }
     Ok(entries)

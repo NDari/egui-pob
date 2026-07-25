@@ -682,11 +682,15 @@ impl BuildView {
                         self.refresh_calc_output(bridge);
                         // Rebuild the panel but keep the DB browser and the
                         // set-manager UI (their open windows survive changes)
-                        let carried = self.items_panel.take().map(|p| (p.item_db, p.sets_ui));
+                        let carried = self
+                            .items_panel
+                            .take()
+                            .map(|p| (p.item_db, p.sets_ui, p.craft_ui));
                         let mut panel = ItemsPanel::new(bridge.lua());
-                        if let Some((db, sets_ui)) = carried {
+                        if let Some((db, sets_ui, craft_ui)) = carried {
                             panel.item_db = db;
                             panel.sets_ui = sets_ui;
+                            panel.craft_ui = craft_ui;
                         }
                         self.items_panel = Some(panel);
                         // Items can grant skills and socket jewels into the tree;

@@ -229,17 +229,17 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Catalyst type and quality
 
 ### Item Creation
-- [ ] Craft item popup (select base type, rarity)
-- [ ] Affix selection (prefix/suffix dropdowns with tier selection)
-- [ ] Affix range sliders
-- [ ] Custom modifier popup (Crafting Bench, Essence, Veiled, Beastcraft, etc.)
+- [x] Craft item popup (select base type, rarity; rare gets a name; opens the affix editor)
+- [x] Affix selection (prefix/suffix dropdowns; tiers listed flat with ilvl, eligibility via upstream GetModSpawnWeight)
+- [x] Affix range sliders (roll position within the tier, re-crafts via Item:Craft)
+- [~] Custom modifier popup (free-text custom mod with a bench-craft flag; no Essence/Veiled/Beastcraft catalogs yet)
 - [x] Paste item from clipboard (button + Ctrl+V, parsed by upstream Item:ParseRaw)
 
 ### Enchanting & Anointing
-- [ ] Apply enchantment popup (helmet/gloves/boots)
-- [ ] Apply anoint popup (notable search + oil recipe)
-- [ ] Multiple anoint slots (up to 4)
-- [ ] Stat comparison preview for anoints
+- [x] Apply enchantment popup (helmet/gloves/boots/flasks; per-skill catalog for helmets with used-skills filter, source grouping, apply/remove)
+- [x] Apply anoint popup (notable search + oil recipe; searchable list with stats and oils, apply/replace/remove)
+- [x] Multiple anoint slots (up to 4 via canHaveTwo/Three/FourEnchants; slots open as previous ones fill, per-slot removal)
+- [x] Stat comparison preview for anoints (upstream AppendAnointTooltip: repItem calc diff, already-allocated/anointed detection)
 
 ### Corruption & Influence
 - [ ] Corrupt item popup (implicit mod selection)
@@ -247,9 +247,9 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Crucible modifier popup (5-node tree selection)
 
 ### Cluster Jewels
-- [ ] Cluster jewel skill dropdown
-- [ ] Node count slider
-- [ ] Craft cluster jewel mods
+- [x] Cluster jewel skill dropdown (in the craft editor; upstream skill list minus unavailable attrs)
+- [x] Node count slider (min-max per jewel size; rebuilds enchant lines like CraftClusterJewel)
+- [x] Craft cluster jewel mods (affix editor works on cluster jewels; skill tag feeds spawn weights)
 
 ### Item Comparison
 - [x] Stat diff tooltip when hovering unequipped items (in slot dropdowns, via upstream tooltip)
@@ -433,8 +433,8 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 ## 15. Data & Infrastructure
 
 - [x] Full item text parsing (via Lua's Item:ParseRaw, per the recommendation below)
-- [ ] Modifier evaluation and spawn weight calculation
-- [ ] Item modifier list building (local mods, quality scaling, DPS calc)
+- [x] Modifier evaluation and spawn weight calculation (upstream GetModSpawnWeight/CheckIfModIsDelve drive the affix lists)
+- [x] Item modifier list building (upstream Item:BuildModList/Craft; invoked from all item mutations)
 - [ ] Gem data access (tags, requirements, stats, descriptions)
 - [ ] Build XML round-trip fidelity (load → save → load produces same build)
 - [ ] Sub-script system (LaunchSubScript for background tasks)

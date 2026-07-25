@@ -3,6 +3,9 @@
 
 use std::collections::HashMap;
 
+use pob_egui::data::crafting::{
+    self, AnointNotable, ClusterCraftInfo, CraftInfo, EnchantOptions, EnchantSource,
+};
 use pob_egui::data::item_db::{self, DbItem};
 use pob_egui::data::item_sets::{self, ItemSetInfo};
 use pob_egui::data::items::{self, EquippedItem, ItemListEntry, TooltipLine};
@@ -31,6 +34,44 @@ pub struct ItemSetsUi {
     confirm_delete: Option<i64>,
 }
 
+/// New-item craft dialog state.
+struct NewCraftDialog {
+    rarity_idx: usize,
+    type_idx: usize,
+    base_idx: usize,
+    title: String,
+    types: Vec<String>,
+    bases: Vec<String>,
+}
+
+/// Crafting UI state (survives panel rebuilds).
+#[derive(Default)]
+pub struct CraftUi {
+    new_dialog: Option<NewCraftDialog>,
+    /// Item whose affixes are being edited.
+    edit_item: Option<i64>,
+    custom_line: String,
+    custom_crafted: bool,
+    /// Item being anointed.
+    anoint_item: Option<i64>,
+    anoint_search: String,
+    anoint_selected: Option<String>,
+    /// Target anoint slot (1-based; multi-slot on Stranglegasp-likes).
+    anoint_slot: usize,
+    /// Item being enchanted.
+    enchant_item: Option<i64>,
+    enchant_skill: Option<String>,
+    enchant_all_skills: bool,
+    /// (source name, 1-based line index) selected in the enchant dialog.
+    enchant_selection: Option<(String, usize)>,
+}
+
+const CRAFT_RARITIES: [(&str, &str); 3] =
+    [("Normal", "NORMAL"), ("Magic", "MAGIC"), ("Rare", "RARE")];
+
+/// Enchant catalog cache: (item id, skill filter, sources with their lines).
+type EnchantCatalogCache = (i64, Option<String>, Vec<(EnchantSource, Vec<String>)>);
+
 /// State for the items panel.
 pub struct ItemsPanel {
     equipped: Vec<EquippedItem>,
@@ -53,6 +94,18 @@ pub struct ItemsPanel {
     use_swap: bool,
     /// Item set manager state (survives panel rebuilds).
     pub sets_ui: ItemSetsUi,
+    /// Crafting UI state (survives panel rebuilds).
+    pub craft_ui: CraftUi,
+    /// Cached affix data for the craft edit dialog (dropped on rebuild).
+    craft_info_cache: Option<(i64, CraftInfo, Option<ClusterCraftInfo>)>,
+    /// Cached anointable-notable list (loaded on first use).
+    anoint_notables_cache: Option<Vec<AnointNotable>>,
+    /// Cached anoint preview lines keyed by (item, slot, notable).
+    anoint_preview_cache: Option<(i64, usize, String, Vec<String>)>,
+    /// Cached enchant options for the enchant dialog.
+    enchant_opts_cache: Option<(i64, EnchantOptions)>,
+    /// Cached enchant catalog keyed by (item, skill).
+    enchant_catalog_cache: Option<EnchantCatalogCache>,
 }
 
 /// Raw-text item editor state. `item_id` is None when creating a new item.
@@ -105,6 +158,12 @@ impl ItemsPanel {
             active_set,
             use_swap,
             sets_ui: ItemSetsUi::default(),
+            craft_ui: CraftUi::default(),
+            craft_info_cache: None,
+            anoint_notables_cache: None,
+            anoint_preview_cache: None,
+            enchant_opts_cache: None,
+            enchant_catalog_cache: None,
         }
     }
 
@@ -167,6 +226,7 @@ impl ItemsPanel {
         }
 
         changed |= self.show_set_manager(ui, bridge);
+        changed |= self.show_craft_dialogs(ui, bridge);
 
         // Top bar: paste from clipboard, create custom item
         ui.horizontal(|ui| {
@@ -197,6 +257,25 @@ impl ItemsPanel {
                 .clicked()
             {
                 self.item_db.open = !self.item_db.open;
+            }
+            if ui
+                .button("Craft item")
+                .on_hover_text("Create a Normal, Magic, or Rare item from a base type")
+                .clicked()
+            {
+                let types = crafting::base_type_list(bridge.lua()).unwrap_or_default();
+                let bases = types
+                    .first()
+                    .map(|t| crafting::base_list(bridge.lua(), t).unwrap_or_default())
+                    .unwrap_or_default();
+                self.craft_ui.new_dialog = Some(NewCraftDialog {
+                    rarity_idx: 2,
+                    type_idx: 0,
+                    base_idx: 0,
+                    title: String::new(),
+                    types,
+                    bases,
+                });
             }
             if let Some(ref err) = self.paste_error {
                 ui.colored_label(Theme::ERROR, err);
@@ -254,6 +333,713 @@ impl ItemsPanel {
                     });
             });
         });
+
+        changed
+    }
+
+    /// Craft dialogs: the new-item popup and the affix editor.
+    /// Returns true if the build changed.
+    fn show_craft_dialogs(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
+        let mut changed = false;
+
+        // New item dialog
+        if let Some(dialog) = &mut self.craft_ui.new_dialog {
+            let mut close = false;
+            egui::Window::new("Craft Item")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Rarity:");
+                        egui::ComboBox::from_id_salt("craft_rarity")
+                            .selected_text(CRAFT_RARITIES[dialog.rarity_idx].0)
+                            .width(90.0)
+                            .show_ui(ui, |ui| {
+                                for (i, (label, _)) in CRAFT_RARITIES.iter().enumerate() {
+                                    ui.selectable_value(&mut dialog.rarity_idx, i, *label);
+                                }
+                            });
+                        if dialog.rarity_idx == 2 {
+                            ui.label("Name:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut dialog.title)
+                                    .hint_text("New Item")
+                                    .desired_width(140.0),
+                            );
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Type:");
+                        let current_type = dialog
+                            .types
+                            .get(dialog.type_idx)
+                            .map(String::as_str)
+                            .unwrap_or("?");
+                        let mut new_type = None;
+                        egui::ComboBox::from_id_salt("craft_type")
+                            .selected_text(current_type)
+                            .width(240.0)
+                            .show_ui(ui, |ui| {
+                                for (i, t) in dialog.types.iter().enumerate() {
+                                    if ui.selectable_label(i == dialog.type_idx, t).clicked()
+                                        && i != dialog.type_idx
+                                    {
+                                        new_type = Some(i);
+                                    }
+                                }
+                            });
+                        if let Some(i) = new_type {
+                            dialog.type_idx = i;
+                            dialog.base_idx = 0;
+                            dialog.bases = crafting::base_list(bridge.lua(), &dialog.types[i])
+                                .unwrap_or_default();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Base:");
+                        let current_base = dialog
+                            .bases
+                            .get(dialog.base_idx)
+                            .map(String::as_str)
+                            .unwrap_or("?");
+                        egui::ComboBox::from_id_salt("craft_base")
+                            .selected_text(current_base)
+                            .width(240.0)
+                            .show_ui(ui, |ui| {
+                                for (i, b) in dialog.bases.iter().enumerate() {
+                                    ui.selectable_value(&mut dialog.base_idx, i, b);
+                                }
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!dialog.bases.is_empty(), egui::Button::new("Create"))
+                            .clicked()
+                        {
+                            let rarity = CRAFT_RARITIES[dialog.rarity_idx].1;
+                            let type_name = dialog.types[dialog.type_idx].clone();
+                            match crafting::craft_item(
+                                bridge.lua(),
+                                rarity,
+                                &type_name,
+                                dialog.base_idx + 1,
+                                dialog.title.trim(),
+                            ) {
+                                Ok(Some(id)) => {
+                                    changed = true;
+                                    // Open the affix editor for Magic/Rare
+                                    if rarity != "NORMAL" {
+                                        self.craft_ui.edit_item = Some(id);
+                                    }
+                                    close = true;
+                                }
+                                Ok(None) => log::error!("Craft failed: base not found"),
+                                Err(e) => log::error!("Craft failed: {e}"),
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.craft_ui.new_dialog = None;
+            }
+        }
+
+        // Affix editor
+        if let Some(item_id) = self.craft_ui.edit_item {
+            // Fetch (or refetch after rebuild) the affix data
+            if self
+                .craft_info_cache
+                .as_ref()
+                .is_none_or(|(id, _, _)| *id != item_id)
+            {
+                match crafting::craft_info(bridge.lua(), item_id) {
+                    Ok(Some(info)) => {
+                        let cluster = crafting::cluster_craft_info(bridge.lua(), item_id)
+                            .ok()
+                            .flatten();
+                        self.craft_info_cache = Some((item_id, info, cluster));
+                    }
+                    Ok(None) => {
+                        // Item deleted or no longer crafted
+                        self.craft_ui.edit_item = None;
+                        self.craft_info_cache = None;
+                    }
+                    Err(e) => {
+                        log::error!("Failed to load craft info: {e}");
+                        self.craft_ui.edit_item = None;
+                    }
+                }
+            }
+        }
+        if let (Some(item_id), Some((_, info, cluster))) =
+            (self.craft_ui.edit_item, &self.craft_info_cache)
+        {
+            let item_name = self
+                .item_list
+                .iter()
+                .find(|e| e.id == item_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "Crafted Item".to_string());
+            let mut close = false;
+            // (is_prefix, index, mod_id, range) applied after the UI pass
+            let mut apply: Option<(bool, usize, String, f64)> = None;
+            let mut add_custom: Option<(String, bool)> = None;
+            let mut apply_cluster: Option<(String, i64)> = None;
+
+            egui::Window::new(format!("Craft: {item_name}"))
+                .id(egui::Id::new("craft_affix_editor"))
+                .collapsible(false)
+                .resizable(true)
+                .default_width(560.0)
+                .show(ui.ctx(), |ui| {
+                    // Cluster jewel skill + node count
+                    if let Some(cluster) = cluster {
+                        ui.horizontal(|ui| {
+                            ui.label("Skill:");
+                            let selected_name = cluster
+                                .skills
+                                .iter()
+                                .find(|(id, _)| *id == cluster.selected_skill)
+                                .map(|(_, name)| name.as_str())
+                                .unwrap_or("?");
+                            egui::ComboBox::from_id_salt("cluster_skill")
+                                .selected_text(selected_name)
+                                .width(300.0)
+                                .show_ui(ui, |ui| {
+                                    for (id, name) in &cluster.skills {
+                                        if ui
+                                            .selectable_label(*id == cluster.selected_skill, name)
+                                            .clicked()
+                                            && *id != cluster.selected_skill
+                                        {
+                                            apply_cluster = Some((id.clone(), cluster.node_count));
+                                        }
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Added passives:");
+                            let mut count = cluster.node_count;
+                            let resp = ui.add(egui::Slider::new(
+                                &mut count,
+                                cluster.min_nodes..=cluster.max_nodes,
+                            ));
+                            if (resp.drag_stopped() || (resp.changed() && !resp.dragged()))
+                                && count != cluster.node_count
+                            {
+                                apply_cluster = Some((cluster.selected_skill.clone(), count));
+                            }
+                        });
+                        ui.separator();
+                    }
+                    for slot in &info.slots {
+                        let slot_label = if slot.is_prefix {
+                            format!("Prefix {}", slot.index)
+                        } else {
+                            format!("Suffix {}", slot.index)
+                        };
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                [60.0, 18.0],
+                                egui::Label::new(
+                                    egui::RichText::new(&slot_label)
+                                        .small()
+                                        .color(Theme::TEXT_MUTED),
+                                ),
+                            );
+                            let selected_label = if slot.selected == "None" {
+                                "None".to_string()
+                            } else {
+                                slot.options
+                                    .iter()
+                                    .find(|o| o.mod_id == slot.selected)
+                                    .map(|o| truncate_label(&o.label, 60))
+                                    .unwrap_or_else(|| slot.selected.clone())
+                            };
+                            egui::ComboBox::from_id_salt(format!(
+                                "craft_affix_{}_{}",
+                                slot.is_prefix, slot.index
+                            ))
+                            .selected_text(selected_label)
+                            .width(460.0)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(slot.selected == "None", "None")
+                                    .clicked()
+                                    && slot.selected != "None"
+                                {
+                                    apply =
+                                        Some((slot.is_prefix, slot.index, "None".to_string(), 0.5));
+                                }
+                                for opt in &slot.options {
+                                    if ui
+                                        .selectable_label(opt.mod_id == slot.selected, &opt.label)
+                                        .clicked()
+                                        && opt.mod_id != slot.selected
+                                    {
+                                        apply = Some((
+                                            slot.is_prefix,
+                                            slot.index,
+                                            opt.mod_id.clone(),
+                                            slot.range,
+                                        ));
+                                    }
+                                }
+                            });
+                        });
+                        // Roll position within the tier
+                        if slot.has_range && slot.selected != "None" {
+                            ui.horizontal(|ui| {
+                                ui.add_space(64.0);
+                                let mut range = slot.range;
+                                let resp = ui.add(
+                                    egui::Slider::new(&mut range, 0.0..=1.0)
+                                        .text("roll")
+                                        .show_value(false),
+                                );
+                                if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                                    apply = Some((
+                                        slot.is_prefix,
+                                        slot.index,
+                                        slot.selected.clone(),
+                                        range,
+                                    ));
+                                }
+                            });
+                        }
+                    }
+                    ui.separator();
+
+                    // Custom modifier line
+                    ui.horizontal(|ui| {
+                        ui.label("Custom mod:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.craft_ui.custom_line)
+                                .hint_text("e.g. +1 to Level of Socketed Gems")
+                                .desired_width(260.0),
+                        );
+                        ui.checkbox(&mut self.craft_ui.custom_crafted, "Bench craft")
+                            .on_hover_text(
+                                "Mark the line as a crafted (bench) mod instead of a custom mod",
+                            );
+                        if ui
+                            .add_enabled(
+                                !self.craft_ui.custom_line.trim().is_empty(),
+                                egui::Button::new("Add"),
+                            )
+                            .clicked()
+                        {
+                            add_custom = Some((
+                                self.craft_ui.custom_line.trim().to_string(),
+                                self.craft_ui.custom_crafted,
+                            ));
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if let Some((skill_id, count)) = apply_cluster {
+                match crafting::set_cluster_jewel(bridge.lua(), item_id, &skill_id, count) {
+                    Ok(()) => {
+                        changed = true;
+                        self.craft_info_cache = None;
+                    }
+                    Err(e) => log::error!("Failed to set cluster jewel: {e}"),
+                }
+            }
+            if let Some((is_prefix, index, mod_id, range)) = apply {
+                match crafting::set_affix(bridge.lua(), item_id, is_prefix, index, &mod_id, range) {
+                    Ok(()) => {
+                        changed = true;
+                        self.craft_info_cache = None;
+                    }
+                    Err(e) => log::error!("Failed to set affix: {e}"),
+                }
+            }
+            if let Some((line, crafted)) = add_custom {
+                match crafting::add_custom_mod(bridge.lua(), item_id, &line, crafted) {
+                    Ok(()) => {
+                        changed = true;
+                        self.craft_ui.custom_line.clear();
+                        self.craft_info_cache = None;
+                    }
+                    Err(e) => log::error!("Failed to add custom mod: {e}"),
+                }
+            }
+            if close {
+                self.craft_ui.edit_item = None;
+                self.craft_info_cache = None;
+            }
+        }
+
+        // Anoint dialog
+        if let Some(item_id) = self.craft_ui.anoint_item {
+            if self.anoint_notables_cache.is_none() {
+                self.anoint_notables_cache =
+                    Some(crafting::anoint_notables(bridge.lua()).unwrap_or_else(|e| {
+                        log::error!("Failed to list anoint notables: {e}");
+                        Vec::new()
+                    }));
+            }
+            let item_name = self
+                .item_list
+                .iter()
+                .find(|e| e.id == item_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "Amulet".to_string());
+            let current = crafting::get_anoints(bridge.lua(), item_id).unwrap_or_default();
+            let slot_count = crafting::anoint_slot_count(bridge.lua(), item_id).unwrap_or(1);
+            let slot = self.craft_ui.anoint_slot.clamp(1, slot_count.max(1));
+            let notables = self.anoint_notables_cache.as_ref().unwrap();
+            let mut close = false;
+            // Some(None) = remove selected slot, Some(Some(name)) = apply
+            let mut action: Option<Option<String>> = None;
+            let mut remove_slot: Option<usize> = None;
+
+            egui::Window::new(format!("Anoint: {item_name}"))
+                .id(egui::Id::new("anoint_dialog"))
+                .collapsible(false)
+                .resizable(true)
+                .default_size([420.0, 460.0])
+                .show(ui.ctx(), |ui| {
+                    if !current.is_empty() {
+                        for (i, anoint) in current.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Anoint {}: {anoint}", i + 1));
+                                if ui.small_button("Remove").clicked() {
+                                    remove_slot = Some(i + 1);
+                                }
+                            });
+                        }
+                        ui.separator();
+                    }
+                    if slot_count > 1 {
+                        ui.horizontal(|ui| {
+                            ui.label("Anoint into slot:");
+                            for s in 1..=slot_count {
+                                if ui.selectable_label(slot == s, format!("{s}")).clicked() {
+                                    self.craft_ui.anoint_slot = s;
+                                }
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Search:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.craft_ui.anoint_search)
+                                .hint_text("notable name or stat")
+                                .desired_width(220.0),
+                        );
+                    });
+
+                    let filter = self.craft_ui.anoint_search.trim().to_lowercase();
+                    let filtered: Vec<&AnointNotable> = notables
+                        .iter()
+                        .filter(|n| {
+                            filter.is_empty()
+                                || n.name.to_lowercase().contains(&filter)
+                                || n.stats.iter().any(|s| s.to_lowercase().contains(&filter))
+                        })
+                        .collect();
+                    ui.label(format!("{} notables", filtered.len()));
+                    egui::ScrollArea::vertical()
+                        .id_salt("anoint_scroll")
+                        .max_height(240.0)
+                        .show_rows(ui, 18.0, filtered.len(), |ui, range| {
+                            for notable in &filtered[range] {
+                                let is_sel = self.craft_ui.anoint_selected.as_deref()
+                                    == Some(notable.name.as_str());
+                                if ui.selectable_label(is_sel, &notable.name).clicked() {
+                                    self.craft_ui.anoint_selected = Some(notable.name.clone());
+                                }
+                            }
+                        });
+
+                    // Selected notable details: stats + oil recipe
+                    if let Some(selected) = self
+                        .craft_ui
+                        .anoint_selected
+                        .as_deref()
+                        .and_then(|name| notables.iter().find(|n| n.name == name))
+                    {
+                        ui.separator();
+                        ui.strong(&selected.name);
+                        for stat in &selected.stats {
+                            ui.label(
+                                egui::RichText::new(stat)
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(136, 136, 255)),
+                            );
+                        }
+                        let oils: Vec<&str> = selected
+                            .oils
+                            .iter()
+                            .map(|o| o.strip_suffix("Oil").unwrap_or(o))
+                            .collect();
+                        ui.label(
+                            egui::RichText::new(format!("Oils: {}", oils.join(" + ")))
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(248, 230, 202)),
+                        );
+
+                        // Stat comparison preview (one throwaway calc pass,
+                        // cached per item/slot/notable)
+                        let key_matches =
+                            self.anoint_preview_cache
+                                .as_ref()
+                                .is_some_and(|(id, s, name, _)| {
+                                    *id == item_id && *s == slot && name == &selected.name
+                                });
+                        if !key_matches {
+                            let lines = crafting::anoint_preview(
+                                bridge.lua(),
+                                item_id,
+                                &selected.name,
+                                slot,
+                            )
+                            .unwrap_or_else(|e| {
+                                log::error!("Anoint preview failed: {e}");
+                                Vec::new()
+                            });
+                            self.anoint_preview_cache =
+                                Some((item_id, slot, selected.name.clone(), lines));
+                        }
+                        if let Some((_, _, _, lines)) = &self.anoint_preview_cache {
+                            ui.separator();
+                            for line in lines {
+                                ui.label(theme::pob_layout_job(line, 11.0, egui::Color32::WHITE));
+                            }
+                        }
+                    }
+
+                    ui.horizontal(|ui| {
+                        let can_apply = self.craft_ui.anoint_selected.is_some();
+                        if ui
+                            .add_enabled(can_apply, egui::Button::new("Anoint"))
+                            .clicked()
+                        {
+                            action = Some(self.craft_ui.anoint_selected.clone());
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if let Some(node_name) = action {
+                match crafting::anoint_item(bridge.lua(), item_id, node_name.as_deref(), slot) {
+                    Ok(()) => {
+                        changed = true;
+                        self.anoint_preview_cache = None;
+                    }
+                    Err(e) => log::error!("Failed to anoint: {e}"),
+                }
+            }
+            if let Some(s) = remove_slot {
+                match crafting::anoint_item(bridge.lua(), item_id, None, s) {
+                    Ok(()) => {
+                        changed = true;
+                        self.anoint_preview_cache = None;
+                    }
+                    Err(e) => log::error!("Failed to remove anoint: {e}"),
+                }
+            }
+            if close {
+                self.craft_ui.anoint_item = None;
+                self.anoint_preview_cache = None;
+            }
+        }
+
+        // Enchant dialog
+        if let Some(item_id) = self.craft_ui.enchant_item {
+            // Load the catalog shape once per item
+            if self
+                .enchant_opts_cache
+                .as_ref()
+                .is_none_or(|(id, _)| *id != item_id)
+            {
+                match crafting::enchant_options(bridge.lua(), item_id) {
+                    Ok(Some(opts)) => {
+                        // Default to a skill the build uses
+                        self.craft_ui.enchant_skill =
+                            opts.used_skills.first().or(opts.skills.first()).cloned();
+                        self.craft_ui.enchant_all_skills = opts.used_skills.is_empty();
+                        self.enchant_opts_cache = Some((item_id, opts));
+                    }
+                    Ok(None) => self.craft_ui.enchant_item = None,
+                    Err(e) => {
+                        log::error!("Failed to load enchant options: {e}");
+                        self.craft_ui.enchant_item = None;
+                    }
+                }
+            }
+        }
+        if let (Some(item_id), Some((_, opts))) =
+            (self.craft_ui.enchant_item, &self.enchant_opts_cache)
+        {
+            let skill_key = if opts.has_skills {
+                self.craft_ui.enchant_skill.clone()
+            } else {
+                None
+            };
+            // (Re)load the source catalog when the item/skill changes
+            if self
+                .enchant_catalog_cache
+                .as_ref()
+                .is_none_or(|(id, skill, _)| *id != item_id || *skill != skill_key)
+            {
+                let catalog =
+                    crafting::enchant_catalog(bridge.lua(), item_id, skill_key.as_deref())
+                        .unwrap_or_else(|e| {
+                            log::error!("Failed to load enchant catalog: {e}");
+                            Vec::new()
+                        });
+                self.enchant_catalog_cache = Some((item_id, skill_key.clone(), catalog));
+            }
+            let catalog = &self.enchant_catalog_cache.as_ref().unwrap().2;
+
+            let item_name = self
+                .item_list
+                .iter()
+                .find(|e| e.id == item_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "Item".to_string());
+            let mut close = false;
+            let mut apply = false;
+            let mut remove = false;
+            let mut new_skill: Option<String> = None;
+
+            egui::Window::new(format!("Enchant: {item_name}"))
+                .id(egui::Id::new("enchant_dialog"))
+                .collapsible(false)
+                .resizable(true)
+                .default_size([560.0, 420.0])
+                .show(ui.ctx(), |ui| {
+                    if opts.has_skills {
+                        ui.horizontal(|ui| {
+                            ui.label("Skill:");
+                            let skills: &[String] = if self.craft_ui.enchant_all_skills
+                                || opts.used_skills.is_empty()
+                            {
+                                &opts.skills
+                            } else {
+                                &opts.used_skills
+                            };
+                            let current = self.craft_ui.enchant_skill.as_deref().unwrap_or("-");
+                            egui::ComboBox::from_id_salt("enchant_skill")
+                                .selected_text(current)
+                                .width(220.0)
+                                .show_ui(ui, |ui| {
+                                    for skill in skills {
+                                        if ui
+                                            .selectable_label(
+                                                Some(skill.as_str())
+                                                    == self.craft_ui.enchant_skill.as_deref(),
+                                                skill,
+                                            )
+                                            .clicked()
+                                        {
+                                            new_skill = Some(skill.clone());
+                                        }
+                                    }
+                                });
+                            let mut all = self.craft_ui.enchant_all_skills;
+                            if ui
+                                .add_enabled(
+                                    !opts.used_skills.is_empty(),
+                                    egui::Checkbox::new(&mut all, "All skills"),
+                                )
+                                .on_hover_text("Show all skills, not just those used by this build")
+                                .changed()
+                            {
+                                self.craft_ui.enchant_all_skills = all;
+                            }
+                        });
+                        ui.separator();
+                    }
+
+                    egui::ScrollArea::vertical()
+                        .id_salt("enchant_scroll")
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            for (source, lines) in catalog {
+                                ui.label(
+                                    egui::RichText::new(&source.label)
+                                        .strong()
+                                        .color(Theme::TEXT_MUTED),
+                                );
+                                for (i, line) in lines.iter().enumerate() {
+                                    let key = (source.name.clone(), i + 1);
+                                    let is_sel =
+                                        self.craft_ui.enchant_selection.as_ref() == Some(&key);
+                                    if ui.selectable_label(is_sel, line).clicked() {
+                                        self.craft_ui.enchant_selection = Some(key);
+                                    }
+                                }
+                                ui.add_space(4.0);
+                            }
+                            if catalog.is_empty() {
+                                ui.colored_label(Theme::TEXT_DIM, "No enchantments available");
+                            }
+                        });
+
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                self.craft_ui.enchant_selection.is_some(),
+                                egui::Button::new("Enchant"),
+                            )
+                            .clicked()
+                        {
+                            apply = true;
+                        }
+                        if ui.button("Remove enchant").clicked() {
+                            remove = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if let Some(skill) = new_skill {
+                self.craft_ui.enchant_skill = Some(skill);
+                self.craft_ui.enchant_selection = None;
+            }
+            if apply && let Some((source, index)) = self.craft_ui.enchant_selection.clone() {
+                match crafting::apply_enchant(
+                    bridge.lua(),
+                    item_id,
+                    skill_key.as_deref(),
+                    &source,
+                    index,
+                    1,
+                ) {
+                    Ok(()) => changed = true,
+                    Err(e) => log::error!("Failed to enchant: {e}"),
+                }
+            }
+            if remove {
+                match crafting::remove_enchant(bridge.lua(), item_id, 1) {
+                    Ok(()) => changed = true,
+                    Err(e) => log::error!("Failed to remove enchant: {e}"),
+                }
+            }
+            if close {
+                self.craft_ui.enchant_item = None;
+                self.enchant_opts_cache = None;
+                self.enchant_catalog_cache = None;
+            }
+        }
 
         changed
     }
@@ -500,6 +1286,34 @@ impl ItemsPanel {
                 } else {
                     if ui.small_button("🗑").on_hover_text("Delete item").clicked() {
                         self.confirm_delete = Some(entry.id);
+                    }
+                    if entry.crafted
+                        && ui
+                            .small_button("⚒")
+                            .on_hover_text("Edit affixes (crafting)")
+                            .clicked()
+                    {
+                        self.craft_ui.edit_item = Some(entry.id);
+                    }
+                    if entry.item_type == "Amulet"
+                        && ui
+                            .small_button("Anoint")
+                            .on_hover_text("Anoint a notable passive onto this amulet")
+                            .clicked()
+                    {
+                        self.craft_ui.anoint_item = Some(entry.id);
+                        self.craft_ui.anoint_selected = None;
+                        self.craft_ui.anoint_slot = 1;
+                    }
+                    if entry.has_enchantments
+                        && ui
+                            .small_button("Enchant")
+                            .on_hover_text("Apply a labyrinth or other enchantment")
+                            .clicked()
+                    {
+                        self.craft_ui.enchant_item = Some(entry.id);
+                        self.craft_ui.enchant_skill = None;
+                        self.craft_ui.enchant_selection = None;
                     }
                     if ui
                         .small_button("✏")
@@ -1031,6 +1845,16 @@ fn hover_tooltip(
         return resp;
     }
     resp.on_hover_ui(|ui| show_tooltip_lines(ui, lines))
+}
+
+/// Shorten a long affix label for the closed combo box.
+fn truncate_label(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        label.to_string()
+    } else {
+        let truncated: String = label.chars().take(max_chars).collect();
+        format!("{truncated}…")
+    }
 }
 
 fn item_set_label(set: &ItemSetInfo) -> String {

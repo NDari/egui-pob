@@ -5,6 +5,7 @@ pub mod calcs;
 pub mod char_import;
 pub mod config;
 pub mod config_sets;
+pub mod crafting;
 pub mod display_stats;
 pub mod gems;
 pub mod item_db;
