@@ -1312,6 +1312,20 @@ fn test_tree_specs_roundtrip() {
         "URL round-trip preserves real tree node allocations"
     );
 
+    // Reorder: move the active spec (4, "Reimported") up one slot; the
+    // active index follows the moved spec
+    tree_specs::move_spec(lua, 4, -1).expect("move failed");
+    let (specs, active) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs[2].title, "Reimported", "spec moved up");
+    assert_eq!(active, 3, "active index follows the moved spec");
+    tree_specs::move_spec(lua, 3, 1).expect("move failed");
+    let (specs, active) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs[3].title, "Reimported", "spec moved back down");
+    assert_eq!(active, 4);
+    tree_specs::move_spec(lua, 4, 1).expect("move call failed");
+    let (specs, _) = tree_specs::list_specs(lua).expect("list failed");
+    assert_eq!(specs[3].title, "Reimported", "move past the end is a no-op");
+
     // Delete the copies; the last spec cannot be deleted
     tree_specs::delete_spec(lua, 4).expect("delete failed");
     tree_specs::delete_spec(lua, 3).expect("delete failed");
@@ -3242,7 +3256,12 @@ fn test_timeless_search() {
         "the tree has many jewel sockets, got {}",
         sockets.len()
     );
-    let socket = &sockets[0];
+    assert_eq!(
+        sockets[0].node_id,
+        timeless::ALL_SOCKETS_ID,
+        "first entry is the All Sockets search"
+    );
+    let socket = &sockets[1];
 
     // Lethal Pride (karui): presence-weighted notable search
     let stats = timeless::timeless_stats(lua, "karui").expect("stats failed");
@@ -3251,20 +3270,19 @@ fn test_timeless_search() {
         "karui legion stats exist, got {}",
         stats.len()
     );
-    let notable = stats
+    // Lethal Pride's searchable list is its notable additions ("Add X");
+    // it has no small replacements after upstream's ignored-mod filter
+    let mut main_stats = stats
         .iter()
-        .find(|s| s.is_notable)
-        .expect("a karui notable");
-    let addition = stats
-        .iter()
-        .find(|s| !s.is_notable)
-        .expect("a karui addition");
+        .filter(|s| s.is_notable && !s.id.starts_with("total_"));
+    let notable = main_stats.next().expect("a karui addition");
+    let notable2 = main_stats.next().expect("a second karui addition");
     let desired = vec![
         (notable.id.clone(), 10.0, 0.0),
-        (addition.id.clone(), 1.0, 0.0),
+        (notable2.id.clone(), 1.0, 0.0),
     ];
-    let results =
-        timeless::find_timeless_seeds(lua, 2, socket.node_id, &desired, 10).expect("search failed");
+    let results = timeless::find_timeless_seeds(lua, 2, socket.node_id, &desired, &[], 10)
+        .expect("search failed");
     assert!(
         !results.is_empty(),
         "some seed should match karui stats at socket {}",
@@ -3280,6 +3298,27 @@ fn test_timeless_search() {
         results.iter().all(|r| r.seed >= min && r.seed <= max),
         "karui seeds in range"
     );
+    assert!(
+        results.iter().all(|r| r.socket_id.is_none()),
+        "single-socket results carry no socket id"
+    );
+
+    // Total Strength pseudo-stat: offered at the top of the karui list and
+    // searchable (every seed scores via the small-node bonus)
+    assert_eq!(stats[0].id, "total_strength", "total pseudo-stat first");
+    let total_results = timeless::find_timeless_seeds(
+        lua,
+        2,
+        socket.node_id,
+        &[("total_strength".to_string(), 1.0, 0.0)],
+        &[],
+        5,
+    )
+    .expect("total search failed");
+    assert!(
+        !total_results.is_empty(),
+        "total strength search returns seeds"
+    );
 
     // Glorious Vanity: value-weighted search also returns results
     let gv_stats = timeless::timeless_stats(lua, "vaal").expect("stats failed");
@@ -3289,12 +3328,57 @@ fn test_timeless_search() {
         1,
         socket.node_id,
         &[(gv_first.id.clone(), 1.0, 0.5)],
+        &[],
         5,
     )
     .expect("search failed");
     // GV transforms everything; a single desired stat may or may not appear,
     // but the search must complete without error
     let _ = gv_results;
+
+    // Fallback weights: generate for a few karui stats against a defensive
+    // power stat (Total Strength raises life, so some weight is non-zero)
+    let fallback_stats = timeless::list_fallback_stats(lua).expect("fallback stats failed");
+    assert!(!fallback_stats.is_empty(), "fallback power stats exist");
+    let stat_index = fallback_stats
+        .iter()
+        .find(|s| s.label.contains("EHP"))
+        .map(|s| s.index)
+        .unwrap_or(fallback_stats[0].index);
+    let ids: Vec<String> = stats.iter().take(8).map(|s| s.id.clone()).collect();
+    let weights =
+        timeless::generate_fallback_weights(lua, &ids, stat_index).expect("generate failed");
+    assert!(
+        !weights.is_empty(),
+        "some karui stat should move the selected power stat"
+    );
+    assert!(
+        weights.iter().all(|w| w.weight1 != 0.0 || w.weight2 != 0.0),
+        "zero-weight rows are dropped"
+    );
+
+    // Fallback rows merge into the search for ids not already desired
+    let fallback: Vec<(String, f64, f64)> = weights
+        .iter()
+        .map(|w| (w.id.clone(), w.weight1, w.weight2))
+        .collect();
+    let merged_results = timeless::find_timeless_seeds(lua, 2, socket.node_id, &[], &fallback, 5)
+        .expect("fallback search failed");
+    let _ = merged_results;
+
+    // All Sockets search tags every result with the socket it was found at
+    let all_results =
+        timeless::find_timeless_seeds(lua, 2, timeless::ALL_SOCKETS_ID, &desired, &[], 10)
+            .expect("all-sockets search failed");
+    assert!(!all_results.is_empty(), "all-sockets search returns seeds");
+    assert!(
+        all_results.iter().all(|r| r.socket_id.is_some()),
+        "all-sockets results carry socket ids"
+    );
+    assert!(
+        all_results[0].weight >= results[0].weight,
+        "best all-sockets result at least matches the single-socket best"
+    );
 
     // Creating the jewel from a result adds it to the build
     let err = timeless::create_timeless_jewel(lua, 2, 0, results[0].seed).expect("create failed");
@@ -3303,5 +3387,334 @@ fn test_timeless_search() {
     assert!(
         list.iter().any(|e| e.name.contains("Lethal Pride")),
         "jewel in build"
+    );
+}
+
+#[test]
+fn test_ascendancy_click_switching() {
+    use pob_egui::data::tree::{self, NodeClickOutcome};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Find a node of a different ascendancy within the current class, and a
+    // node of an ascendancy belonging to a different class
+    let (same_class_node, same_class_ascend, cross_class_node, cross_class_name): (
+        u32,
+        String,
+        u32,
+        String,
+    ) = lua
+        .load(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            local sameNode, sameAscend, crossNode, crossClass
+            for _, ascendClass in pairs(spec.curClass.classes) do
+                if ascendClass.id and ascendClass.id ~= spec.curAscendClassBaseName then
+                    for nodeId, node in pairs(spec.nodes) do
+                        if node.ascendancyName == ascendClass.id and not node.isBloodline
+                           and node.type ~= "AscendClassStart" then
+                            sameNode, sameAscend = nodeId, ascendClass.id
+                            break
+                        end
+                    end
+                end
+                if sameNode then break end
+            end
+            for classId, classData in pairs(spec.tree.classes) do
+                if classId ~= spec.curClassId then
+                    for _, ascendClass in pairs(classData.classes) do
+                        for nodeId, node in pairs(spec.nodes) do
+                            if ascendClass.id and node.ascendancyName == ascendClass.id
+                               and not node.isBloodline
+                               and node.type ~= "AscendClassStart" then
+                                crossNode, crossClass = nodeId, classData.name
+                                break
+                            end
+                        end
+                        if crossNode then break end
+                    end
+                end
+                if crossNode then break end
+            end
+            return sameNode, sameAscend, crossNode, crossClass
+        "#,
+        )
+        .eval()
+        .expect("failed to find ascendancy nodes");
+
+    // Same-class switching happens immediately
+    let outcome = tree::click_node(lua, same_class_node).expect("click failed");
+    assert_eq!(outcome, NodeClickOutcome::Switched, "same-class switch");
+    let cur_ascend: String = lua
+        .load("return mainObject_ref.main.modes['BUILD'].spec.curAscendClassBaseName or ''")
+        .eval()
+        .expect("failed to read ascendancy");
+    assert_eq!(cur_ascend, same_class_ascend, "ascendancy switched");
+
+    // Cross-class switching with points allocated and no connection asks for
+    // confirmation
+    let outcome = tree::click_node(lua, cross_class_node).expect("click failed");
+    assert_eq!(
+        outcome,
+        NodeClickOutcome::NeedsConfirm {
+            class_name: cross_class_name.clone()
+        },
+        "cross-class switch needs confirmation"
+    );
+
+    // Confirming with reset switches the class and allocates the clicked node
+    let done = tree::confirm_class_switch(lua, cross_class_node, false).expect("confirm failed");
+    assert!(done, "confirmed switch succeeds");
+    let (class_name, node_alloc): (String, bool) = lua
+        .load(format!(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            return spec.curClass.name, spec.allocNodes[{cross_class_node}] ~= nil
+        "#
+        ))
+        .eval()
+        .expect("failed to read class");
+    assert_eq!(class_name, cross_class_name, "class switched");
+    assert!(node_alloc, "clicked ascendancy node allocated");
+
+    // Clicking an allocated node deallocates it (normal toggle path)
+    let outcome = tree::click_node(lua, cross_class_node).expect("click failed");
+    assert_eq!(outcome, NodeClickOutcome::Toggled, "dealloc is a toggle");
+    let node_alloc: bool = lua
+        .load(format!(
+            "return mainObject_ref.main.modes['BUILD'].spec.allocNodes[{cross_class_node}] ~= nil"
+        ))
+        .eval()
+        .expect("failed to read alloc");
+    assert!(!node_alloc, "node deallocated");
+}
+
+// ---------------------------------------------------------------------------
+// Items and config undo/redo (upstream UndoHandler)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_items_config_undo_redo() {
+    use pob_egui::data::{config, items};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Items: adding an item is undoable
+    let before = items::extract_item_list(lua).expect("list failed").len();
+    let raw = "Rarity: RARE\nUndo Test Ring\nRuby Ring\n+50 to maximum Life";
+    let err = items::add_item_from_raw(lua, raw).expect("add failed");
+    assert!(err.is_none(), "item should parse: {err:?}");
+    let after = items::extract_item_list(lua).expect("list failed").len();
+    assert_eq!(after, before + 1, "item added");
+
+    items::undo(lua).expect("undo failed");
+    let count = items::extract_item_list(lua).expect("list failed").len();
+    assert_eq!(count, before, "undo removes the added item");
+
+    items::redo(lua).expect("redo failed");
+    let count = items::extract_item_list(lua).expect("list failed").len();
+    assert_eq!(count, before + 1, "redo restores the added item");
+
+    // Equipping is undoable too: the ring lands in a ring slot on add (it
+    // auto-equips); unequip it, then undo brings it back
+    let equipped_slot: String = lua
+        .load(
+            r#"
+            local itemsTab = mainObject_ref.main.modes['BUILD'].itemsTab
+            for slotName, slot in pairs(itemsTab.slots) do
+                local item = itemsTab.items[slot.selItemId or 0]
+                if item and item.name == "Undo Test Ring" then
+                    return slotName
+                end
+            end
+            return ""
+        "#,
+        )
+        .eval()
+        .expect("slot scan failed");
+    if !equipped_slot.is_empty() {
+        items::equip_item(lua, &equipped_slot, 0).expect("unequip failed");
+        let empty: bool = lua
+            .load(format!(
+                r#"
+                local itemsTab = mainObject_ref.main.modes['BUILD'].itemsTab
+                return itemsTab.slots["{equipped_slot}"].selItemId == 0
+            "#
+            ))
+            .eval()
+            .expect("read failed");
+        assert!(empty, "slot emptied");
+        items::undo(lua).expect("undo failed");
+        let refilled: bool = lua
+            .load(format!(
+                r#"
+                local itemsTab = mainObject_ref.main.modes['BUILD'].itemsTab
+                local item = itemsTab.items[itemsTab.slots["{equipped_slot}"].selItemId or 0]
+                return item ~= nil and item.name == "Undo Test Ring"
+            "#
+            ))
+            .eval()
+            .expect("read failed");
+        assert!(refilled, "undo re-equips the ring");
+    }
+
+    // Config: value changes are undoable
+    let read_level = r#"
+        local configTab = mainObject_ref.main.modes['BUILD'].configTab
+        return configTab.input["enemyLevel"] or 0
+    "#;
+    let original: i64 = lua.load(read_level).eval().expect("read failed");
+    assert_ne!(original, 42, "test premise: enemyLevel is not 42");
+    config::set_config_value(lua, "enemyLevel", mlua::Value::Number(42.0)).expect("set failed");
+    let set: i64 = lua.load(read_level).eval().expect("read failed");
+    assert_eq!(set, 42, "config value set");
+
+    config::undo(lua).expect("undo failed");
+    let undone: i64 = lua.load(read_level).eval().expect("read failed");
+    assert_eq!(undone, original, "undo restores the old value");
+
+    config::redo(lua).expect("redo failed");
+    let redone: i64 = lua.load(read_level).eval().expect("read failed");
+    assert_eq!(redone, 42, "redo restores the new value");
+}
+
+#[test]
+fn test_move_item_between_slots() {
+    use pob_egui::data::items;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Add two rings and pin them to known slots
+    for raw in [
+        "Rarity: RARE\nSwap Ring A\nRuby Ring\n+50 to maximum Life",
+        "Rarity: RARE\nSwap Ring B\nTopaz Ring\n+40% to Lightning Resistance",
+    ] {
+        let err = items::add_item_from_raw(lua, raw).expect("add failed");
+        assert!(err.is_none(), "ring should parse: {err:?}");
+    }
+    // List names are "Name, BaseName"
+    let list = items::extract_item_list(lua).expect("list failed");
+    let id_a = list
+        .iter()
+        .find(|e| e.name.starts_with("Swap Ring A"))
+        .expect("A")
+        .id;
+    let id_b = list
+        .iter()
+        .find(|e| e.name.starts_with("Swap Ring B"))
+        .expect("B")
+        .id;
+    items::equip_item(lua, "Ring 1", id_a).expect("equip A failed");
+    items::equip_item(lua, "Ring 2", id_b).expect("equip B failed");
+
+    let read_slots = r#"
+        local itemsTab = mainObject_ref.main.modes['BUILD'].itemsTab
+        return itemsTab.slots["Ring 1"].selItemId, itemsTab.slots["Ring 2"].selItemId
+    "#;
+
+    // Move A from Ring 1 onto Ring 2: the rings swap
+    let moved = items::move_item_between_slots(lua, id_a, "Ring 1", "Ring 2").expect("move failed");
+    assert!(moved, "ring is valid for the other ring slot");
+    let (ring1, ring2): (i64, i64) = lua.load(read_slots).eval().expect("read failed");
+    assert_eq!(ring2, id_a, "dragged ring lands in the target slot");
+    assert_eq!(ring1, id_b, "displaced ring swaps back to the source slot");
+
+    // A ring is not valid for a weapon slot: no-op
+    let moved =
+        items::move_item_between_slots(lua, id_a, "Ring 2", "Weapon 1").expect("move failed");
+    assert!(!moved, "ring cannot move to a weapon slot");
+    let (ring1, ring2): (i64, i64) = lua.load(read_slots).eval().expect("read failed");
+    assert_eq!(
+        (ring1, ring2),
+        (id_b, id_a),
+        "slots unchanged after invalid move"
+    );
+
+    // The move is undoable as a single step
+    items::undo(lua).expect("undo failed");
+    let (ring1, ring2): (i64, i64) = lua.load(read_slots).eval().expect("read failed");
+    assert_eq!(
+        (ring1, ring2),
+        (id_a, id_b),
+        "undo restores the pre-swap slots"
+    );
+}
+
+#[test]
+fn test_skills_drag_reorder() {
+    use pob_egui::data::skills;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    assert!(groups.len() >= 2, "test build has several socket groups");
+    let main_before: usize = lua
+        .load("return mainObject_ref.main.modes['BUILD'].mainSocketGroup")
+        .eval()
+        .expect("read failed");
+
+    // Move the first group to position 2: the two swap, and the main group
+    // index follows the move (upstream OnOrderChange)
+    let first_title = groups[0].gems.first().map(|g| g.name.clone());
+    skills::move_socket_group(lua, 1, 2).expect("move failed");
+    let moved = skills::extract_skills(lua).expect("skills failed");
+    assert_eq!(
+        moved[1].gems.first().map(|g| g.name.clone()),
+        first_title,
+        "group moved to position 2"
+    );
+    let main_after: usize = lua
+        .load("return mainObject_ref.main.modes['BUILD'].mainSocketGroup")
+        .eval()
+        .expect("read failed");
+    let expected = match main_before {
+        1 => 2,
+        2 => 1,
+        other => other,
+    };
+    assert_eq!(main_after, expected, "main socket group follows the move");
+
+    // Move it back
+    skills::move_socket_group(lua, 2, 1).expect("move failed");
+    let restored = skills::extract_skills(lua).expect("skills failed");
+    assert_eq!(
+        restored[0].gems.first().map(|g| g.name.clone()),
+        first_title,
+        "group moved back"
+    );
+
+    // Gem reorder within a group
+    let group = restored
+        .iter()
+        .find(|g| g.gems.len() >= 2)
+        .expect("a group with two gems");
+    let names: Vec<String> = group.gems.iter().map(|g| g.name.clone()).collect();
+    skills::move_gem(lua, group.index, 1, 2).expect("move gem failed");
+    let after = skills::extract_skills(lua).expect("skills failed");
+    let group_after = after
+        .iter()
+        .find(|g| g.index == group.index)
+        .expect("group still there");
+    assert_eq!(group_after.gems[0].name, names[1], "gems swapped");
+    assert_eq!(group_after.gems[1].name, names[0], "gems swapped");
+
+    // Out-of-range moves are no-ops
+    skills::move_gem(lua, group.index, 1, 99).expect("call failed");
+    let unchanged = skills::extract_skills(lua).expect("skills failed");
+    let group_unchanged = unchanged
+        .iter()
+        .find(|g| g.index == group.index)
+        .expect("group still there");
+    assert_eq!(
+        group_unchanged.gems[0].name, names[1],
+        "invalid move changes nothing"
     );
 }

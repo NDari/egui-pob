@@ -330,6 +330,33 @@ pub fn set_config_value(lua: &Lua, var: &str, value: LuaValue) -> Result<(), mlu
     Ok(())
 }
 
+/// Undo the last config change (Ctrl+Z), via upstream's UndoHandler on
+/// ConfigTab. RestoreUndoState rebuilds the mod list itself.
+pub fn undo(lua: &Lua) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.configTab:Undo()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .exec()
+}
+
+/// Redo the last undone config change (Ctrl+Y).
+pub fn redo(lua: &Lua) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.configTab:Redo()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .exec()
+}
+
 /// Reset every config option in the active config set to its default value,
 /// mirroring upstream's `ConfigTab:NewConfigSet` default initialization.
 pub fn reset_config_to_defaults(lua: &Lua) -> Result<(), mlua::Error> {

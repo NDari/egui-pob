@@ -81,7 +81,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Right-click context menu (jump to items for jewel sockets, modify node for tattoos)
 - [x] Mastery popup (select mastery effect on click; right-click allocated mastery to change effect)
 - [ ] Shift+drag path tracing mode
-- [ ] Ascendancy node click → class/ascendancy switching with confirmation
+- [x] Ascendancy node click → class/ascendancy switching with confirmation (same-class and bloodline switches immediate; cross-class switches confirm with Continue/Connect Path/Cancel like upstream; clicks route through upstream's path-gated allocation)
 
 ### Search
 - [x] Tree search bar (text search across node names, stats, and type)
@@ -115,7 +115,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 ### Tree Specs
 - [x] Multiple tree specs per build (dropdown in tree toolbar)
-- [~] Spec management popup (create, copy, delete, rename done; reorder pending)
+- [x] Spec management popup (create, copy, delete, rename, reorder via up/down buttons; active index follows the moved spec like upstream)
 - [x] Import tree from URL (PoE official, PoePlanner; poeurl shortlinks expanded via HTTP)
 - [x] Export tree as URL
 - [x] Copy tree URL to clipboard
@@ -139,10 +139,10 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Find Timeless Jewel dialog (seed search over upstream readLUT; creates the jewel from a result)
 - [x] Jewel type selection (6 types)
 - [x] Conqueror variant selection
-- [~] Socket selection (specific socket; "All Sockets" multi-search not implemented)
-- [ ] Devotion modifier selection (Militant Faith devotion totals not modelled)
+- [x] Socket selection (specific socket or "All Sockets" multi-search; results tagged with the socket found at)
+- [x] Devotion modifier selection (Total Strength/Dexterity/Devotion pseudo-stats with upstream's small-node bonus formulas; the upstream devotion-variant dropdowns only feed trade URLs, which we don't have)
 - [x] Node search and weighting system (weights; GV secondary-stat weight)
-- [ ] Fallback weight mode
+- [x] Fallback weight mode (power-stat dropdown + Generate: one calc pass per legion stat via GetMiscCalculator; merged into the search below explicit weights)
 
 ### Undo/Redo
 - [x] Ctrl+Z to undo tree changes
@@ -159,7 +159,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Create new socket group
 - [x] Delete socket group (with confirmation if gems exist; item-granted groups protected)
 - [x] Delete all socket groups (button + confirmation; item-granted groups kept)
-- [ ] Reorder socket groups (drag and drop)
+- [x] Reorder socket groups (drag handle on each group; main group and calcs skill number follow the move like upstream OnOrderChange)
 - [ ] Copy/paste socket groups (Ctrl+C/V)
 - [x] Enable/disable socket group (checkbox)
 - [x] Include/exclude from FullDPS (checkbox per group; upstream's Ctrl+Right-Click shortcut not implemented)
@@ -216,7 +216,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Unequip item from slot
 - [x] Delete item (with confirmation)
 - [x] Sort item list (upstream SortItemList: by slot, equipped first)
-- [ ] Drag items between slots
+- [x] Drag items between slots (drag handle on occupied slots; swap with the displaced item; validity via upstream IsItemValidForSlot; item list entries drag onto slots to equip)
 
 ### Item Editing
 - [x] Edit item text (raw editor popup with live validation; also creates custom items)
@@ -267,7 +267,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Weapon swap support (per-set checkbox; empty swap slots become visible/equippable while enabled)
 
 ### Undo/Redo
-- [ ] Ctrl+Z / Ctrl+Y for item changes
+- [x] Ctrl+Z / Ctrl+Y for item changes (upstream ItemsTab UndoHandler; all item mutations add undo states)
 
 ---
 
@@ -299,7 +299,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Config sets (multiple independent configs per build; dropdown in the config toolbar)
 - [x] Config set management popup (new/copy/rename/delete with confirmation)
 - [x] Reset to defaults (button + confirmation; restores upstream varList defaults)
-- [ ] Undo/redo for config changes
+- [x] Undo/redo for config changes (upstream ConfigTab UndoHandler; Ctrl+Z/Y in the config tab)
 
 ---
 
@@ -398,8 +398,8 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 - [x] Ctrl+S: Save build (opens Save As when the build has no file)
 - [x] Ctrl+W: Close build (with save prompt)
-- [~] Ctrl+Z: Undo (tree done; items, config pending)
-- [~] Ctrl+Y: Redo (tree done; items, config pending)
+- [x] Ctrl+Z: Undo (tree, items, config)
+- [x] Ctrl+Y: Redo (tree, items, config)
 - [~] Ctrl+F: Focus search (tree, calcs done; config pending)
 - [x] Ctrl+I: Open Import/Export
 - [x] Ctrl+1-7: Switch tabs (Tree, Skills, Items, Calcs, Config, Notes, Import/Export; no Party tab yet)
@@ -414,14 +414,14 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 ## 14. UI Polish & UX
 
-- [ ] Global undo/redo system
+- [~] Global undo/redo system (per-tab UndoHandler like upstream: tree, items, config wired; skills/notes not wired)
 - [ ] Tooltip positioning (avoid screen edges)
 - [ ] DPI scaling / HiDPI support
 - [x] Window title with build name and class ("Name (Ascendancy [+ Secondary]) - Path of Building")
 - [ ] Confirmation popups for destructive actions
 - [ ] Status bar / toast notifications
 - [ ] Loading indicators for async operations
-- [ ] Drag-and-drop support (items, gems, socket groups)
+- [x] Drag-and-drop support (items between slots and list-to-slot, gems within groups, socket group reorder)
 - [ ] Copy/paste support throughout
 - [ ] Consistent theme/styling matching upstream
 - [ ] Responsive layout for different window sizes

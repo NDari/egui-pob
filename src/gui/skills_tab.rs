@@ -33,6 +33,17 @@ struct GemSuggest {
     sort_by_dps: bool,
 }
 
+/// Drag payload: a socket group being reordered.
+struct GroupDragPayload {
+    from: usize,
+}
+
+/// Drag payload: a gem being reordered within its socket group.
+struct GemDragPayload {
+    group: usize,
+    from: usize,
+}
+
 /// A deferred mutation, collected during drawing and applied afterwards.
 enum SkillAction {
     SetMain(usize),
@@ -47,6 +58,10 @@ enum SkillAction {
     SetGem(usize, usize, GemProperty),
     AddGem(usize, String),
     RemoveGem(usize, usize),
+    /// Move a socket group to a new list position (from, to).
+    MoveGroup(usize, usize),
+    /// Move a gem within its group (group, from, to).
+    MoveGem(usize, usize, usize),
     ActivateSet(i64),
     NewSet(String),
     CopySet(i64, String),
@@ -340,17 +355,47 @@ impl SkillsPanel {
                     .label_edits
                     .entry(group.index)
                     .or_insert_with(|| group.label.clone());
-                show_socket_group(
-                    ui,
-                    bridge,
-                    group,
-                    label_buf,
-                    add_text,
-                    add_error,
-                    &mut actions,
-                    &mut self.confirm_delete,
-                    &mut self.suggest,
-                );
+                let group_index = group.index;
+                let header_resp = ui
+                    .horizontal(|ui| {
+                        // Drag handle to reorder groups; the header is the
+                        // drop target
+                        ui.dnd_drag_source(
+                            egui::Id::new(("group_drag", group_index)),
+                            GroupDragPayload { from: group_index },
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new("≡").color(super::theme::Theme::TEXT_DIM),
+                                )
+                                .on_hover_text("Drag to reorder socket groups");
+                            },
+                        );
+                        show_socket_group(
+                            ui,
+                            bridge,
+                            group,
+                            label_buf,
+                            add_text,
+                            add_error,
+                            &mut actions,
+                            &mut self.confirm_delete,
+                            &mut self.suggest,
+                        )
+                    })
+                    .inner;
+                if let Some(payload) = header_resp.dnd_hover_payload::<GroupDragPayload>()
+                    && payload.from != group_index
+                {
+                    ui.painter().rect_stroke(
+                        header_resp.rect,
+                        3.0,
+                        egui::Stroke::new(2.0_f32, super::theme::Theme::MAIN_SKILL),
+                        egui::StrokeKind::Outside,
+                    );
+                    if let Some(payload) = header_resp.dnd_release_payload::<GroupDragPayload>() {
+                        actions.push(SkillAction::MoveGroup(payload.from, group_index));
+                    }
+                }
             }
         });
 
@@ -554,6 +599,8 @@ impl SkillsPanel {
                     Err(e) => Err(e),
                 },
                 SkillAction::RemoveGem(group, gem) => skills::remove_gem(lua, group, gem),
+                SkillAction::MoveGroup(from, to) => skills::move_socket_group(lua, from, to),
+                SkillAction::MoveGem(group, from, to) => skills::move_gem(lua, group, from, to),
                 SkillAction::ActivateSet(id) => skill_sets::set_active_skill_set(lua, id),
                 SkillAction::NewSet(ref name) => skill_sets::new_skill_set(lua, name),
                 SkillAction::CopySet(id, ref name) => skill_sets::copy_skill_set(lua, id, name),
@@ -580,7 +627,7 @@ fn show_socket_group(
     actions: &mut Vec<SkillAction>,
     confirm_delete: &mut Option<usize>,
     suggest: &mut GemSuggest,
-) {
+) -> egui::Response {
     let title = socket_group_title(group);
     let header_text = if group.is_main {
         egui::RichText::new(format!("* {title}")).color(super::theme::Theme::MAIN_SKILL)
@@ -590,7 +637,7 @@ fn show_socket_group(
         egui::RichText::new(title)
     };
 
-    egui::CollapsingHeader::new(header_text)
+    let collapsing = egui::CollapsingHeader::new(header_text)
         .id_salt(format!("skill_group_{}", group.index))
         .default_open(group.is_main)
         .show(ui, |ui| {
@@ -689,7 +736,19 @@ fn show_socket_group(
             let group_index = group.index;
             for (i, gem) in group.gems.iter_mut().enumerate() {
                 let gem_index = i + 1; // Lua is 1-based
-                ui.horizontal(|ui| {
+                let row_resp = ui.horizontal(|ui| {
+                    // Drag handle to reorder gems within the group
+                    ui.dnd_drag_source(
+                        egui::Id::new(("gem_drag", group_index, gem_index)),
+                        GemDragPayload {
+                            group: group_index,
+                            from: gem_index,
+                        },
+                        |ui| {
+                            ui.label(egui::RichText::new("≡").color(super::theme::Theme::TEXT_DIM))
+                                .on_hover_text("Drag to reorder gems");
+                        },
+                    );
                     let mut enabled = gem.enabled;
                     if ui.checkbox(&mut enabled, "").changed() {
                         actions.push(SkillAction::SetGem(
@@ -786,6 +845,23 @@ fn show_socket_group(
                         actions.push(SkillAction::RemoveGem(group_index, gem_index));
                     }
                 });
+                // Drop target: another gem of the same group dropped on this
+                // row moves to this position
+                if let Some(payload) = row_resp.response.dnd_hover_payload::<GemDragPayload>()
+                    && payload.group == group_index
+                    && payload.from != gem_index
+                {
+                    ui.painter().rect_stroke(
+                        row_resp.response.rect,
+                        3.0,
+                        egui::Stroke::new(2.0_f32, super::theme::Theme::MAIN_SKILL),
+                        egui::StrokeKind::Outside,
+                    );
+                    if let Some(payload) = row_resp.response.dnd_release_payload::<GemDragPayload>()
+                    {
+                        actions.push(SkillAction::MoveGem(group_index, payload.from, gem_index));
+                    }
+                }
             }
 
             // Add gem row: autocomplete via upstream's GemSelectControl.
@@ -885,6 +961,7 @@ fn show_socket_group(
                 suggest.hovered = false;
             }
         });
+    collapsing.header_response
 }
 
 /// True when a DragValue edit should be committed: on drag end, or on a

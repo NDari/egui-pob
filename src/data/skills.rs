@@ -371,6 +371,67 @@ pub fn new_socket_group(lua: &Lua) -> Result<(), mlua::Error> {
     .exec()
 }
 
+/// Move a socket group to a new position in the list (1-based indices,
+/// insert-at semantics like upstream's draggable list). The main socket
+/// group and the calcs tab's skill number follow the move, porting
+/// SkillListControl:OnOrderChange.
+pub fn move_socket_group(lua: &Lua, from: usize, to: usize) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local from, to = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local skillsTab = build.skillsTab
+        local list = skillsTab.socketGroupList
+        if from == to or not list[from] or not list[to] then
+            return
+        end
+        local group = table.remove(list, from)
+        table.insert(list, to, group)
+        local function adjust(idx)
+            if idx == from then
+                return to
+            elseif idx > from and idx <= to then
+                return idx - 1
+            elseif idx < from and idx >= to then
+                return idx + 1
+            end
+            return idx
+        end
+        build.mainSocketGroup = adjust(build.mainSocketGroup)
+        local calcsInput = build.calcsTab and build.calcsTab.input
+        if calcsInput and calcsInput.skill_number then
+            calcsInput.skill_number = adjust(calcsInput.skill_number)
+        end
+        skillsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call((from, to))
+}
+
+/// Move a gem to a new position within its socket group (1-based indices,
+/// insert-at semantics).
+pub fn move_gem(lua: &Lua, group_index: usize, from: usize, to: usize) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local groupIndex, from, to = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local skillsTab = build.skillsTab
+        local group = skillsTab.socketGroupList[groupIndex]
+        if not group or from == to or not group.gemList[from] or not group.gemList[to] then
+            return
+        end
+        local gem = table.remove(group.gemList, from)
+        table.insert(group.gemList, to, gem)
+        skillsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call((group_index, from, to))
+}
+
 /// Delete a socket group by index. Item-granted groups are skipped.
 /// The main socket group index is adjusted, matching upstream's OnSelDelete.
 pub fn delete_socket_group(lua: &Lua, index: usize) -> Result<(), mlua::Error> {

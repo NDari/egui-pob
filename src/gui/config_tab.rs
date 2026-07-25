@@ -86,6 +86,29 @@ impl ConfigPanel {
             return false;
         }
 
+        // Undo/redo (Ctrl+Z / Ctrl+Y), only when no widget (e.g. the search
+        // field) has keyboard focus
+        if ui.ctx().memory(|m| m.focused().is_none()) {
+            let undo_pressed =
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
+            let redo_pressed =
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y));
+            if undo_pressed || redo_pressed {
+                let result = if undo_pressed {
+                    config::undo(bridge.lua())
+                } else {
+                    config::redo(bridge.lua())
+                };
+                match result {
+                    Ok(()) => {
+                        self.refresh_visibility(bridge.lua());
+                        changed = true;
+                    }
+                    Err(e) => log::error!("Config undo/redo failed: {e}"),
+                }
+            }
+        }
+
         // Config set selector row
         if !self.sets.is_empty() {
             ui.horizontal(|ui| {

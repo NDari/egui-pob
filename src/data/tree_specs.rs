@@ -160,6 +160,31 @@ pub fn delete_spec(lua: &Lua, index: usize) -> Result<(), mlua::Error> {
     .call(index)
 }
 
+/// Move a spec up or down in the list (1-based index, delta -1 or +1).
+/// The active spec index is re-derived from the current spec's new position,
+/// mirroring PassiveSpecListControl:OnOrderChange.
+pub fn move_spec(lua: &Lua, index: usize, delta: i64) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local index, delta = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local treeTab = build.treeTab
+        local list = treeTab.specList
+        local target = index + delta
+        if not list[index] or not list[target] then return end
+        list[index], list[target] = list[target], list[index]
+        for i, spec in ipairs(list) do
+            if spec == build.spec then
+                treeTab.activeSpec = i
+                break
+            end
+        end
+        treeTab.modFlag = true
+    "#,
+    )
+    .call((index, delta))
+}
+
 /// A selectable passive tree version.
 #[derive(Debug, Clone)]
 pub struct TreeVersion {

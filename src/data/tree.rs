@@ -679,6 +679,193 @@ pub fn toggle_node(lua: &Lua, node_id: u32) -> Result<(), mlua::Error> {
     .exec()
 }
 
+/// Outcome of a left-click on a node routed through upstream's ascendancy
+/// switching logic.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeClickOutcome {
+    /// The click toggled allocation (or did nothing); no structural change.
+    Toggled,
+    /// The click switched ascendancy, bloodline, or class; tree data and the
+    /// header dropdowns need a full refresh.
+    Switched,
+    /// A cross-class switch would reset the tree; the user must confirm
+    /// (Continue = reset, Connect Path = path to the class start first).
+    NeedsConfirm { class_name: String },
+}
+
+/// Handle a left-click on a node, porting upstream PassiveTreeView's click
+/// routing: allocated nodes deallocate; nodes of another ascendancy switch
+/// ascendancy (bloodlines switch the secondary ascendancy; same-class
+/// switches are immediate; cross-class switches happen only when the tree is
+/// empty or already connected to the target class, otherwise
+/// [`NodeClickOutcome::NeedsConfirm`] is returned); then the node is
+/// allocated if reachable.
+pub fn click_node(lua: &Lua, node_id: u32) -> Result<NodeClickOutcome, mlua::Error> {
+    let result: LuaTable = lua
+        .load(
+            r#"
+        local nodeId = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local spec = build.spec
+        local node = spec.nodes[nodeId]
+        if not node then
+            return { }
+        end
+        if node.alloc then
+            spec:DeallocNode(node)
+            spec:AddUndoState()
+            build.buildFlag = true
+            _runCallback('OnFrame')
+            return { }
+        end
+        local switched = false
+        if node.ascendancyName then
+            if node.isBloodline and spec.tree.alternate_ascendancies then
+                local isDifferentBloodline = not spec.curSecondaryAscendClass
+                    or node.ascendancyName ~= spec.curSecondaryAscendClass.id
+                if isDifferentBloodline then
+                    for bloodlineId, bloodlineData in pairs(spec.tree.alternate_ascendancies) do
+                        if bloodlineData.id == node.ascendancyName then
+                            spec:SelectSecondaryAscendClass(bloodlineId)
+                            spec:AddUndoState()
+                            build.buildFlag = true
+                            switched = true
+                            break
+                        end
+                    end
+                end
+            else
+                local isDifferentAscendancy = false
+                if spec.curAscendClassId == 0
+                   or node.ascendancyName ~= spec.curAscendClassBaseName then
+                    if not (spec.curSecondaryAscendClass
+                            and node.ascendancyName == spec.curSecondaryAscendClass.id) then
+                        isDifferentAscendancy = true
+                    end
+                end
+                if isDifferentAscendancy then
+                    -- Same-class switching is always allowed
+                    local targetAscendClassId
+                    for ascendClassId, ascendClass in pairs(spec.curClass.classes) do
+                        if ascendClass.id == node.ascendancyName then
+                            targetAscendClassId = ascendClassId
+                            break
+                        end
+                    end
+                    if targetAscendClassId then
+                        spec:SelectAscendClass(targetAscendClassId)
+                        spec:AddUndoState()
+                        build.buildFlag = true
+                        switched = true
+                    else
+                        -- Cross-class switching
+                        local targetBaseClassId, targetBaseClass
+                        for classId, classData in pairs(spec.tree.classes) do
+                            for ascendClassId, ascendClass in pairs(classData.classes) do
+                                if ascendClass.id == node.ascendancyName then
+                                    targetBaseClassId = classId
+                                    targetBaseClass = classData
+                                    targetAscendClassId = ascendClassId
+                                    break
+                                end
+                            end
+                            if targetBaseClassId then break end
+                        end
+                        if targetBaseClassId then
+                            local used = spec:CountAllocNodes()
+                            if used == 0 or spec:IsClassConnected(targetBaseClassId) then
+                                spec:SelectClass(targetBaseClassId)
+                                spec:SelectAscendClass(targetAscendClassId)
+                                local targetNode = spec.nodes[nodeId]
+                                if targetNode and not targetNode.alloc then
+                                    spec:AllocNode(targetNode)
+                                end
+                                spec:AddUndoState()
+                                build.buildFlag = true
+                                switched = true
+                            else
+                                return {
+                                    needsConfirm = true,
+                                    className = targetBaseClass.name,
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        -- Normal allocation (non-ascendancy, same ascendancy, or after a
+        -- switch); upstream only allocates reachable nodes
+        local targetNode = spec.nodes[nodeId]
+        if targetNode and targetNode.path and not targetNode.alloc then
+            spec:AllocNode(targetNode)
+            spec:AddUndoState()
+            build.buildFlag = true
+        end
+        _runCallback('OnFrame')
+        return { switched = switched }
+    "#,
+        )
+        .call(node_id)?;
+
+    if result.get::<bool>("needsConfirm").unwrap_or(false) {
+        return Ok(NodeClickOutcome::NeedsConfirm {
+            class_name: result.get("className").unwrap_or_default(),
+        });
+    }
+    if result.get::<bool>("switched").unwrap_or(false) {
+        return Ok(NodeClickOutcome::Switched);
+    }
+    Ok(NodeClickOutcome::Toggled)
+}
+
+/// Complete a confirmed cross-class switch for a clicked ascendancy node
+/// (the "Continue" / "Connect Path" choices of upstream's Class Change
+/// popup). With `connect`, the tree is first pathed to the target class
+/// start (keeping allocations); otherwise the switch resets the tree.
+/// Returns false if `connect` was requested but no connecting path exists.
+pub fn confirm_class_switch(lua: &Lua, node_id: u32, connect: bool) -> Result<bool, mlua::Error> {
+    lua.load(
+        r#"
+        local nodeId, connect = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local spec = build.spec
+        local node = spec.nodes[nodeId]
+        if not node or not node.ascendancyName then
+            return false
+        end
+        local targetBaseClassId, targetAscendClassId
+        for classId, classData in pairs(spec.tree.classes) do
+            for ascendClassId, ascendClass in pairs(classData.classes) do
+                if ascendClass.id == node.ascendancyName then
+                    targetBaseClassId = classId
+                    targetAscendClassId = ascendClassId
+                    break
+                end
+            end
+            if targetBaseClassId then break end
+        end
+        if not targetBaseClassId then
+            return false
+        end
+        if connect and not spec:ConnectToClass(targetBaseClassId) then
+            return false
+        end
+        spec:SelectClass(targetBaseClassId)
+        spec:SelectAscendClass(targetAscendClassId)
+        local targetNode = spec.nodes[nodeId]
+        if targetNode and not targetNode.alloc then
+            spec:AllocNode(targetNode)
+        end
+        spec:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+        return true
+    "#,
+    )
+    .call((node_id, connect))
+}
+
 /// Fetch the selectable mastery effects for a node. Effects already assigned
 /// to a different mastery node are excluded (matching upstream's
 /// OpenMasteryPopup). Returns None if the node has no selectable effects.

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use pob_egui::data::jewels::{self, RadiusDef, SocketInfo};
 use pob_egui::data::node_power;
 use pob_egui::data::tattoos::{self, TattooOption};
-use pob_egui::data::timeless::{self, SeedResult, TimelessSocket, TimelessStat};
+use pob_egui::data::timeless::{self, FallbackWeight, SeedResult, TimelessSocket, TimelessStat};
 use pob_egui::data::tree::{self, HoverInfo, MasteryEffectList, NodeType, TreeData};
 use pob_egui::data::tree_specs::{self, CompareDiff, SpecAllocation, SpecInfo, TreeVersion};
 use pob_egui::data::tree_sprites::TreeSpriteAtlas;
@@ -41,8 +41,20 @@ struct TimelessPopup {
     stat_filter: String,
     /// (stat id, display name, weight, secondary weight).
     desired: Vec<(String, String, f64, f64)>,
+    /// Power stats selectable for fallback weight generation.
+    fallback_stats: Vec<node_power::PowerStat>,
+    fallback_stat_idx: usize,
+    /// Generated fallback weights (used for stats not in `desired`).
+    fallback: Vec<FallbackWeight>,
     results: Vec<SeedResult>,
     searched: bool,
+}
+
+/// Pending cross-class switch (clicked an ascendancy node of another class
+/// while the tree has points and is not connected to that class).
+struct ClassSwitchPopup {
+    node_id: u32,
+    class_name: String,
 }
 
 /// A pending name prompt in the spec manager.
@@ -150,6 +162,11 @@ pub struct TreePanel {
     /// Set when the user right-clicked a jewel socket: the parent should
     /// switch to the Items tab.
     pub request_items_tab: bool,
+    /// Set when a node click switched class/ascendancy: the parent should
+    /// refresh everything (tree data, header dropdowns, calc output).
+    pub request_full_refresh: bool,
+    /// Pending cross-class switch awaiting confirmation.
+    class_switch_popup: Option<ClassSwitchPopup>,
     // Jewel radius overlays
     jewel_radii: Vec<RadiusDef>,
     jewel_sockets: Vec<SocketInfo>,
@@ -213,6 +230,8 @@ impl TreePanel {
                     export_url: None,
                     request_rebuild: false,
                     request_items_tab: false,
+                    request_full_refresh: false,
+                    class_switch_popup: None,
                     jewel_radii: Vec::new(),
                     jewel_sockets: Vec::new(),
                     tree_versions: Vec::new(),
@@ -269,6 +288,8 @@ impl TreePanel {
             export_url: None,
             request_rebuild: false,
             request_items_tab: false,
+            request_full_refresh: false,
+            class_switch_popup: None,
             jewel_radii: jewels::radius_defs(lua).unwrap_or_else(|e| {
                 log::error!("Failed to load jewel radii: {e}");
                 Vec::new()
@@ -628,6 +649,8 @@ impl TreePanel {
                 let stats =
                     timeless::timeless_stats(bridge.lua(), timeless::TIMELESS_JEWEL_TYPES[0].2)
                         .unwrap_or_default();
+                let fallback_stats =
+                    timeless::list_fallback_stats(bridge.lua()).unwrap_or_default();
                 self.timeless_popup = Some(TimelessPopup {
                     jewel_type_idx: 0,
                     conqueror_idx: 0,
@@ -636,6 +659,9 @@ impl TreePanel {
                     stats,
                     stat_filter: String::new(),
                     desired: Vec::new(),
+                    fallback_stats,
+                    fallback_stat_idx: 0,
+                    fallback: Vec::new(),
                     results: Vec::new(),
                     searched: false,
                 });
@@ -858,16 +884,91 @@ impl TreePanel {
                     Err(e) => log::error!("Failed to fetch mastery effects: {e}"),
                 }
             } else if !click.is_right {
-                if let Err(e) = tree::toggle_node(bridge.lua(), click.node_id) {
-                    log::error!("Failed to toggle node {}: {e}", click.node_id);
-                } else if let Err(e) = tree_data.refresh_allocation(bridge.lua()) {
-                    log::error!("Failed to refresh allocation: {e}");
-                } else {
-                    if is_mastery && let Err(e) = tree_data.refresh_mastery_stats(bridge.lua()) {
-                        log::error!("Failed to refresh mastery stats: {e}");
+                match tree::click_node(bridge.lua(), click.node_id) {
+                    Ok(tree::NodeClickOutcome::NeedsConfirm { class_name }) => {
+                        self.class_switch_popup = Some(ClassSwitchPopup {
+                            node_id: click.node_id,
+                            class_name,
+                        });
                     }
-                    changed = true;
+                    Ok(tree::NodeClickOutcome::Switched) => {
+                        // Class/ascendancy changed: the parent rebuilds tree
+                        // data and resyncs the header dropdowns
+                        self.request_full_refresh = true;
+                        changed = true;
+                    }
+                    Ok(tree::NodeClickOutcome::Toggled) => {
+                        if let Err(e) = tree_data.refresh_allocation(bridge.lua()) {
+                            log::error!("Failed to refresh allocation: {e}");
+                        } else {
+                            if is_mastery
+                                && let Err(e) = tree_data.refresh_mastery_stats(bridge.lua())
+                            {
+                                log::error!("Failed to refresh mastery stats: {e}");
+                            }
+                            changed = true;
+                        }
+                    }
+                    Err(e) => log::error!("Failed to handle node click {}: {e}", click.node_id),
                 }
+            }
+        }
+
+        // Cross-class switch confirmation (upstream's "Class Change" popup)
+        let pending_switch = self
+            .class_switch_popup
+            .as_ref()
+            .map(|p| (p.node_id, p.class_name.clone()));
+        if let Some((node_id, class_name)) = pending_switch {
+            let mut close = false;
+            egui::Modal::new(egui::Id::new("class_switch_popup")).show(ui.ctx(), |ui| {
+                ui.set_max_width(420.0);
+                ui.heading("Class Change");
+                ui.separator();
+                ui.label(format!(
+                    "Changing class to {class_name} will reset your passive tree.\n\
+                     This can be avoided by connecting one of the {class_name} \
+                     starting nodes to your tree."
+                ));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Continue").clicked() {
+                        match tree::confirm_class_switch(bridge.lua(), node_id, false) {
+                            Ok(true) => {
+                                self.request_full_refresh = true;
+                                changed = true;
+                            }
+                            Ok(false) => {}
+                            Err(e) => log::error!("Class switch failed: {e}"),
+                        }
+                        close = true;
+                    }
+                    if ui
+                        .button("Connect Path")
+                        .on_hover_text(
+                            "Allocate a path to the class start instead of resetting the tree",
+                        )
+                        .clicked()
+                    {
+                        match tree::confirm_class_switch(bridge.lua(), node_id, true) {
+                            Ok(true) => {
+                                self.request_full_refresh = true;
+                                changed = true;
+                            }
+                            Ok(false) => {
+                                log::warn!("No connecting path to the {class_name} start");
+                            }
+                            Err(e) => log::error!("Class switch failed: {e}"),
+                        }
+                        close = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if close {
+                self.class_switch_popup = None;
             }
         }
 
@@ -984,6 +1085,7 @@ impl TreePanel {
         let mut close = false;
         let mut new_type: Option<usize> = None;
         let mut do_search = false;
+        let mut do_generate_fallback = false;
         let mut create_seed: Option<i64> = None;
 
         egui::Window::new("Find Timeless Jewel")
@@ -1122,13 +1224,96 @@ impl TreePanel {
                 }
                 ui.separator();
 
+                // Fallback weights: auto-generated per-stat weights used for
+                // stats not explicitly listed above.
+                ui.horizontal(|ui| {
+                    ui.label("Fallback weights:");
+                    let current = popup
+                        .fallback_stats
+                        .get(popup.fallback_stat_idx)
+                        .map(|s| format!("Sort by {}", s.label))
+                        .unwrap_or_else(|| "-".to_string());
+                    egui::ComboBox::from_id_salt("timeless_fallback_stat")
+                        .selected_text(current)
+                        .width(180.0)
+                        .show_ui(ui, |ui| {
+                            for (i, stat) in popup.fallback_stats.iter().enumerate() {
+                                ui.selectable_value(
+                                    &mut popup.fallback_stat_idx,
+                                    i,
+                                    format!("Sort by {}", stat.label),
+                                );
+                            }
+                        });
+                    if ui
+                        .add_enabled(
+                            !popup.fallback_stats.is_empty(),
+                            egui::Button::new("Generate"),
+                        )
+                        .on_hover_text(
+                            "Weight every legion stat by its impact on the selected stat, \
+                             replacing old fallback weights (one calc pass per stat; \
+                             can take a few seconds)",
+                        )
+                        .clicked()
+                    {
+                        do_generate_fallback = true;
+                    }
+                    if !popup.fallback.is_empty() && ui.button("Clear").clicked() {
+                        popup.fallback.clear();
+                    }
+                });
+                if !popup.fallback.is_empty() {
+                    egui::CollapsingHeader::new(format!(
+                        "Fallback weights ({})",
+                        popup.fallback.len()
+                    ))
+                    .id_salt("timeless_fallback_list")
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("timeless_fallback_scroll")
+                            .max_height(110.0)
+                            .show(ui, |ui| {
+                                let mut remove: Option<usize> = None;
+                                for (i, row) in popup.fallback.iter_mut().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("✕").clicked() {
+                                            remove = Some(i);
+                                        }
+                                        ui.label(row.name.as_str());
+                                        ui.add(
+                                            egui::DragValue::new(&mut row.weight1)
+                                                .speed(0.1)
+                                                .prefix("w "),
+                                        );
+                                        if row.weight2 != 0.0 {
+                                            ui.add(
+                                                egui::DragValue::new(&mut row.weight2)
+                                                    .speed(0.1)
+                                                    .prefix("w2 "),
+                                            );
+                                        }
+                                    });
+                                }
+                                if let Some(i) = remove {
+                                    popup.fallback.remove(i);
+                                }
+                            });
+                    });
+                }
+                ui.separator();
+
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
-                            !popup.desired.is_empty() && !popup.sockets.is_empty(),
+                            (!popup.desired.is_empty() || !popup.fallback.is_empty())
+                                && !popup.sockets.is_empty(),
                             egui::Button::new("Search seeds"),
                         )
-                        .on_hover_text("Evaluates every seed; can take a few seconds")
+                        .on_hover_text(
+                            "Evaluates every seed; can take a few seconds \
+                             (longer for All Sockets)",
+                        )
                         .clicked()
                     {
                         do_search = true;
@@ -1160,6 +1345,17 @@ impl TreePanel {
                                             "Seed {}  (score {:.1})",
                                             result.seed, result.weight
                                         ));
+                                        if let Some(socket_id) = result.socket_id {
+                                            let label = popup
+                                                .sockets
+                                                .iter()
+                                                .find(|s| s.node_id == socket_id)
+                                                .map(|s| s.label.as_str())
+                                                .unwrap_or("?");
+                                            ui.label(
+                                                egui::RichText::new(format!("@ {label}")).small(),
+                                            );
+                                        }
                                         ui.label(
                                             egui::RichText::new(result.matches.join(", "))
                                                 .small()
@@ -1176,11 +1372,24 @@ impl TreePanel {
             popup.jewel_type_idx = i;
             popup.conqueror_idx = 0;
             popup.desired.clear();
+            popup.fallback.clear();
             popup.results.clear();
             popup.searched = false;
             popup.stats =
                 timeless::timeless_stats(bridge.lua(), timeless::TIMELESS_JEWEL_TYPES[i].2)
                     .unwrap_or_default();
+        }
+        if do_generate_fallback {
+            let ids: Vec<String> = popup.stats.iter().map(|s| s.id.clone()).collect();
+            let stat_index = popup
+                .fallback_stats
+                .get(popup.fallback_stat_idx)
+                .map(|s| s.index)
+                .unwrap_or(1);
+            match timeless::generate_fallback_weights(bridge.lua(), &ids, stat_index) {
+                Ok(weights) => popup.fallback = weights,
+                Err(e) => log::error!("Fallback weight generation failed: {e}"),
+            }
         }
         if do_search {
             let jewel_type_id = timeless::TIMELESS_JEWEL_TYPES[popup.jewel_type_idx].0;
@@ -1194,11 +1403,17 @@ impl TreePanel {
                 .iter()
                 .map(|(id, _, w1, w2)| (id.clone(), *w1, *w2))
                 .collect();
+            let fallback: Vec<(String, f64, f64)> = popup
+                .fallback
+                .iter()
+                .map(|row| (row.id.clone(), row.weight1, row.weight2))
+                .collect();
             match timeless::find_timeless_seeds(
                 bridge.lua(),
                 jewel_type_id,
                 socket_id,
                 &desired,
+                &fallback,
                 20,
             ) {
                 Ok(results) => {
@@ -1371,6 +1586,7 @@ impl TreePanel {
         // (action closures collected to run after the UI pass)
         let mut activate: Option<usize> = None;
         let mut delete: Option<usize> = None;
+        let mut move_spec: Option<(usize, i64)> = None;
 
         egui::Window::new("Manage Passive Trees")
             .collapsible(false)
@@ -1391,6 +1607,21 @@ impl TreePanel {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if self.specs.len() > 1 && ui.small_button("Delete").clicked() {
                                 delete = Some(index);
+                            }
+                            if ui
+                                .add_enabled(
+                                    index < self.specs.len(),
+                                    egui::Button::new("▼").small(),
+                                )
+                                .clicked()
+                            {
+                                move_spec = Some((index, 1));
+                            }
+                            if ui
+                                .add_enabled(index > 1, egui::Button::new("▲").small())
+                                .clicked()
+                            {
+                                move_spec = Some((index, -1));
                             }
                             if ui.small_button("Rename").clicked() {
                                 self.spec_prompt = Some(SpecPrompt {
@@ -1538,6 +1769,12 @@ impl TreePanel {
                     self.refresh_specs(bridge);
                 }
                 Err(e) => log::error!("Failed to delete spec: {e}"),
+            }
+        }
+        if let Some((index, delta)) = move_spec {
+            match tree_specs::move_spec(bridge.lua(), index, delta) {
+                Ok(()) => self.refresh_specs(bridge),
+                Err(e) => log::error!("Failed to move spec: {e}"),
             }
         }
         if close {

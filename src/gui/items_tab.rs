@@ -13,6 +13,14 @@ use pob_egui::lua_bridge::LuaBridge;
 
 use super::theme::{self, Theme};
 
+/// Drag-and-drop payload: an item dragged from the item list or from an
+/// equipped slot.
+struct ItemDragPayload {
+    item_id: i64,
+    /// Set when the drag started from an equipped slot.
+    source_slot: Option<String>,
+}
+
 /// Pending name prompt in the item set manager.
 enum SetAction {
     New,
@@ -201,6 +209,28 @@ impl ItemsPanel {
         }
 
         let mut changed = false;
+
+        // Undo/redo (Ctrl+Z / Ctrl+Y), only when no widget (e.g. a search or
+        // edit field) has keyboard focus
+        if ui.ctx().memory(|m| m.focused().is_none()) {
+            let undo_pressed =
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
+            let redo_pressed =
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y));
+            if undo_pressed || redo_pressed {
+                let result = if undo_pressed {
+                    items::undo(bridge.lua())
+                } else {
+                    items::redo(bridge.lua())
+                };
+                match result {
+                    // The parent rebuilds the panel (and the tree, since
+                    // undo can change socketed jewels)
+                    Ok(()) => changed = true,
+                    Err(e) => log::error!("Items undo/redo failed: {e}"),
+                }
+            }
+        }
 
         changed |= self.show_edit_dialog(ui, bridge);
 
@@ -1688,6 +1718,8 @@ impl ItemsPanel {
     fn show_slots(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge, label_span: f32) -> bool {
         // (slot_name, new_item_id) selected this frame
         let mut pending_equip: Option<(String, i64)> = None;
+        // (target slot, dragged item, source slot if dragged from a slot)
+        let mut pending_drop: Option<(String, i64, Option<String>)> = None;
 
         egui::Grid::new("slot_grid")
             .num_columns(2)
@@ -1714,43 +1746,84 @@ impl ItemsPanel {
                         }
                     };
 
-                    let combo_resp = egui::ComboBox::from_id_salt(&slot.slot_name)
-                        .selected_text(selected_text)
-                        .width((label_span - 120.0).max(160.0))
-                        .show_ui(ui, |ui| {
-                            let none_resp = ui.selectable_label(slot.sel_item_id == 0, "None");
-                            if none_resp.clicked() && slot.sel_item_id != 0 {
-                                pending_equip = Some((slot.slot_name.clone(), 0));
-                            }
-                            for choice in &slot.valid_items {
-                                let resp = ui.selectable_label(
-                                    choice.id == slot.sel_item_id,
-                                    egui::RichText::new(&choice.name)
-                                        .color(items::rarity_color(&choice.rarity)),
+                    ui.horizontal(|ui| {
+                        let combo_resp = egui::ComboBox::from_id_salt(&slot.slot_name)
+                            .selected_text(selected_text)
+                            .width((label_span - 120.0).max(160.0))
+                            .show_ui(ui, |ui| {
+                                let none_resp = ui.selectable_label(slot.sel_item_id == 0, "None");
+                                if none_resp.clicked() && slot.sel_item_id != 0 {
+                                    pending_equip = Some((slot.slot_name.clone(), 0));
+                                }
+                                for choice in &slot.valid_items {
+                                    let resp = ui.selectable_label(
+                                        choice.id == slot.sel_item_id,
+                                        egui::RichText::new(&choice.name)
+                                            .color(items::rarity_color(&choice.rarity)),
+                                    );
+                                    let resp = hover_tooltip(
+                                        resp,
+                                        &mut self.tooltip_cache,
+                                        bridge,
+                                        choice.id,
+                                        Some(&slot.slot_name),
+                                    );
+                                    if resp.clicked() && choice.id != slot.sel_item_id {
+                                        pending_equip = Some((slot.slot_name.clone(), choice.id));
+                                    }
+                                }
+                            });
+
+                        // Drop target: accept a dragged item that is valid
+                        // for this slot (highlight while hovering)
+                        if let Some(payload) =
+                            combo_resp.response.dnd_hover_payload::<ItemDragPayload>()
+                        {
+                            let accepts = payload.item_id > 0
+                                && payload.source_slot.as_deref() != Some(slot.slot_name.as_str())
+                                && slot.valid_items.iter().any(|c| c.id == payload.item_id);
+                            if accepts {
+                                ui.painter().rect_stroke(
+                                    combo_resp.response.rect,
+                                    3.0,
+                                    egui::Stroke::new(2.0_f32, Theme::MAIN_SKILL),
+                                    egui::StrokeKind::Outside,
                                 );
-                                let resp = hover_tooltip(
-                                    resp,
-                                    &mut self.tooltip_cache,
-                                    bridge,
-                                    choice.id,
-                                    Some(&slot.slot_name),
-                                );
-                                if resp.clicked() && choice.id != slot.sel_item_id {
-                                    pending_equip = Some((slot.slot_name.clone(), choice.id));
+                                if let Some(payload) =
+                                    combo_resp.response.dnd_release_payload::<ItemDragPayload>()
+                                {
+                                    pending_drop = Some((
+                                        slot.slot_name.clone(),
+                                        payload.item_id,
+                                        payload.source_slot.clone(),
+                                    ));
                                 }
                             }
-                        });
+                        }
 
-                    // Tooltip for the currently equipped item on hover
-                    if slot.sel_item_id > 0 {
-                        hover_tooltip(
-                            combo_resp.response,
-                            &mut self.tooltip_cache,
-                            bridge,
-                            slot.sel_item_id,
-                            Some(&slot.slot_name),
-                        );
-                    }
+                        // Tooltip for the currently equipped item on hover,
+                        // and a drag handle to move it to another slot
+                        if slot.sel_item_id > 0 {
+                            hover_tooltip(
+                                combo_resp.response,
+                                &mut self.tooltip_cache,
+                                bridge,
+                                slot.sel_item_id,
+                                Some(&slot.slot_name),
+                            );
+                            ui.dnd_drag_source(
+                                egui::Id::new(("slot_drag", &slot.slot_name)),
+                                ItemDragPayload {
+                                    item_id: slot.sel_item_id,
+                                    source_slot: Some(slot.slot_name.clone()),
+                                },
+                                |ui| {
+                                    ui.label(egui::RichText::new("≡").color(Theme::TEXT_DIM))
+                                        .on_hover_text("Drag to move to another slot");
+                                },
+                            );
+                        }
+                    });
 
                     ui.end_row();
                 }
@@ -1762,6 +1835,28 @@ impl ItemsPanel {
                 return false;
             }
             return true;
+        }
+        if let Some((target, item_id, source)) = pending_drop {
+            let result = match source {
+                // Slot-to-slot drag: swap with the displaced item
+                Some(source_slot) => {
+                    items::move_item_between_slots(bridge.lua(), item_id, &source_slot, &target)
+                        .inspect(|&moved| {
+                            if !moved {
+                                log::warn!("Item {item_id} is not valid for {target}");
+                            }
+                        })
+                }
+                // Drag from the item list: plain equip (upstream drop behavior)
+                None => items::equip_item(bridge.lua(), &target, item_id).map(|_| true),
+            };
+            match result {
+                Ok(changed) => return changed,
+                Err(e) => {
+                    log::error!("Failed to drop item {item_id} on {target}: {e}");
+                    return false;
+                }
+            }
         }
         false
     }
@@ -1814,11 +1909,24 @@ impl ItemsPanel {
                     }
                 }
 
+                // The name label doubles as a drag source (drop on a slot to
+                // equip, like upstream's list-to-slot dragging)
                 let resp = ui
-                    .label(
-                        egui::RichText::new(&entry.name).color(items::rarity_color(&entry.rarity)),
+                    .dnd_drag_source(
+                        egui::Id::new(("item_list_drag", entry.id)),
+                        ItemDragPayload {
+                            item_id: entry.id,
+                            source_slot: None,
+                        },
+                        |ui| {
+                            ui.label(
+                                egui::RichText::new(&entry.name)
+                                    .color(items::rarity_color(&entry.rarity)),
+                            )
+                        },
                     )
-                    .on_hover_text("Right-click for crafting options");
+                    .inner
+                    .on_hover_text("Right-click for crafting options; drag onto a slot to equip");
                 resp.context_menu(|ui| {
                     if entry.crafted && ui.button("Edit affixes...").clicked() {
                         self.craft_ui.edit_item = Some(entry.id);

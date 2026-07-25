@@ -317,6 +317,76 @@ pub fn equip_item(lua: &Lua, slot_name: &str, item_id: i64) -> Result<(), mlua::
     .call((slot_name, item_id))
 }
 
+/// Move an equipped item from one slot to another (drag between slots).
+/// The target's previous item goes back to the source slot when it fits
+/// there (swap; always true for paired slots like Ring 1/Ring 2), otherwise
+/// the source is emptied. Returns false (no-op) if the item is not valid for
+/// the target slot (upstream's IsItemValidForSlot).
+pub fn move_item_between_slots(
+    lua: &Lua,
+    item_id: i64,
+    source_slot: &str,
+    target_slot: &str,
+) -> Result<bool, mlua::Error> {
+    lua.load(
+        r#"
+        local itemId, sourceName, targetName = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local source = itemsTab.slots[sourceName]
+        local target = itemsTab.slots[targetName]
+        local item = itemsTab.items[itemId]
+        if not source or not target or not item then
+            return false
+        end
+        if not itemsTab:IsItemValidForSlot(item, targetName) then
+            return false
+        end
+        local displaced = target.selItemId or 0
+        target:SetSelItemId(itemId)
+        if displaced ~= 0 and displaced ~= itemId and itemsTab.items[displaced]
+           and itemsTab:IsItemValidForSlot(itemsTab.items[displaced], sourceName) then
+            source:SetSelItemId(displaced)
+        else
+            source:SetSelItemId(0)
+        end
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+        return true
+    "#,
+    )
+    .call((item_id, source_slot, target_slot))
+}
+
+/// Undo the last items change (Ctrl+Z), via upstream's UndoHandler on
+/// ItemsTab. Restores items, the order list, slot selections, and item sets.
+pub fn undo(lua: &Lua) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.itemsTab:Undo()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .exec()
+}
+
+/// Redo the last undone items change (Ctrl+Y).
+pub fn redo(lua: &Lua) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.itemsTab:Redo()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .exec()
+}
+
 /// Delete an item from the build. Upstream's DeleteItem also unequips it
 /// from all item sets and jewel sockets.
 pub fn delete_item(lua: &Lua, item_id: i64) -> Result<(), mlua::Error> {

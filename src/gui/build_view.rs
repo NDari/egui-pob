@@ -652,14 +652,20 @@ impl BuildView {
                     if let Some(ref mut tree) = self.tree_panel {
                         let changed = tree.show(ui, bridge);
                         let rebuild = tree.request_rebuild;
+                        let full_refresh = tree.request_full_refresh;
+                        tree.request_full_refresh = false;
                         if tree.request_items_tab {
                             tree.request_items_tab = false;
                             self.active_tab = BuildTab::Items;
                         }
-                        if changed {
+                        if full_refresh {
+                            // A node click switched class/ascendancy: rebuild
+                            // everything and resync the header dropdowns
+                            self.refresh_all(bridge);
+                        } else if changed {
                             self.refresh_calc_output(bridge);
                         }
-                        if rebuild {
+                        if rebuild && !full_refresh {
                             // Active spec switched: tree data, sprites, and
                             // jewel sockets may all have changed
                             self.tree_panel = Some(TreePanel::new(bridge.lua()));
