@@ -373,6 +373,29 @@ pub fn expand_shortlink(url: &str) -> anyhow::Result<String> {
     Ok(response.url().to_string())
 }
 
+/// Shrink a tree URL into a poeurl.com shortlink (upstream's "Shrink with
+/// PoEURL" button: GET shrink.php, the response body is the short code;
+/// https where upstream uses http, as poeurl's port 80 is unreliable).
+/// Blocking network call; the service itself is flaky, so failures are
+/// expected and surfaced to the user.
+pub fn shrink_tree_url(url: &str) -> anyhow::Result<String> {
+    let body = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| anyhow::anyhow!("HTTP client init failed: {e}"))?
+        .get(format!("https://poeurl.com/shrink.php?url={url}"))
+        .header("User-Agent", "PathOfBuildingCommunity (egui-pob)")
+        .send()
+        .map_err(|e| anyhow::anyhow!("PoEURL request failed: {e}"))?
+        .text()
+        .map_err(|e| anyhow::anyhow!("PoEURL response unreadable: {e}"))?;
+    let code = body.trim();
+    if code.is_empty() {
+        anyhow::bail!("PoEURL returned an empty response");
+    }
+    Ok(format!("http://poeurl.com/{code}"))
+}
+
 /// Import a tree URL (official site, PoePlanner, or pre-expanded shortlink)
 /// as a NEW spec and switch to it. Returns Some(error) on decode failure.
 /// Mirrors upstream's OpenImportPopup decode logic.

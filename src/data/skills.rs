@@ -371,6 +371,84 @@ pub fn new_socket_group(lua: &Lua) -> Result<(), mlua::Error> {
     .exec()
 }
 
+/// Serialize a socket group to upstream's clipboard text format
+/// (CopySocketGroup): optional Label/Slot lines plus one line per gem.
+/// Returns None if the group does not exist.
+pub fn copy_socket_group_text(lua: &Lua, index: usize) -> Result<Option<String>, mlua::Error> {
+    lua.load(
+        r#"
+        local index = ...
+        local group = mainObject_ref.main.modes['BUILD'].skillsTab.socketGroupList[index]
+        if not group then
+            return nil
+        end
+        local skillText = ""
+        if group.label and group.label:match("%S") then
+            skillText = skillText .. "Label: " .. group.label .. "\r\n"
+        end
+        if group.slot then
+            skillText = skillText .. "Slot: " .. group.slot .. "\r\n"
+        end
+        for _, gemInstance in ipairs(group.gemList) do
+            skillText = skillText .. string.format("%s %d/%d %s %s %d\r\n",
+                gemInstance.nameSpec, gemInstance.level, gemInstance.quality,
+                gemInstance.qualityId, gemInstance.enabled and "" or "DISABLED",
+                gemInstance.count or 1)
+        end
+        return skillText
+    "#,
+    )
+    .call(index)
+}
+
+/// Parse upstream's socket-group clipboard text and append it as a new
+/// socket group (PasteSocketGroup). Returns false when the text contains no
+/// valid gem lines (nothing is added).
+pub fn paste_socket_group_text(lua: &Lua, text: &str) -> Result<bool, mlua::Error> {
+    lua.load(
+        r#"
+        local text = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local skillsTab = build.skillsTab
+        local skillText = sanitiseText(text)
+        if not skillText then
+            return false
+        end
+        local newGroup = { label = "", enabled = true, gemList = { } }
+        local label = skillText:match("Label: (%C+)")
+        if label then
+            newGroup.label = label
+        end
+        local slot = skillText:match("Slot: (%C+)")
+        if slot then
+            newGroup.slot = slot
+        end
+        for nameSpec, level, quality, qualityId, state, count in
+            skillText:gmatch("([ %a']+) (%d+)/(%d+) (%a+%d?) ?(%a*) (%d+)") do
+            table.insert(newGroup.gemList, {
+                nameSpec = nameSpec,
+                level = tonumber(level) or 20,
+                quality = tonumber(quality) or 0,
+                qualityId = qualityId,
+                enabled = state ~= "DISABLED",
+                count = tonumber(count) or 1,
+                enableGlobal1 = true,
+                enableGlobal2 = true,
+            })
+        end
+        if #newGroup.gemList == 0 then
+            return false
+        end
+        table.insert(skillsTab.socketGroupList, newGroup)
+        skillsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+        return true
+    "#,
+    )
+    .call(text)
+}
+
 /// Move a socket group to a new position in the list (1-based indices,
 /// insert-at semantics like upstream's draggable list). The main socket
 /// group and the calcs tab's skill number follow the move, porting

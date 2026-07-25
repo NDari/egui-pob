@@ -438,37 +438,6 @@ impl TreeData {
         Ok(())
     }
 
-    /// Find nodes matching a search query, mirroring upstream's search semantics:
-    /// terms are split on whitespace (quoted phrases stay together) and a node
-    /// matches when every term matches its name, a stat line, or its type.
-    /// An `oil:` first term switches to anoint-recipe matching.
-    pub fn search_matches(&self, query: &str) -> HashSet<u32> {
-        let query = query.to_lowercase();
-        let terms = parse_search_terms(&query);
-        let mut out = HashSet::new();
-        if terms.is_empty() {
-            return out;
-        }
-        let oil_mode = terms[0] == "oil:";
-        for node in self.nodes.values() {
-            if matches!(
-                node.node_type,
-                NodeType::ClassStart | NodeType::AscendClassStart
-            ) {
-                continue;
-            }
-            let matched = if oil_mode {
-                node_matches_oil(node, &terms[1..])
-            } else {
-                node_matches(node, &terms)
-            };
-            if matched {
-                out.insert(node.id);
-            }
-        }
-        out
-    }
-
     /// Refresh allocation state from Lua (after a node toggle).
     pub fn refresh_allocation(&mut self, lua: &Lua) -> Result<(), mlua::Error> {
         let alloc_nodes: LuaTable = lua
@@ -677,6 +646,109 @@ pub fn toggle_node(lua: &Lua, node_id: u32) -> Result<(), mlua::Error> {
     "#
     ))
     .exec()
+}
+
+/// Extend a shift+drag trace path with a hovered node, porting upstream's
+/// traceMode hover logic. An empty `current` initializes the trace with the
+/// node's shortest path. Returns the new ordered trace (last element = the
+/// hovered node), or None when the hover cannot extend the trace (not linked
+/// to the trace end, unreachable, or extending past a mastery).
+pub fn extend_trace_path(
+    lua: &Lua,
+    current: &[u32],
+    hover_id: u32,
+) -> Result<Option<Vec<u32>>, mlua::Error> {
+    let trace_table = lua.create_table()?;
+    for (i, id) in current.iter().enumerate() {
+        trace_table.set(i + 1, *id)?;
+    }
+    lua.load(
+        r#"
+        local trace, hoverId = ...
+        local spec = mainObject_ref.main.modes['BUILD'].spec
+        local node = spec.nodes[hoverId]
+        if not node or not node.path then
+            return nil
+        end
+        local out = {}
+        if #trace == 0 then
+            -- Initialise the trace using this node's path (reversed: the
+            -- path is stored target-first)
+            for _, pathNode in ipairs(node.path) do
+                table.insert(out, 1, pathNode.id)
+            end
+            return out
+        end
+        for _, id in ipairs(trace) do
+            table.insert(out, id)
+        end
+        local lastId = out[#out]
+        if hoverId == lastId then
+            return out
+        end
+        local lastNode = spec.nodes[lastId]
+        local linked = false
+        for _, l in ipairs(node.linked or {}) do
+            if l == lastNode then
+                linked = true
+                break
+            end
+        end
+        if not linked then
+            return nil
+        end
+        local existing
+        for i, id in ipairs(out) do
+            if id == hoverId then
+                existing = i
+                break
+            end
+        end
+        if existing then
+            -- Already in the trace: move it to the end
+            table.remove(out, existing)
+            table.insert(out, hoverId)
+        elseif lastNode.type == "Mastery" then
+            return nil
+        else
+            table.insert(out, hoverId)
+        end
+        return out
+    "#,
+    )
+    .call((trace_table, hover_id))
+}
+
+/// Allocate a whole traced path at once (click on the trace end), porting
+/// upstream's `AllocNode(node, tracePath)`.
+pub fn alloc_trace_path(lua: &Lua, path: &[u32]) -> Result<(), mlua::Error> {
+    let path_table = lua.create_table()?;
+    for (i, id) in path.iter().enumerate() {
+        path_table.set(i + 1, *id)?;
+    }
+    lua.load(
+        r#"
+        local pathIds = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local spec = build.spec
+        local node = spec.nodes[pathIds[#pathIds] or 0]
+        if not node or node.alloc then
+            return
+        end
+        local altPath = {}
+        for _, id in ipairs(pathIds) do
+            local pathNode = spec.nodes[id]
+            if pathNode then
+                table.insert(altPath, pathNode)
+            end
+        end
+        spec:AllocNode(node, altPath)
+        spec:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call(path_table)
 }
 
 /// Outcome of a left-click on a node routed through upstream's ascendancy
@@ -976,141 +1048,119 @@ fn read_string_list(table: &LuaTable, key: &str) -> Vec<String> {
 
 /// Split a (lowercased) search query into terms: quoted phrases first, then
 /// bare whitespace-separated words.
-fn parse_search_terms(query: &str) -> Vec<String> {
-    let mut terms = Vec::new();
-    let mut rest = String::new();
-    let mut cur = String::new();
-    let mut in_quote = false;
-    for c in query.chars() {
-        if c == '"' {
-            if in_quote {
-                if !cur.is_empty() {
-                    terms.push(std::mem::take(&mut cur));
-                }
-                in_quote = false;
-            } else {
-                in_quote = true;
-            }
-        } else if in_quote {
-            cur.push(c);
-        } else {
-            rest.push(c);
-        }
-    }
-    if in_quote && !cur.is_empty() {
-        terms.push(cur);
-    }
-    terms.extend(rest.split_whitespace().map(str::to_string));
-    terms
-}
+/// Find nodes matching a search query, porting upstream's search exactly
+/// (prepSearch + DoesNodeMatchSearchParams): terms split on whitespace with
+/// quoted phrases kept together, each term treated as a Lua pattern (with
+/// upstream's `(a|b)` or-group support via `matchOrPattern`), matched
+/// against node name, stat lines, parsed mod names, and node type. An
+/// `oil:` first term switches to anoint-recipe matching. Invalid patterns
+/// simply match nothing (upstream's pcall guard).
+pub fn search_nodes(lua: &Lua, query: &str) -> Result<HashSet<u32>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(
+            r#"
+        local query = ...
+        local spec = mainObject_ref.main.modes['BUILD'].spec
+        local out = {}
 
-fn node_search_type(node_type: NodeType) -> &'static str {
-    match node_type {
-        NodeType::Normal => "normal",
-        NodeType::Notable => "notable",
-        NodeType::Keystone => "keystone",
-        NodeType::Socket => "socket",
-        NodeType::Mastery => "mastery",
-        NodeType::ClassStart | NodeType::AscendClassStart => "",
+        local function prepSearch(search)
+            search = search:lower()
+            local searchWords = {}
+            for matchstring in search:gmatch('"([^"]*)"') do
+                searchWords[#searchWords + 1] = matchstring
+                search = search:gsub('"' .. matchstring:gsub("([%(%)])", "%%%1") .. '"', "")
+            end
+            for matchstring in search:gmatch("(%S*)") do
+                if matchstring:match("%S") ~= nil then
+                    searchWords[#searchWords + 1] = matchstring
+                end
+            end
+            return searchWords
+        end
+        local searchParams = prepSearch(query)
+        if #searchParams == 0 then
+            return out
+        end
+
+        local function search(haystack, need)
+            for i = #need, 1, -1 do
+                if haystack:matchOrPattern(need[i]) then
+                    table.remove(need, i)
+                end
+            end
+            return need
+        end
+
+        local function nodeMatches(node)
+            if node.type == "ClassStart"
+               or (node.type == "Mastery" and not node.masteryEffects) then
+                return false
+            end
+            local needMatches = {}
+            for i, v in ipairs(searchParams) do
+                needMatches[i] = v
+            end
+            local ok
+
+            -- Check recipes
+            if needMatches[1] == "oil:" then
+                if node.recipe then
+                    for _, recipeName in ipairs(node.recipe) do
+                        ok, needMatches =
+                            pcall(search, recipeName:gsub("Oil", ""):lower(), needMatches)
+                        if not ok then return false end
+                        if #needMatches == 1 and needMatches[1] == "oil:" then
+                            return true
+                        end
+                    end
+                end
+                return false
+            end
+
+            -- Check node name
+            ok, needMatches = pcall(search, node.dn:lower(), needMatches)
+            if not ok then return false end
+            if #needMatches == 0 then
+                return true
+            end
+
+            -- Check node description lines and their parsed mod names
+            for index, line in ipairs(node.sd or {}) do
+                ok, needMatches = pcall(search, line:lower(), needMatches)
+                if not ok then return false end
+                if #needMatches == 0 then
+                    return true
+                end
+                if node.mods and node.mods[index] and node.mods[index].list then
+                    for _, mod in ipairs(node.mods[index].list) do
+                        ok, needMatches = pcall(search, mod.name, needMatches)
+                        if not ok then return false end
+                        if #needMatches == 0 then
+                            return true
+                        end
+                    end
+                end
+            end
+
+            -- Check node type
+            ok, needMatches = pcall(search, node.type:lower(), needMatches)
+            if not ok then return false end
+            return #needMatches == 0
+        end
+
+        for nodeId, node in pairs(spec.nodes) do
+            if nodeMatches(node) then
+                table.insert(out, nodeId)
+            end
+        end
+        return out
+    "#,
+        )
+        .call(query)?;
+
+    let mut out = HashSet::new();
+    for id in list.sequence_values::<u32>() {
+        out.insert(id?);
     }
-}
-
-fn node_matches(node: &TreeNode, terms: &[String]) -> bool {
-    let name = node.name.to_lowercase();
-    let type_str = node_search_type(node.node_type);
-    terms.iter().all(|t| {
-        name.contains(t.as_str())
-            || type_str.contains(t.as_str())
-            || node
-                .stats
-                .iter()
-                .any(|s| s.to_lowercase().contains(t.as_str()))
-    })
-}
-
-fn node_matches_oil(node: &TreeNode, terms: &[String]) -> bool {
-    if node.recipe.is_empty() {
-        return false;
-    }
-    let oils: Vec<String> = node
-        .recipe
-        .iter()
-        .map(|r| r.replace("Oil", "").to_lowercase())
-        .collect();
-    terms
-        .iter()
-        .all(|t| oils.iter().any(|o| o.contains(t.as_str())))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_node(name: &str, node_type: NodeType, stats: &[&str], recipe: &[&str]) -> TreeNode {
-        TreeNode {
-            id: 1,
-            name: name.to_string(),
-            x: 0.0,
-            y: 0.0,
-            node_type,
-            icon: String::new(),
-            inactive_icon: None,
-            active_icon: None,
-            active_effect_image: None,
-            group_x: 0.0,
-            group_y: 0.0,
-            orbit: 0,
-            group_max_orbit: 0,
-            stats: stats.iter().map(|s| s.to_string()).collect(),
-            ascendancy_name: None,
-            is_allocated: false,
-            start_art: None,
-            reminder_text: Vec::new(),
-            recipe: recipe.iter().map(|s| s.to_string()).collect(),
-            flavour_text: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn parse_terms_words_and_phrases() {
-        assert_eq!(parse_search_terms("fire damage"), vec!["fire", "damage"]);
-        assert_eq!(
-            parse_search_terms("\"maximum life\" fire"),
-            vec!["maximum life", "fire"]
-        );
-        assert!(parse_search_terms("  ").is_empty());
-    }
-
-    #[test]
-    fn match_requires_all_terms() {
-        let node = make_node(
-            "Heart of Flame",
-            NodeType::Notable,
-            &["10% increased Fire Damage", "+10 to maximum Life"],
-            &[],
-        );
-        let terms = |q: &str| parse_search_terms(&q.to_lowercase());
-        assert!(node_matches(&node, &terms("fire life")));
-        assert!(node_matches(&node, &terms("heart notable")));
-        assert!(!node_matches(&node, &terms("fire cold")));
-        assert!(node_matches(&node, &terms("\"maximum life\"")));
-        assert!(!node_matches(&node, &terms("\"maximum fire\"")));
-    }
-
-    #[test]
-    fn oil_prefix_matches_recipe() {
-        let node = make_node(
-            "Heart of Flame",
-            NodeType::Notable,
-            &[],
-            &["CrimsonOil", "GoldenOil"],
-        );
-        let terms = |q: &str| parse_search_terms(&q.to_lowercase());
-        // "oil:" alone matches any node with a recipe
-        assert!(node_matches_oil(&node, &terms("oil:")[1..]));
-        assert!(node_matches_oil(&node, &terms("oil: golden")[1..]));
-        assert!(!node_matches_oil(&node, &terms("oil: silver")[1..]));
-        let no_recipe = make_node("Other", NodeType::Notable, &[], &[]);
-        assert!(!node_matches_oil(&no_recipe, &terms("oil:")[1..]));
-    }
+    Ok(out)
 }

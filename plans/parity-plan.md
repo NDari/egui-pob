@@ -80,13 +80,13 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Path stat difference in hover tooltip ("Allocating this node and all nodes leading to it will give you: ..." with per-point values; "unallocating ... and all nodes depending on it" for allocated nodes)
 - [x] Right-click context menu (jump to items for jewel sockets, modify node for tattoos)
 - [x] Mastery popup (select mastery effect on click; right-click allocated mastery to change effect)
-- [ ] Shift+drag path tracing mode
+- [x] Shift+drag path tracing mode (upstream traceMode: Shift starts a trace, hover extends node-by-node, click on the trace end allocates the whole path as one undo step)
 - [x] Ascendancy node click → class/ascendancy switching with confirmation (same-class and bloodline switches immediate; cross-class switches confirm with Continue/Connect Path/Cancel like upstream; clicks route through upstream's path-gated allocation)
 
 ### Search
 - [x] Tree search bar (text search across node names, stats, and type)
 - [x] Highlighted search results (colored rings on matching nodes)
-- [ ] Lua pattern matching support
+- [x] Lua pattern matching support (search delegated to upstream's matcher: terms are Lua patterns with (a|b) or-groups, matched against name, stat lines, parsed mod names, and type; invalid patterns match nothing)
 - [x] "oil:" prefix for anoint recipe search
 - [x] Multi-term search (all terms must match, like upstream; quoted phrases supported)
 - [x] Ctrl+F to focus search
@@ -119,7 +119,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Import tree from URL (PoE official, PoePlanner; poeurl shortlinks expanded via HTTP)
 - [x] Export tree as URL
 - [x] Copy tree URL to clipboard
-- [ ] PoEURL shortlink generation
+- [~] PoEURL shortlink generation (Shrink with PoEURL button, faithful port over https; live verification blocked - poeurl.com was down, ignored network test covers it)
 
 ### Tree Version
 - [x] Tree version dropdown
@@ -160,7 +160,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Delete socket group (with confirmation if gems exist; item-granted groups protected)
 - [x] Delete all socket groups (button + confirmation; item-granted groups kept)
 - [x] Reorder socket groups (drag handle on each group; main group and calcs skill number follow the move like upstream OnOrderChange)
-- [ ] Copy/paste socket groups (Ctrl+C/V)
+- [x] Copy/paste socket groups (upstream text format; per-group Copy button + Paste button; Ctrl+C copies the main group, Ctrl+V pastes)
 - [x] Enable/disable socket group (checkbox)
 - [x] Include/exclude from FullDPS (checkbox per group; upstream's Ctrl+Right-Click shortcut not implemented)
 - [x] Socket group label editing
@@ -404,7 +404,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Ctrl+I: Open Import/Export
 - [x] Ctrl+1-7: Switch tabs (Tree, Skills, Items, Calcs, Config, Notes, Import/Export; no Party tab yet)
 - [x] Ctrl+V: Paste item (in items tab)
-- [ ] Ctrl+C: Copy (context-dependent)
+- [~] Ctrl+C: Copy (skills tab copies the main socket group; items-tab copy pending)
 - [ ] Ctrl+E: Edit equipped item
 - [x] Ctrl+D: Toggle stat differences (in node tooltips, on the tree tab)
 - [ ] F1: Open wiki for hovered item/gem
@@ -436,7 +436,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Modifier evaluation and spawn weight calculation (upstream GetModSpawnWeight/CheckIfModIsDelve drive the affix lists)
 - [x] Item modifier list building (upstream Item:BuildModList/Craft; invoked from all item mutations)
 - [ ] Gem data access (tags, requirements, stats, descriptions)
-- [ ] Build XML round-trip fidelity (load → save → load produces same build)
+- [x] Build XML round-trip fidelity (load → save → load: structural fixed point + stats/counts preserved; hash-ordered sections compared as sets)
 - [ ] Sub-script system (LaunchSubScript for background tasks)
 - [x] Power calculation coroutine (upstream PowerBuilder driven via per-frame stepping with progress display)
 - [ ] Config condition evaluation (mainEnv tracking)

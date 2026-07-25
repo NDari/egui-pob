@@ -336,9 +336,11 @@ fn test_tree_search_on_real_tree() {
     let bridge = common::boot_and_load_test_build();
 
     let tree = TreeData::extract(bridge.lua()).expect("failed to extract tree data");
+    let lua = bridge.lua();
+    let search = |q: &str| pob_egui::data::tree::search_nodes(lua, q).expect("search failed");
 
     // Common stat text should match plenty of nodes
-    let life_matches = tree.search_matches("life");
+    let life_matches = search("life");
     assert!(
         life_matches.len() > 50,
         "'life' should match many nodes, got {}",
@@ -346,7 +348,7 @@ fn test_tree_search_on_real_tree() {
     );
 
     // Multi-term search narrows results (AND semantics)
-    let narrowed = tree.search_matches("life mana");
+    let narrowed = search("life mana");
     assert!(
         !narrowed.is_empty() && narrowed.len() < life_matches.len(),
         "'life mana' should narrow the match set: {} vs {}",
@@ -355,7 +357,7 @@ fn test_tree_search_on_real_tree() {
     );
 
     // oil: prefix matches nodes with anoint recipes (notables)
-    let oil_matches = tree.search_matches("oil:");
+    let oil_matches = search("oil:");
     assert!(
         !oil_matches.is_empty(),
         "'oil:' should match nodes with anoint recipes"
@@ -368,12 +370,49 @@ fn test_tree_search_on_real_tree() {
     }
 
     // Type search finds keystones
-    let keystones = tree.search_matches("keystone");
+    let keystones = search("keystone");
     assert!(!keystones.is_empty(), "'keystone' should match keystones");
 
-    // Empty and garbage queries
-    assert!(tree.search_matches("").is_empty());
-    assert!(tree.search_matches("xyzzy_no_such_stat").is_empty());
+    // Lua patterns: '.' wildcards and character classes work per term
+    let pattern_matches = search("fire.*damage");
+    assert!(
+        !pattern_matches.is_empty(),
+        "'fire.*damage' should match as a Lua pattern"
+    );
+    // Anchored pattern only matches names/lines starting with the term
+    let anchored = search("^armour");
+    let unanchored = search("armour");
+    assert!(
+        !anchored.is_empty() && anchored.len() < unanchored.len(),
+        "'^armour' should be narrower than 'armour': {} vs {}",
+        anchored.len(),
+        unanchored.len()
+    );
+
+    // Upstream's or-group extension: (a|b) matches either alternative
+    let fire = search("fire resistance");
+    let cold = search("cold resistance");
+    let either = search("(fire|cold) resistance");
+    assert!(
+        either.len() >= fire.len().max(cold.len()),
+        "or-group should match at least each alternative: {} vs {}/{}",
+        either.len(),
+        fire.len(),
+        cold.len()
+    );
+    assert!(
+        fire.iter().all(|id| either.contains(id)),
+        "or-group is a superset of one alternative"
+    );
+
+    // Empty, garbage, and invalid-pattern queries match nothing (upstream's
+    // pcall guard)
+    assert!(search("").is_empty());
+    assert!(search("xyzzy_no_such_stat").is_empty());
+    assert!(
+        search("[[").is_empty(),
+        "invalid Lua pattern matches nothing"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3717,4 +3756,343 @@ fn test_skills_drag_reorder() {
         group_unchanged.gems[0].name, names[1],
         "invalid move changes nothing"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Build XML round-trip fidelity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_build_xml_roundtrip() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let save_db = r#"
+        return mainObject_ref.main.modes['BUILD']:SaveDB("roundtrip")
+    "#;
+    let read_stats = r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        local o = build.calcsTab.mainOutput or {}
+        local spec = build.spec
+        local allocCount = 0
+        for _ in pairs(spec.allocNodes) do allocCount = allocCount + 1 end
+        local itemCount = 0
+        for _ in pairs(build.itemsTab.items) do itemCount = itemCount + 1 end
+        return o.CombinedDPS or 0, o.Life or 0, o.TotalEHP or 0,
+            allocCount, itemCount, #build.skillsTab.socketGroupList
+    "#;
+
+    // Saving twice without changes must be deterministic
+    let save1: String = lua.load(save_db).eval().expect("first save failed");
+    assert!(
+        save1.starts_with("<?xml") && save1.contains("<Build"),
+        "save produces XML"
+    );
+    let save1b: String = lua.load(save_db).eval().expect("second save failed");
+    assert_eq!(save1, save1b, "saving twice is deterministic");
+
+    let stats1: (f64, f64, f64, i64, i64, i64) =
+        lua.load(read_stats).eval().expect("stats read failed");
+
+    // Reload from the saved XML, then save again: the XML must be a fixed
+    // point, and the calculated build must be identical
+    bridge
+        .load_build_from_xml(&save1, "Roundtrip", None)
+        .expect("reload failed");
+    let save2: String = lua.load(save_db).eval().expect("save after reload failed");
+    let stats2: (f64, f64, f64, i64, i64, i64) =
+        lua.load(read_stats).eval().expect("stats read failed");
+
+    assert_eq!(
+        stats1.3, stats2.3,
+        "allocated node count survives the round-trip"
+    );
+    assert_eq!(stats1.4, stats2.4, "item count survives the round-trip");
+    assert_eq!(
+        stats1.5, stats2.5,
+        "socket group count survives the round-trip"
+    );
+    let close = |a: f64, b: f64| (a - b).abs() <= (a.abs() * 1e-9).max(1e-6);
+    assert!(
+        close(stats1.0, stats2.0),
+        "DPS survives the round-trip: {} vs {}",
+        stats1.0,
+        stats2.0
+    );
+    assert!(
+        close(stats1.1, stats2.1),
+        "Life survives the round-trip: {} vs {}",
+        stats1.1,
+        stats2.1
+    );
+    assert!(
+        close(stats1.2, stats2.2),
+        "EHP survives the round-trip: {} vs {}",
+        stats1.2,
+        stats2.2
+    );
+
+    // Structural equality: upstream serializes hash-iterated sections (e.g.
+    // config Inputs) in nondeterministic order, so canonicalize both saves
+    // with upstream's own XML parser (sorted attributes, sorted children)
+    // before comparing
+    let (canon1, canon2): (String, String) = lua
+        .load(
+            r#"
+            local a, b = ...
+            local function canon(node)
+                if type(node) == "string" then
+                    return "T:" .. node
+                end
+                local parts = { "E:" .. (node.elem or "?") }
+                local attrs = {}
+                for k, v in pairs(node.attrib or {}) do
+                    -- Spec "nodes" and "masteryEffects" are hash-iterated
+                    -- sets upstream; sort their components
+                    if k == "nodes" then
+                        local ids = {}
+                        for part in tostring(v):gmatch("[^,]+") do
+                            table.insert(ids, part)
+                        end
+                        table.sort(ids)
+                        v = table.concat(ids, ",")
+                    elseif k == "masteryEffects" then
+                        local sels = {}
+                        for part in tostring(v):gmatch("%b{}") do
+                            table.insert(sels, part)
+                        end
+                        table.sort(sels)
+                        v = table.concat(sels, ",")
+                    end
+                    table.insert(attrs, k .. "=" .. tostring(v))
+                end
+                table.sort(attrs)
+                table.insert(parts, table.concat(attrs, ";"))
+                local kids = {}
+                for _, child in ipairs(node) do
+                    -- The legacy URL element re-encodes the allocated-node
+                    -- set in hash order; it duplicates the authoritative
+                    -- (and separately compared) "nodes" attribute
+                    if node.elem == "URL" and type(child) == "string" then
+                        table.insert(kids, "T:<url>")
+                    else
+                        table.insert(kids, canon(child))
+                    end
+                end
+                table.sort(kids)
+                table.insert(parts, table.concat(kids, "\n"))
+                return table.concat(parts, "|")
+            end
+            local ta, errA = common.xml.ParseXML(a)
+            local tb, errB = common.xml.ParseXML(b)
+            if not ta or not tb then
+                error("parse failed: " .. tostring(errA or errB))
+            end
+            return canon(ta[1]), canon(tb[1])
+        "#,
+        )
+        .call((save1.as_str(), save2.as_str()))
+        .expect("canonicalization failed");
+    if canon1 != canon2 {
+        let pos = canon1
+            .bytes()
+            .zip(canon2.bytes())
+            .position(|(a, b)| a != b)
+            .unwrap_or(canon1.len().min(canon2.len()));
+        let start = pos.saturating_sub(150);
+        panic!(
+            "saved XML differs structurally after reload; first difference \
+             near byte {pos}:\n--- first save ---\n{}\n--- second save ---\n{}",
+            &canon1[start..(pos + 150).min(canon1.len())],
+            &canon2[start..(pos + 150).min(canon2.len())],
+        );
+    }
+}
+
+#[test]
+fn test_trace_path() {
+    use pob_egui::data::tree;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Find an unallocated node adjacent to the allocated tree (path length 1)
+    // and one of its unallocated neighbours (for a two-step trace)
+    let (first, second): (u32, u32) = lua
+        .load(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            for _, node in pairs(spec.nodes) do
+                if not node.alloc and node.path and #node.path == 1
+                   and not node.isKeystone and node.type ~= "Mastery" then
+                    for _, linked in ipairs(node.linked or {}) do
+                        if not linked.alloc and linked.path and linked.id < 65536
+                           and linked.type ~= "Mastery" and not linked.isJewelSocket then
+                            return node.id, linked.id
+                        end
+                    end
+                end
+            end
+            error("no traceable node pair found")
+        "#,
+        )
+        .eval()
+        .expect("failed to find trace candidates");
+
+    // Empty trace initializes with the node's shortest path
+    let trace = tree::extend_trace_path(lua, &[], first)
+        .expect("extend failed")
+        .expect("adjacent node is traceable");
+    assert_eq!(trace.last(), Some(&first), "trace ends at the hovered node");
+
+    // Hovering a linked neighbour appends it
+    let trace2 = tree::extend_trace_path(lua, &trace, second)
+        .expect("extend failed")
+        .expect("linked neighbour extends the trace");
+    assert_eq!(trace2.len(), trace.len() + 1, "one node appended");
+    assert_eq!(trace2.last(), Some(&second), "trace ends at the neighbour");
+
+    // Hovering a node not linked to the trace end leaves it unchanged
+    let far: u32 = lua
+        .load(
+            r#"
+            local spec = mainObject_ref.main.modes['BUILD'].spec
+            local target = ...
+            local targetNode = spec.nodes[target]
+            for _, node in pairs(spec.nodes) do
+                if not node.alloc and node.path and node.id < 65536 then
+                    local linked = false
+                    for _, l in ipairs(node.linked or {}) do
+                        if l == targetNode then linked = true break end
+                    end
+                    if not linked and node.id ~= target then
+                        return node.id
+                    end
+                end
+            end
+            error("no far node found")
+        "#,
+        )
+        .call(second)
+        .expect("failed to find far node");
+    let unchanged = tree::extend_trace_path(lua, &trace2, far).expect("extend failed");
+    assert!(unchanged.is_none(), "unlinked node cannot extend the trace");
+
+    // Hovering back onto an earlier trace node moves it to the end
+    let back = tree::extend_trace_path(lua, &trace2, first)
+        .expect("extend failed")
+        .expect("earlier trace node re-hovers");
+    assert_eq!(back.len(), trace2.len(), "no growth when moving within");
+    assert_eq!(back.last(), Some(&first), "moved to the end");
+
+    // Allocating the trace allocates every node on it in one undo step
+    let count_alloc = r#"
+        local n = 0
+        for _ in pairs(mainObject_ref.main.modes['BUILD'].spec.allocNodes) do n = n + 1 end
+        return n
+    "#;
+    let before: i64 = lua.load(count_alloc).eval().expect("count failed");
+    tree::alloc_trace_path(lua, &trace2).expect("alloc failed");
+    let after: i64 = lua.load(count_alloc).eval().expect("count failed");
+    assert_eq!(
+        after,
+        before + trace2.len() as i64,
+        "every traced node allocated"
+    );
+    let allocated: bool = lua
+        .load(format!(
+            "local s = mainObject_ref.main.modes['BUILD'].spec return s.allocNodes[{first}] ~= nil and s.allocNodes[{second}] ~= nil"
+        ))
+        .eval()
+        .expect("read failed");
+    assert!(allocated, "both traced nodes are allocated");
+
+    tree::undo(lua).expect("undo failed");
+    let undone: i64 = lua.load(count_alloc).eval().expect("count failed");
+    assert_eq!(undone, before, "trace allocation is a single undo step");
+}
+
+#[test]
+#[ignore = "network: hits poeurl.com, which is frequently down"]
+fn test_poeurl_shrink() {
+    use pob_egui::data::tree_specs;
+
+    let short =
+        tree_specs::shrink_tree_url("https://www.pathofexile.com/passive-skill-tree/AAAABgAAAAAA")
+            .expect("shrink failed (service may be down)");
+    assert!(
+        short.starts_with("http://poeurl.com/") || short.starts_with("https://poeurl.com/"),
+        "got {short}"
+    );
+    // The shortlink must expand back to a pathofexile.com URL
+    let expanded = tree_specs::expand_shortlink(&short).expect("expand failed");
+    assert!(
+        expanded.contains("pathofexile.com"),
+        "shortlink round-trips: {expanded}"
+    );
+}
+
+#[test]
+fn test_socket_group_copy_paste() {
+    use pob_egui::data::skills;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    let source = groups
+        .iter()
+        .find(|g| !g.gems.is_empty())
+        .expect("a group with gems");
+
+    // Copy serializes to upstream's text format
+    let text = skills::copy_socket_group_text(lua, source.index)
+        .expect("copy failed")
+        .expect("group exists");
+    assert!(
+        text.contains(&source.gems[0].name),
+        "copied text lists the gems: {text}"
+    );
+
+    // Pasting appends a new group with the same gems
+    let before = groups.len();
+    let added = skills::paste_socket_group_text(lua, &text).expect("paste failed");
+    assert!(added, "valid text pastes");
+    let after = skills::extract_skills(lua).expect("skills failed");
+    assert_eq!(after.len(), before + 1, "one group added");
+    let pasted = after.last().expect("pasted group");
+    assert_eq!(
+        pasted.gems.len(),
+        source.gems.len(),
+        "all gems survive the round-trip"
+    );
+    for (a, b) in source.gems.iter().zip(pasted.gems.iter()) {
+        assert_eq!(a.name, b.name, "gem name survives");
+        assert_eq!(a.level, b.level, "gem level survives");
+        assert_eq!(a.quality, b.quality, "gem quality survives");
+        assert_eq!(a.enabled, b.enabled, "gem enabled state survives");
+    }
+
+    // Garbage text pastes nothing
+    let added = skills::paste_socket_group_text(lua, "not a socket group").expect("call failed");
+    assert!(!added, "garbage text is rejected");
+    let unchanged = skills::extract_skills(lua).expect("skills failed");
+    assert_eq!(unchanged.len(), before + 1, "no group added");
+
+    // The paste is undoable
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.skillsTab:Undo()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .exec()
+    .expect("undo failed");
+    let undone = skills::extract_skills(lua).expect("skills failed");
+    assert_eq!(undone.len(), before, "paste undone");
 }

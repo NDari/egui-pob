@@ -147,6 +147,8 @@ pub struct TreePanel {
     /// Path/depends info for the currently hovered node, fetched from Lua
     /// once per hover change.
     hover_cache: Option<(u32, HoverInfo)>,
+    /// Shift+drag trace path (ordered node ids; active while Shift is held).
+    trace_path: Option<Vec<u32>>,
     // Tree spec management
     specs: Vec<SpecInfo>,
     /// Active spec index (1-based, matching Lua).
@@ -221,6 +223,7 @@ impl TreePanel {
                     search_cycle: None,
                     mastery_popup: None,
                     hover_cache: None,
+                    trace_path: None,
                     specs: Vec::new(),
                     active_spec: 1,
                     manage_specs_open: false,
@@ -279,6 +282,7 @@ impl TreePanel {
             search_cycle: None,
             mastery_popup: None,
             hover_cache: None,
+            trace_path: None,
             specs,
             active_spec,
             manage_specs_open: false,
@@ -479,7 +483,8 @@ impl TreePanel {
                 response.request_focus();
             }
             if response.changed() {
-                self.search_matches = tree_data.search_matches(&self.search);
+                self.search_matches =
+                    tree::search_nodes(bridge.lua(), &self.search).unwrap_or_default();
                 self.search_cycle = None;
             }
             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -797,10 +802,30 @@ impl TreePanel {
         let atlas_ref = self.atlas.as_ref();
         let headers_ref = self.tooltip_headers.as_ref();
 
+        // Shift+drag path tracing (upstream traceMode): the trace persists
+        // while Shift is held and replaces the hover path highlight
+        let shift_down = ui.input(|i| i.modifiers.shift);
+        if shift_down {
+            if self.trace_path.is_none() {
+                self.trace_path = Some(Vec::new());
+            }
+        } else {
+            self.trace_path = None;
+        }
+        let trace_set: Option<HashSet<u32>> = self
+            .trace_path
+            .as_ref()
+            .filter(|t| !t.is_empty())
+            .map(|t| t.iter().copied().collect());
+
         let empty = HashSet::new();
         let (hover_node, hover_path, hover_depends) = match &self.hover_cache {
             Some((id, info)) => (Some(*id), &info.path, &info.depends),
             None => (None, &empty, &empty),
+        };
+        let (hover_path, hover_depends) = match &trace_set {
+            Some(set) => (set, &empty),
+            None => (hover_path, hover_depends),
         };
         let compare = if self.compare_enabled {
             self.compare_diff.as_ref()
@@ -846,7 +871,29 @@ impl TreePanel {
             let is_socket = node.is_some_and(|n| n.node_type == NodeType::Socket);
             let is_allocated = node.is_some_and(|n| n.is_allocated);
 
-            if is_socket && click.is_right {
+            // In trace mode, a left click on the trace end allocates the
+            // whole traced path; other left clicks are swallowed
+            let trace_active = self.trace_path.as_ref().is_some_and(|t| !t.is_empty());
+            if trace_active && !click.is_right {
+                let is_trace_end = self
+                    .trace_path
+                    .as_ref()
+                    .and_then(|t| t.last())
+                    .is_some_and(|&last| last == click.node_id);
+                if is_trace_end && !is_allocated {
+                    let path = self.trace_path.clone().unwrap_or_default();
+                    match tree::alloc_trace_path(bridge.lua(), &path) {
+                        Ok(()) => {
+                            if let Err(e) = tree_data.refresh_allocation(bridge.lua()) {
+                                log::error!("Failed to refresh allocation: {e}");
+                            } else {
+                                changed = true;
+                            }
+                        }
+                        Err(e) => log::error!("Failed to allocate traced path: {e}"),
+                    }
+                }
+            } else if is_socket && click.is_right {
                 self.request_items_tab = true;
             } else if click.is_right && !is_mastery {
                 // Modify node (tattoos/runegrafts), like upstream's
@@ -1023,7 +1070,8 @@ impl TreePanel {
 
         // Recompute search matches when the tree changed (mastery stats can shift)
         if changed && !self.search.trim().is_empty() {
-            self.search_matches = tree_data.search_matches(&self.search);
+            self.search_matches =
+                tree::search_nodes(bridge.lua(), &self.search).unwrap_or_default();
         }
 
         // Keep the hover path/depends cache in sync: refetch when the hovered
@@ -1061,6 +1109,18 @@ impl TreePanel {
                     }
                 }
             });
+        }
+
+        // Extend the trace with the hovered node (upstream's traceMode
+        // hover logic; a None result leaves the trace unchanged)
+        if let (Some(trace), Some(hovered)) = (&self.trace_path, view.hovered)
+            && trace.last() != Some(&hovered)
+        {
+            match tree::extend_trace_path(bridge.lua(), trace, hovered) {
+                Ok(Some(new_trace)) => self.trace_path = Some(new_trace),
+                Ok(None) => {}
+                Err(e) => log::error!("Failed to extend trace path: {e}"),
+            }
         }
 
         // Any tree change invalidates the comparison snapshot of the active
@@ -1567,7 +1627,8 @@ impl TreePanel {
     pub fn refresh_tree_data(&mut self, bridge: &LuaBridge) {
         match TreeData::extract(bridge.lua()) {
             Ok(td) => {
-                self.search_matches = td.search_matches(&self.search);
+                self.search_matches =
+                    tree::search_nodes(bridge.lua(), &self.search).unwrap_or_default();
                 self.tree_data = Some(td);
                 self.search_cycle = None;
                 self.hover_cache = None;
@@ -1734,6 +1795,22 @@ impl TreePanel {
                         && let Ok(mut clip) = arboard::Clipboard::new()
                     {
                         let _ = clip.set_text(url);
+                    }
+                    if let Some(url) = self.export_url.clone()
+                        && !url.contains("poeurl.com")
+                        && ui
+                            .button("Shrink with PoEURL")
+                            .on_hover_text("Shorten the link via poeurl.com (network request)")
+                            .clicked()
+                    {
+                        match tree_specs::shrink_tree_url(&url) {
+                            Ok(short) => self.export_url = Some(short),
+                            Err(e) => {
+                                log::error!("PoEURL shrink failed: {e}");
+                                self.import_error =
+                                    Some("Failed to get PoEURL link. Try again later.".into());
+                            }
+                        }
                     }
                 });
                 if let Some(ref url) = self.export_url {

@@ -62,6 +62,10 @@ enum SkillAction {
     MoveGroup(usize, usize),
     /// Move a gem within its group (group, from, to).
     MoveGem(usize, usize, usize),
+    /// Copy a socket group to the clipboard (not a build change).
+    CopyGroup(usize),
+    /// Paste clipboard text as a new socket group.
+    PasteGroup(String),
     ActivateSet(i64),
     NewSet(String),
     CopySet(i64, String),
@@ -168,6 +172,22 @@ impl SkillsPanel {
 
         let mut actions: Vec<SkillAction> = Vec::new();
 
+        // Ctrl+C copies the main socket group, Ctrl+V pastes one from the
+        // clipboard (upstream's skills tab keys), when no field has focus
+        if ui.ctx().memory(|m| m.focused().is_none()) {
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C))
+                && let Some(main_group) = self.groups.iter().find(|g| g.is_main)
+            {
+                actions.push(SkillAction::CopyGroup(main_group.index));
+            }
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V))
+                && let Ok(mut clip) = arboard::Clipboard::new()
+                && let Ok(text) = clip.get_text()
+            {
+                actions.push(SkillAction::PasteGroup(text));
+            }
+        }
+
         ui.horizontal(|ui| {
             // Skill set selector + manager
             if !self.sets.is_empty() {
@@ -198,6 +218,15 @@ impl SkillsPanel {
             }
             if ui.button("New Socket Group").clicked() {
                 actions.push(SkillAction::NewGroup);
+            }
+            if ui
+                .button("Paste")
+                .on_hover_text("Paste a copied socket group from the clipboard (Ctrl+V)")
+                .clicked()
+                && let Ok(mut clip) = arboard::Clipboard::new()
+                && let Ok(text) = clip.get_text()
+            {
+                actions.push(SkillAction::PasteGroup(text));
             }
             if self.groups.iter().any(|g| !g.from_item)
                 && ui
@@ -601,6 +630,28 @@ impl SkillsPanel {
                 SkillAction::RemoveGem(group, gem) => skills::remove_gem(lua, group, gem),
                 SkillAction::MoveGroup(from, to) => skills::move_socket_group(lua, from, to),
                 SkillAction::MoveGem(group, from, to) => skills::move_gem(lua, group, from, to),
+                SkillAction::CopyGroup(index) => {
+                    match skills::copy_socket_group_text(lua, index) {
+                        Ok(Some(text)) => {
+                            if let Ok(mut clip) = arboard::Clipboard::new() {
+                                let _ = clip.set_text(text);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => log::error!("Failed to copy socket group: {e}"),
+                    }
+                    continue; // copying is not a build change
+                }
+                SkillAction::PasteGroup(ref text) => {
+                    match skills::paste_socket_group_text(lua, text) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => {
+                            log::warn!("Clipboard does not contain a socket group");
+                            continue;
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
                 SkillAction::ActivateSet(id) => skill_sets::set_active_skill_set(lua, id),
                 SkillAction::NewSet(ref name) => skill_sets::new_skill_set(lua, name),
                 SkillAction::CopySet(id, ref name) => skill_sets::copy_skill_set(lua, id, name),
@@ -666,6 +717,13 @@ fn show_socket_group(
                 );
                 if label_response.lost_focus() && *label_buf != group.label {
                     actions.push(SkillAction::SetLabel(group.index, label_buf.clone()));
+                }
+                if ui
+                    .small_button("Copy")
+                    .on_hover_text("Copy this socket group to the clipboard")
+                    .clicked()
+                {
+                    actions.push(SkillAction::CopyGroup(group.index));
                 }
                 if group.from_item {
                     ui.label(
