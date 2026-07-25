@@ -148,8 +148,10 @@ pub fn parse_character_list(lua: &Lua, json: &str) -> anyhow::Result<Vec<Charact
         .load(
             r#"
             local json = ...
-            local build = mainObject_ref.main.modes['BUILD']
-            local data, errMsg = build.importTab:ProcessJSON(json)
+            -- v2.66+ removed ImportTab:ProcessJSON; decode directly like
+            -- upstream now does
+            local dkjson = require "dkjson"
+            local data, _, errMsg = dkjson.decode(json)
             if not data then
                 return { err = "Invalid response: " .. tostring(errMsg) }
             end
@@ -208,12 +210,26 @@ pub fn import_passive_tree_and_jewels(
         local json, name, league, class, level, clearJewels = ...
         local build = mainObject_ref.main.modes['BUILD']
         local importTab = build.importTab
-        importTab.controls.charImportTreeClearJewels.state = clearJewels
+        -- v2.66+: ImportPassiveTreeAndJewels takes a decoded charData table
+        -- shaped like the OAuth API response (upstream's legacy-site path)
+        local dkjson = require "dkjson"
+        local responseLua, _, err = dkjson.decode(json)
+        if not responseLua then
+            return "^1Error parsing character data: " .. tostring(err)
+        end
         local charData = { name = name, league = league, class = class, level = level }
-        importTab:ImportPassiveTreeAndJewels(json, charData)
+        charData.passives = responseLua
+        charData.jewels = responseLua.items
+        -- v2.66+ no longer sets a status message; report the outcome ourselves
+        local ok, err = pcall(function()
+            importTab:ImportPassiveTreeAndJewels(charData, clearJewels)
+        end)
+        if not ok then
+            return "^1Error importing passive tree: " .. tostring(err)
+        end
         build.buildFlag = true
         _runCallback('OnFrame')
-        return importTab.charImportStatus or ""
+        return "Passive tree imported successfully"
     "#,
     )
     .call((
@@ -240,13 +256,35 @@ pub fn import_items_and_skills(
         local json, clearItems, clearSkills, ignoreSwap = ...
         local build = mainObject_ref.main.modes['BUILD']
         local importTab = build.importTab
-        importTab.controls.charImportItemsClearItems.state = clearItems
-        importTab.controls.charImportItemsClearSkills.state = clearSkills
-        importTab.controls.charImportItemsIgnoreWeaponSwap.state = ignoreSwap
-        importTab:ImportItemsAndSkills(json)
+        -- v2.66+: ImportItemsAndSkills takes a decoded charData table with
+        -- an `equipment` list plus the option flags as parameters
+        local dkjson = require "dkjson"
+        local responseLua, _, err = dkjson.decode(json)
+        if not responseLua then
+            return "^1Error parsing character data: " .. tostring(err)
+        end
+        -- The legacy site path copies the char-list entry (name/league/
+        -- class/level at top level); lift them from the response's character
+        -- object, keeping the current level as a fallback
+        local charInfo = responseLua.character or { }
+        local charData = {
+            name = charInfo.name,
+            league = charInfo.league,
+            class = charInfo.class,
+            level = charInfo.level or build.characterLevel,
+        }
+        charData.character = responseLua.character
+        charData.equipment = responseLua.items or { }
+        -- v2.66+ no longer sets a status message; report the outcome ourselves
+        local ok, err = pcall(function()
+            importTab:ImportItemsAndSkills(charData, clearItems, clearSkills, ignoreSwap)
+        end)
+        if not ok then
+            return "^1Error importing items: " .. tostring(err)
+        end
         build.buildFlag = true
         _runCallback('OnFrame')
-        return importTab.charImportStatus or ""
+        return "Items and skills imported successfully"
     "#,
     )
     .call((json, clear_items, clear_skills, ignore_weapon_swap))

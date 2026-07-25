@@ -48,7 +48,21 @@ pub fn search_gems(
                 skillsTab._eguiGemSelect = ctrl
             end
             ctrl.index = #group.gemList + 1
+            ctrl.searchStr = query
             ctrl:UpdateSortCache()
+            -- v2.66+ computes DPS progressively in a per-frame coroutine
+            -- (DPSBuilder); we are synchronous, so drive it to completion
+            if ctrl.sortCache and ctrl.sortCache.pendingGems then
+                local co = coroutine.create(function()
+                    ctrl:DPSBuilder()
+                end)
+                while coroutine.status(co) ~= "dead" do
+                    local ok, err = coroutine.resume(co)
+                    if not ok then
+                        error(err)
+                    end
+                end
+            end
             ctrl:BuildList(query)
             local sortCache = ctrl.sortCache or { canSupport = {}, dps = {}, dpsColor = {} }
             local result = {}

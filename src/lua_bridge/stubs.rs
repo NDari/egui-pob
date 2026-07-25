@@ -159,6 +159,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     // -- Misc stubs --
     g.set("Restart", lua.create_function(|_, ()| Ok(()))?)?;
     g.set("Exit", lua.create_function(|_, ()| Ok(()))?)?;
+    // Window focus request (used by the v2.66+ OAuth import flow)
+    g.set(
+        "SetForeground",
+        lua.create_function(|_, _args: LuaMultiValue| Ok(()))?,
+    )?;
     g.set("ConExecute", lua.create_function(|_, _cmd: String| Ok(()))?)?;
     g.set("ConClear", lua.create_function(|_, ()| Ok(()))?)?;
     g.set(

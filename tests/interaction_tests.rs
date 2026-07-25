@@ -1480,7 +1480,9 @@ fn test_tree_version_conversion() {
     assert_eq!(versions.last().unwrap().id, latest.id);
     assert!(!latest.display.is_empty());
 
-    // The loaded build's spec is on the latest version
+    // Bring the (older-version) test build to the latest tree first; this
+    // also exercises upgrade conversion
+    tree_specs::convert_all_to_version(lua, &latest.id).expect("upgrade failed");
     let (specs, active) = tree_specs::list_specs(lua).expect("list failed");
     assert_eq!(active, 1);
     assert!(specs[0].is_latest_version);
@@ -2007,9 +2009,9 @@ fn test_socket_group_management() {
             .include_in_full_dps
     );
 
-    // Gem count and quality variant
+    // Gem count
     let group = groups.iter().find(|g| g.index == gi).unwrap();
-    if let Some((idx0, gem)) = group
+    if let Some((idx0, _)) = group
         .gems
         .iter()
         .enumerate()
@@ -2023,11 +2025,6 @@ fn test_socket_group_management() {
             groups.iter().find(|g| g.index == gi).unwrap().gems[idx0].count,
             3,
             "gem count should round-trip"
-        );
-        assert_eq!(gem.quality_id, "Default");
-        assert!(
-            !gem.alt_qualities.is_empty(),
-            "every gem has at least the Default variant"
         );
     }
 
@@ -2495,6 +2492,16 @@ fn test_loadouts() {
     let _ = env_logger::builder().is_test(true).try_init();
     let bridge = common::boot_and_load_test_build();
     let lua = bridge.lua();
+
+    // Specs on outdated tree versions get a "[3.xx]" prefix and stop
+    // matching loadout titles (upstream behavior), so bring the build to
+    // the latest tree first
+    let latest = tree_specs::list_tree_versions(lua)
+        .expect("versions failed")
+        .into_iter()
+        .find(|v| v.is_latest)
+        .expect("a latest version");
+    tree_specs::convert_all_to_version(lua, &latest.id).expect("upgrade failed");
 
     // With single sets everywhere, the sole tree spec forms a loadout
     let (list, _) = loadouts::list_loadouts(lua).expect("list failed");
@@ -3129,7 +3136,6 @@ fn test_gem_options() {
             default_level: "levelOne".to_string(),
             default_quality: 17,
             show_support_types: "ALL".to_string(),
-            show_alt_quality: false,
             show_legacy_gems: false,
         },
     )
@@ -4095,4 +4101,61 @@ fn test_socket_group_copy_paste() {
     .expect("undo failed");
     let undone = skills::extract_skills(lua).expect("skills failed");
     assert_eq!(undone.len(), before, "paste undone");
+}
+
+// ---------------------------------------------------------------------------
+// Conformance: our search port vs upstream's live matcher
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_search_conforms_to_upstream_matcher() {
+    use std::collections::HashSet;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Single-token queries produce identical search params on both sides
+    // (multi-term splitting is covered by the ports.toml hash on prepSearch),
+    // so any difference here is matcher drift.
+    for query in [
+        "life",
+        "fire.*damage",
+        "(fire|cold)",
+        "keystone",
+        "oil:",
+        "^armour",
+        "%d+%%",
+        "[[",
+    ] {
+        let ours = pob_egui::data::tree::search_nodes(lua, query).expect("our search failed");
+        let theirs: HashSet<u32> = lua
+            .load(
+                r#"
+                local query = ...
+                local spec = mainObject_ref.main.modes['BUILD'].spec
+                local view = new("PassiveTreeView")
+                view.searchParams = { query:lower() }
+                local out = {}
+                for nodeId, node in pairs(spec.nodes) do
+                    if view:DoesNodeMatchSearchParams(node) then
+                        table.insert(out, nodeId)
+                    end
+                end
+                return out
+            "#,
+            )
+            .call::<mlua::Table>(query)
+            .expect("upstream matcher failed")
+            .sequence_values::<u32>()
+            .flatten()
+            .collect();
+        let only_ours: Vec<_> = ours.difference(&theirs).take(5).collect();
+        let only_theirs: Vec<_> = theirs.difference(&ours).take(5).collect();
+        assert_eq!(
+            ours, theirs,
+            "query {query:?}: our matcher diverged from upstream's \
+             (only ours: {only_ours:?}, only upstream: {only_theirs:?})"
+        );
+    }
 }

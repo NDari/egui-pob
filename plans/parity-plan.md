@@ -2,6 +2,8 @@
 
 This document tracks every feature needed to reach parity with upstream Path of Building Community. Items are grouped by area rather than priority — ordering and phasing will be decided separately.
 
+**Parity validated against upstream v2.66.1 (PoE 3.29).** Update this stamp on every submodule pin bump (see docs/upstream-upgrade.md).
+
 Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 ---
@@ -188,7 +190,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Default gem level dropdown (Normal/Corrupted/Awakened Max, Match Character Level, Level 1; applied on gem add via upstream ProcessGemLevel)
 - [x] Default gem quality input
 - [x] Show support gem type filter (All / Non-Exceptional / Exceptional)
-- [x] Show quality variants toggle
+- ~~Show quality variants toggle~~ (alternate gem qualities removed from the game and upstream in v2.66)
 - [x] Show legacy gems toggle
 
 ### Skill Sets
@@ -500,6 +502,64 @@ character import, and clipboard paste. Two approaches:
 2. **Reimplement in Rust** — better long-term performance, no Lua round-trip overhead, but massive effort and ongoing maintenance burden to stay in sync.
 
 Recommendation: Use Lua's parser via mlua calls. Reimplement in Rust only if profiling shows it's a bottleneck.
+
+---
+
+## Upstream Delta: v2.64.0 - v2.66.1 (3.29 Allflame, July 2026)
+
+New upstream features to track for parity, from the changelog and diff at the
+v2.66.1 pin. Calc-engine and game-data changes (3.29 trees, gems, uniques,
+runegrafts, bloodline nodes, spectres) come free through the Lua VM and are
+not listed.
+
+### Build Comparison Tab (new upstream tab, ~5k lines)
+- [ ] Compare tab: side-by-side build comparison (CompareTab.lua; subsumes the old "Side-by-side comparison view" item)
+- [ ] Compare calcs with "only show differences" filter
+- [ ] Compare power report
+- [ ] Abyss sockets in comparison
+- [ ] "Buy similar" trade integration (trade-dependent)
+
+### Import/Export
+- [ ] PoB2 OAuth API import for character and trade (PoEAPI.lua; our legacy session-id import still works)
+- [ ] pob.codes build export/import
+- [ ] Preserve skill selection on character re-import
+- [ ] Remember league for imported characters
+
+### Skills/Gems
+- [ ] Progressive gem sort results while typing (we drive the new DPSBuilder to completion synchronously instead)
+- [ ] Imbued Supports (new GemSelectControl imbued mode)
+- [ ] Gem tooltips (new GemTooltip.lua)
+- [ ] Gem color indicators on socket group labels
+- [ ] Sort gem suggestions by minion-specific stats (data side done via powerStatList; UI dropdown lists them already)
+
+### Items/Crafting
+- [ ] Sorting in add-modifier, enchant, corrupt, and implicit popups
+- [ ] Sinistral and Dextral catalysts
+- [ ] Foulborn modifier toggles on uniques
+- [ ] Volatile Vaal Orb corruption
+- [ ] Increased-magnitude mods (Kane of Kulemak, Helical Ring, Heist enchants)
+- [ ] Advanced item copy/paste format
+- [ ] Warning for eligible items missing an anoint
+
+### Tree/Power Report
+- [ ] Masteries in the power report
+- [ ] Node description tooltips in the power report
+- [ ] Intuitive-Leap-aware power report distances
+- [ ] Timeless jewel trade QoL (copy trade URL, open link; trade-dependent)
+- [ ] Ascendancy flavour text only at high zoom
+- [ ] Allocate ascendancy nodes through custom modifiers
+
+### UI/Options
+- [ ] Pinnable calc panes as overlay windows on other tabs
+- [ ] Sidebar stat suffixes and compact value formatting toggle
+- [ ] Staged skills default to maximum stages
+- [ ] Crafted cluster jewels default to minimum passives
+- [ ] Option to disable scroll wheel on controls (may not apply to egui)
+
+### Removed upstream (parity items now obsolete)
+- Alternate gem qualities (quality variant dropdowns, Show quality variants toggle) - removed in v2.66
+- ImportTab:ProcessJSON - replaced by direct dkjson decoding
+- Import status messages - import functions no longer report status text
 
 ---
 

@@ -1,6 +1,6 @@
 # CLAUDE.md — egui-pob
 
-> **Current PoE 1 version: 3.28.** When reasoning about tree data, asset paths, CDN bundle versions, or which ascendancies/bloodlines/nodes exist, assume 3.28 unless the user says otherwise. The authoritative source is the highest `3_XX` directory under `upstream/src/TreeData/`.
+> **Current PoE 1 version: 3.29 (Allflame).** When reasoning about tree data, asset paths, CDN bundle versions, or which ascendancies/bloodlines/nodes exist, assume 3.29 unless the user says otherwise. The authoritative source is the highest `3_XX` directory under `upstream/src/TreeData/`.
 
 ## Project Overview
 
@@ -57,10 +57,39 @@ The user handles all git workflow manually.
 
 ## Key Constraints
 
-- **Never modify files under `upstream/`** — it is a read-only submodule
-- **The Lua VM is the source of truth** for game data and calculations — Rust reads from it, never reimplements calc logic
-- **Dependencies** — add new crates as needed, no special approval process
-- **Testing** — primarily integration tests (boot Lua VM, verify calc output against known builds) and manual verification. Unit tests where they make sense.
+- **Never modify files under `upstream/`** - it is a read-only submodule
+- **The Lua VM is the source of truth** for game data and calculations - Rust reads from it, never reimplements calc logic
+- **Dependencies** - add new crates as needed, no special approval process
+- **Testing** - primarily integration tests (boot Lua VM, verify calc output against known builds) and manual verification. Unit tests where they make sense.
+
+## Upstream Usage Policy (three tiers)
+
+How Rust code may consume upstream Lua. Presentation (egui rendering,
+layout) is always fully ours and is not covered by these tiers.
+
+- **Tier 1 - Oracle. Always call, never reimplement.** Calculations, game
+  data, item/mod/URL parsers, and every interchange format (build XML,
+  clipboard formats, tree URLs, import API shapes). Divergence here is a bug
+  by definition. Cover with conformance tests that run upstream's own
+  functions (e.g. copy through upstream's `CopySocketGroup` via a shimmed
+  `Copy` global).
+- **Tier 2 - Faithful behavior. Call > wrap > port.** Interaction semantics
+  we currently want to match upstream. Call the upstream function when it is
+  callable headless; wrap it (runtime-decorate the Lua function or shim a
+  global) when a tweak is needed; port the body only when the logic is
+  welded to upstream UI controls. **Every port must be registered in
+  `ports.toml`** with an upstream anchor + hash - `cargo test --test
+  ports_sync` turns upstream changes to ported code into a review list.
+- **Tier 3 - Deliberate divergence.** Our own features and UX changes:
+  first-class code in our layer, never an edited port left under the same
+  name. Record each divergence in `DIVERGENCES.md`. If it began as a port,
+  mark the `ports.toml` entry `diverged` (keep the anchor so upgrades still
+  prompt a review).
+
+Two supporting rules: never depend on upstream UI-control state
+(`tab.controls.*`) - only on the data model and callable functions; and do
+not port preemptively "for flexibility" - porting later, at the moment you
+actually diverge, is cheap, while unexercised forks silently rot.
 
 ## Project Structure
 
@@ -107,4 +136,7 @@ upstream/                # Git submodule — READ-ONLY
 
 `docs/` contains reference documentation for longer-term research and future work:
 
-- **`asset-extraction.md`** — How PoE game assets (ascendancy art, tree sprites, icons) are stored in compressed bundles, how the upstream PoB project extracts them using the ooz/GGPK toolchain, and a roadmap for building our own standalone extraction pipeline in Rust.
+- **`asset-extraction.md`** - How PoE game assets (ascendancy art, tree sprites, icons) are stored in compressed bundles, how the upstream PoB project extracts them using the ooz/GGPK toolchain, and a roadmap for building our own standalone extraction pipeline in Rust.
+- **`upstream-upgrade.md`** - Playbook for moving the upstream submodule pin: sequence, checks, and rules learned from past upgrades.
+
+Related top-level files: **`ports.toml`** (registry of upstream logic ports, enforced by `cargo test --test ports_sync`) and **`DIVERGENCES.md`** (every place we intentionally behave differently from upstream).

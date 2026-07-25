@@ -31,10 +31,6 @@ pub struct GemInfo {
     pub count: i64,
     /// True when the count applies (gem grants a non-support effect).
     pub has_count: bool,
-    /// Selected quality variant type ("Default", "Alternate1", ...).
-    pub quality_id: String,
-    /// Quality variants this gem supports: (label, type). Len 1 = Default only.
-    pub alt_qualities: Vec<(String, String)>,
 }
 
 /// Extract all socket groups and the main skill index from the loaded build.
@@ -67,8 +63,6 @@ pub fn extract_skills(lua: &Lua) -> Result<Vec<SocketGroup>, mlua::Error> {
                             enabled = gem.enabled ~= false,
                             isSupport = false,
                             count = gem.count or 1,
-                            qualityId = gem.qualityId or "Default",
-                            altQualities = {},
                         }
                         if gem.gemData and gem.gemData.tags then
                             gemEntry.isSupport = gem.gemData.tags.support == true
@@ -86,10 +80,6 @@ pub fn extract_skills(lua: &Lua) -> Result<Vec<SocketGroup>, mlua::Error> {
                             end
                         end
                         gemEntry.hasCount = hasCount
-                        for _, alt in ipairs(skillsTab:getGemAltQualityList(gem.gemData)) do
-                            table.insert(gemEntry.altQualities,
-                                { label = alt.label, type = alt.type })
-                        end
                         table.insert(entry.gems, gemEntry)
                     end
                 end
@@ -107,15 +97,6 @@ pub fn extract_skills(lua: &Lua) -> Result<Vec<SocketGroup>, mlua::Error> {
         let mut gems = Vec::new();
         for gem_pair in gems_table.sequence_values::<LuaTable>() {
             let gem = gem_pair?;
-            let alt_table: LuaTable = gem.get("altQualities")?;
-            let mut alt_qualities = Vec::new();
-            for alt in alt_table.sequence_values::<LuaTable>() {
-                let alt = alt?;
-                alt_qualities.push((
-                    alt.get("label").unwrap_or_default(),
-                    alt.get("type").unwrap_or_default(),
-                ));
-            }
             gems.push(GemInfo {
                 name: gem.get("name").unwrap_or_default(),
                 level: gem.get("level").unwrap_or(1),
@@ -124,10 +105,6 @@ pub fn extract_skills(lua: &Lua) -> Result<Vec<SocketGroup>, mlua::Error> {
                 is_support: gem.get("isSupport").unwrap_or(false),
                 count: gem.get("count").unwrap_or(1),
                 has_count: gem.get("hasCount").unwrap_or(false),
-                quality_id: gem
-                    .get("qualityId")
-                    .unwrap_or_else(|_| "Default".to_string()),
-                alt_qualities,
             });
         }
         groups.push(SocketGroup {
@@ -155,7 +132,6 @@ pub struct GemOptions {
     pub default_level: String,
     pub default_quality: i64,
     pub show_support_types: String,
-    pub show_alt_quality: bool,
     pub show_legacy_gems: bool,
 }
 
@@ -200,7 +176,6 @@ pub fn gem_options(lua: &Lua) -> Result<GemOptions, mlua::Error> {
             defaultLevel = skillsTab.defaultGemLevel or "normalMaximum",
             defaultQuality = skillsTab.defaultGemQuality or 0,
             showSupportTypes = skillsTab.showSupportGemTypes or "ALL",
-            showAltQuality = skillsTab.showAltQualityGems == true,
             showLegacy = skillsTab.showLegacyGems == true,
         }
     "#,
@@ -218,7 +193,6 @@ pub fn gem_options(lua: &Lua) -> Result<GemOptions, mlua::Error> {
         show_support_types: t
             .get("showSupportTypes")
             .unwrap_or_else(|_| "ALL".to_string()),
-        show_alt_quality: t.get("showAltQuality").unwrap_or(false),
         show_legacy_gems: t.get("showLegacy").unwrap_or(false),
     })
 }
@@ -227,14 +201,13 @@ pub fn gem_options(lua: &Lua) -> Result<GemOptions, mlua::Error> {
 pub fn set_gem_options(lua: &Lua, options: &GemOptions) -> Result<(), mlua::Error> {
     lua.load(
         r#"
-        local sortByDPS, sortField, defaultLevel, defaultQuality, showSupportTypes, showAltQuality, showLegacy = ...
+        local sortByDPS, sortField, defaultLevel, defaultQuality, showSupportTypes, showLegacy = ...
         local skillsTab = mainObject_ref.main.modes['BUILD'].skillsTab
         skillsTab.sortGemsByDPS = sortByDPS
         skillsTab.sortGemsByDPSField = sortField
         skillsTab.defaultGemLevel = defaultLevel
         skillsTab.defaultGemQuality = defaultQuality
         skillsTab.showSupportGemTypes = showSupportTypes
-        skillsTab.showAltQualityGems = showAltQuality
         skillsTab.showLegacyGems = showLegacy
         skillsTab.modFlag = true
     "#,
@@ -245,7 +218,6 @@ pub fn set_gem_options(lua: &Lua, options: &GemOptions) -> Result<(), mlua::Erro
         options.default_level.as_str(),
         options.default_quality,
         options.show_support_types.as_str(),
-        options.show_alt_quality,
         options.show_legacy_gems,
     ))
 }
@@ -371,77 +343,59 @@ pub fn new_socket_group(lua: &Lua) -> Result<(), mlua::Error> {
     .exec()
 }
 
-/// Serialize a socket group to upstream's clipboard text format
-/// (CopySocketGroup): optional Label/Slot lines plus one line per gem.
+/// Serialize a socket group to upstream's clipboard text format by calling
+/// upstream's own CopySocketGroup with the `Copy` global shimmed to capture
+/// the text (tier 1: the format must never drift from upstream's).
 /// Returns None if the group does not exist.
 pub fn copy_socket_group_text(lua: &Lua, index: usize) -> Result<Option<String>, mlua::Error> {
     lua.load(
         r#"
         local index = ...
-        local group = mainObject_ref.main.modes['BUILD'].skillsTab.socketGroupList[index]
+        local skillsTab = mainObject_ref.main.modes['BUILD'].skillsTab
+        local group = skillsTab.socketGroupList[index]
         if not group then
             return nil
         end
-        local skillText = ""
-        if group.label and group.label:match("%S") then
-            skillText = skillText .. "Label: " .. group.label .. "\r\n"
+        local captured
+        local origCopy = Copy
+        Copy = function(text) captured = text end
+        local ok, err = pcall(function()
+            skillsTab:CopySocketGroup(group)
+        end)
+        Copy = origCopy
+        if not ok then
+            error(err)
         end
-        if group.slot then
-            skillText = skillText .. "Slot: " .. group.slot .. "\r\n"
-        end
-        for _, gemInstance in ipairs(group.gemList) do
-            skillText = skillText .. string.format("%s %d/%d %s %s %d\r\n",
-                gemInstance.nameSpec, gemInstance.level, gemInstance.quality,
-                gemInstance.qualityId, gemInstance.enabled and "" or "DISABLED",
-                gemInstance.count or 1)
-        end
-        return skillText
+        return captured
     "#,
     )
     .call(index)
 }
 
-/// Parse upstream's socket-group clipboard text and append it as a new
-/// socket group (PasteSocketGroup). Returns false when the text contains no
-/// valid gem lines (nothing is added).
+/// Append clipboard text as a new socket group by calling upstream's own
+/// PasteSocketGroup with the `Paste` global shimmed to return `text` (tier
+/// 1: the format must never drift from upstream's). Upstream adds the group
+/// and its undo state itself. Returns false when the text contains no valid
+/// gem lines (nothing is added).
 pub fn paste_socket_group_text(lua: &Lua, text: &str) -> Result<bool, mlua::Error> {
     lua.load(
         r#"
         local text = ...
         local build = mainObject_ref.main.modes['BUILD']
         local skillsTab = build.skillsTab
-        local skillText = sanitiseText(text)
-        if not skillText then
+        local countBefore = #skillsTab.socketGroupList
+        local origPaste = Paste
+        Paste = function() return text end
+        local ok, err = pcall(function()
+            skillsTab:PasteSocketGroup()
+        end)
+        Paste = origPaste
+        if not ok then
+            error(err)
+        end
+        if #skillsTab.socketGroupList == countBefore then
             return false
         end
-        local newGroup = { label = "", enabled = true, gemList = { } }
-        local label = skillText:match("Label: (%C+)")
-        if label then
-            newGroup.label = label
-        end
-        local slot = skillText:match("Slot: (%C+)")
-        if slot then
-            newGroup.slot = slot
-        end
-        for nameSpec, level, quality, qualityId, state, count in
-            skillText:gmatch("([ %a']+) (%d+)/(%d+) (%a+%d?) ?(%a*) (%d+)") do
-            table.insert(newGroup.gemList, {
-                nameSpec = nameSpec,
-                level = tonumber(level) or 20,
-                quality = tonumber(quality) or 0,
-                qualityId = qualityId,
-                enabled = state ~= "DISABLED",
-                count = tonumber(count) or 1,
-                enableGlobal1 = true,
-                enableGlobal2 = true,
-            })
-        end
-        if #newGroup.gemList == 0 then
-            return false
-        end
-        table.insert(skillsTab.socketGroupList, newGroup)
-        skillsTab:AddUndoState()
-        build.buildFlag = true
         _runCallback('OnFrame')
         return true
     "#,
@@ -586,8 +540,6 @@ pub enum GemProperty {
     Enabled(bool),
     /// Number of copies of the skill.
     Count(i64),
-    /// Quality variant type ("Default", "Alternate1", ...).
-    QualityId(String),
 }
 
 /// Set a property on a gem and reprocess the group.
@@ -602,10 +554,6 @@ pub fn set_gem_property(
         GemProperty::Quality(v) => ("quality", LuaValue::Integer(v)),
         GemProperty::Enabled(v) => ("enabled", LuaValue::Boolean(v)),
         GemProperty::Count(v) => ("count", LuaValue::Integer(v.max(1))),
-        GemProperty::QualityId(ref v) => (
-            "qualityId",
-            LuaValue::String(lua.create_string(v.as_str())?),
-        ),
     };
     lua.load(
         r#"

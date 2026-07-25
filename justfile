@@ -43,3 +43,14 @@ sync:
     cd upstream && git fetch origin && git checkout $(git describe --tags --abbrev=0 origin/master)
     @echo "Updated upstream to $(cd upstream && git describe --tags)"
     @echo "Run 'just build' to verify it compiles"
+
+# Pre-pin review of an upstream upgrade: changelog + scale between two tags.
+# Read-only; after moving the pin, run `cargo test --test ports_sync`.
+upgrade-review old new:
+    @echo "== commits {{old}}..{{new}} =="
+    @git -C upstream log --oneline {{old}}..{{new}} | wc -l
+    @echo "== code diff (excluding generated data) =="
+    @git -C upstream diff --stat {{old}}..{{new}} -- src/Classes/ src/Modules/ | tail -1
+    @echo "== changelog =="
+    @git -C upstream show {{new}}:CHANGELOG.md | awk -v tag="{{old}}" '/^## \[/{if (index($0, tag)) exit} {print}'
+    @echo "== next: diff the ports.toml anchors, move the pin, then: cargo test --test ports_sync && just test =="

@@ -628,30 +628,19 @@ pub fn generate_fallback_weights(
             end
         end
 
-        local calcFunc = build.calcsTab:GetMiscCalculator(build)
-        local baseOutput = calcFunc()
-        if baseOutput.Minion then
-            baseOutput = baseOutput.Minion
-        end
-        local baseValue = baseOutput[selection.stat] or 1
-        if selection.transform then
-            baseValue = selection.transform(baseValue)
-        end
+        -- v2.66+: stat values resolve through powerStatList.GetFromOutput
+        -- (handles Minion-prefixed stats and combined damage), and weights
+        -- are the gain normalized by the absolute base power
+        local calcFunc, calcBase = build.calcsTab:GetMiscCalculator(build)
+        local basePower = data.powerStatList.GetFromOutput(calcBase, selection)
 
-        local function statChange(addNode)
-            local output = calcFunc({ addNodes = { [addNode] = true } })
-            if output.Minion then
-                output = output.Minion
+        local function statGain(addNode)
+            if basePower == 0 then
+                return 0
             end
-            local outputValue = output[selection.stat] or 0
-            if selection.transform then
-                outputValue = selection.transform(outputValue)
-            end
-            outputValue = outputValue / baseValue
-            if outputValue ~= outputValue then
-                outputValue = 1
-            end
-            return outputValue
+            local nodeOutput = calcFunc({ addNodes = { [addNode] = true } })
+            local nodePower = data.powerStatList.GetFromOutput(nodeOutput, selection)
+            return (nodePower - basePower) / math.abs(basePower)
         end
 
         local weightScalar = 100
@@ -662,10 +651,10 @@ pub fn generate_fallback_weights(
             local divisor = newNode.divisor or 1
             local weight1, weight2
             if newNode.calcMultiple then
-                weight1 = (statChange(newNode.node[1]) - 1) / divisor
-                weight2 = (statChange(newNode.node[2]) - 1) / divisor
+                weight1 = statGain(newNode.node[1]) / divisor
+                weight2 = statGain(newNode.node[2]) / divisor
             else
-                weight1 = (statChange(newNode) - 1) / divisor
+                weight1 = statGain(newNode) / divisor
             end
             if weight1 ~= 0 or (weight2 and weight2 ~= 0) then
                 table.insert(out, {

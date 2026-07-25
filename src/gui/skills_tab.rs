@@ -115,7 +115,6 @@ impl SkillsPanel {
                 default_level: "normalMaximum".to_string(),
                 default_quality: 0,
                 show_support_types: "ALL".to_string(),
-                show_alt_quality: false,
                 show_legacy_gems: false,
             }
         });
@@ -323,16 +322,6 @@ impl SkillsPanel {
                             }
                         }
                     });
-                if ui
-                    .checkbox(&mut self.options.show_alt_quality, "Show quality variants")
-                    .on_hover_text(
-                        "Include Anomalous/Divergent/Phantasmal variants in gem \
-                         suggestions",
-                    )
-                    .changed()
-                {
-                    options_changed = true;
-                }
                 if ui
                     .checkbox(&mut self.options.show_legacy_gems, "Show legacy gems")
                     .on_hover_text("Include legacy (removed) gems in suggestions")
@@ -850,37 +839,6 @@ fn show_socket_group(
                             gem_index,
                             GemProperty::Quality(gem.quality),
                         ));
-                    }
-
-                    // Quality variant (Anomalous/Divergent/...) when the gem
-                    // has any beyond Default
-                    if gem.alt_qualities.len() > 1 {
-                        let current = gem
-                            .alt_qualities
-                            .iter()
-                            .find(|(_, t)| *t == gem.quality_id)
-                            .map(|(l, _)| l.as_str())
-                            .unwrap_or("Default");
-                        egui::ComboBox::from_id_salt(format!(
-                            "gem_quality_id_{group_index}_{gem_index}"
-                        ))
-                        .selected_text(current)
-                        .width(95.0)
-                        .show_ui(ui, |ui| {
-                            for (label, type_id) in &gem.alt_qualities {
-                                if ui
-                                    .selectable_label(*type_id == gem.quality_id, label)
-                                    .clicked()
-                                    && *type_id != gem.quality_id
-                                {
-                                    actions.push(SkillAction::SetGem(
-                                        group_index,
-                                        gem_index,
-                                        GemProperty::QualityId(type_id.clone()),
-                                    ));
-                                }
-                            }
-                        });
                     }
 
                     // Skill copy count (totems, mirages, item-triggered copies)

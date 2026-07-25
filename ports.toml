@@ -1,0 +1,156 @@
+# Registry of upstream logic ported into this codebase.
+#
+# Every Lua chunk that REIMPLEMENTS an upstream function (rather than calling
+# it) must be registered here. `cargo test --test ports_sync` extracts each
+# anchored snippet from the pinned upstream submodule, hashes it, and fails
+# when upstream changed a function we ported - turning silent drift into a
+# review list. See CLAUDE.md "Upstream usage policy" and
+# docs/upstream-upgrade.md.
+#
+# When ports_sync fails after a pin bump:
+#   1. Diff the upstream function between the old and new pins.
+#   2. Re-sync the port (or record the difference in DIVERGENCES.md if the
+#      divergence is intentional).
+#   3. Update `sha256` to the value printed by the test.
+#
+# Snippet extraction: from the first line containing `anchor` up to either
+# the first line containing `end_anchor` (exclusive), or the `end` keyword at
+# the anchor line's indentation. Lines are trimmed of trailing whitespace.
+#
+# `status` is documentation: "faithful" ports track upstream byte-for-byte in
+# behavior; "diverged" ports intentionally differ (list the differences in
+# DIVERGENCES.md) but still want review when upstream moves.
+
+[[port]]
+name = "timeless-seed-search"
+ours = "src/data/timeless.rs::find_timeless_seeds"
+upstream = "src/Classes/TreeTab.lua"
+anchor = "local function searchSingleSocket"
+sha256 = "6f786231ee117aeea00243834706d2803cdd3dbaa2a5c1d1f847bfe88bd3fa21"
+status = "faithful"
+notes = "Seed loop, GV value weighting, Total-attribute pseudo-stat formulas. Protected nodes / socket filter not ported."
+
+[[port]]
+name = "timeless-fallback-weights"
+ours = "src/data/timeless.rs::generate_fallback_weights"
+upstream = "src/Classes/TreeTab.lua"
+anchor = "local function generateFallbackWeights"
+sha256 = "56b6d4c4aa695bb2358390f6100d463fbfb625221103a3ed4b31bb5a34c922ad"
+status = "faithful"
+
+[[port]]
+name = "timeless-fallback-node-building"
+ours = "src/data/timeless.rs::generate_fallback_weights"
+upstream = "src/Classes/TreeTab.lua"
+anchor = "local function setupFallbackWeights"
+sha256 = "b80b228b7bf8ad121e761a6ea9a761a72dc5f54ce9d55862fbdbd7381d149dea"
+status = "faithful"
+notes = "Node/modList construction incl. replaceHelperFunc vaal substitution."
+
+[[port]]
+name = "timeless-stat-list"
+ours = "src/data/timeless.rs::timeless_stats"
+upstream = "src/Classes/TreeTab.lua"
+anchor = "local function buildMods()"
+sha256 = "304512556aa20a45c77ba920df2e8dcb539626e91f975f84d44543ba06411cfb"
+status = "faithful"
+notes = "Ignored-mod filter, total pseudo-stat, notable/small split."
+
+[[port]]
+name = "tattoo-option-filter"
+ours = "src/data/tattoos.rs::tattoo_options"
+upstream = "src/Classes/TreeTab.lua"
+anchor = "local function buildMods(selectedNode)"
+sha256 = "6085aff0098d8395177a34beab1ee464599818134ecd3352d5c54c9aaa968577"
+status = "faithful"
+notes = "Target-type/value matching, MinimumConnected, legacy toggle."
+
+[[port]]
+name = "tattoo-apply"
+ours = "src/data/tattoos.rs::apply_tattoo"
+upstream = "src/Classes/TreeTab.lua"
+anchor = "local function addModifier(selectedNode)"
+sha256 = "ab3889c38c510857f030a0766795aa64fb9cfda3786227004df6982a74ca39ca"
+status = "faithful"
+
+[[port]]
+name = "tree-search-matcher"
+ours = "src/data/tree.rs::search_nodes"
+upstream = "src/Classes/PassiveTreeView.lua"
+anchor = "function PassiveTreeViewClass:DoesNodeMatchSearchParams"
+sha256 = "3e3a17a911442e74075528ce3fee7208e3d46e3f92f6396f0cb2f373a811cd7d"
+status = "faithful"
+notes = "Also conformance-tested against the live upstream function."
+
+[[port]]
+name = "tree-search-param-split"
+ours = "src/data/tree.rs::search_nodes"
+upstream = "src/Classes/PassiveTreeView.lua"
+anchor = "local function prepSearch"
+sha256 = "f8e1475c13408dec2021780672975d7ee5e798107e0a18e7af6e3a86e8cd3cf5"
+status = "faithful"
+
+[[port]]
+name = "tree-trace-mode"
+ours = "src/data/tree.rs::extend_trace_path"
+upstream = "src/Classes/PassiveTreeView.lua"
+anchor = "if self.traceMode then"
+end_anchor = "elseif hoverNode and hoverNode.path then"
+sha256 = "ebf1c4ffdb74d74ca9d556462ef2d344e82af26bd4817f1481a33ca78f1c1c95"
+status = "faithful"
+
+[[port]]
+name = "tree-click-routing"
+ours = "src/data/tree.rs::click_node + confirm_class_switch"
+upstream = "src/Classes/PassiveTreeView.lua"
+anchor = "-- Check if the node belongs to a different ascendancy"
+end_anchor = "-- Normal node allocation"
+sha256 = "d03a0147f132ee9833dd690cd68b898b5a3891c67d6342d4a1c1710976e38403"
+status = "faithful"
+notes = "Ascendancy/bloodline/cross-class switching with confirmation."
+
+[[port]]
+name = "socket-group-reorder"
+ours = "src/data/skills.rs::move_socket_group"
+upstream = "src/Classes/SkillListControl.lua"
+anchor = "function SkillListClass:OnOrderChange"
+sha256 = "995ed308bc198b8292471b9da17e807886d87b7ed6eb3fda35219e218d100fea"
+status = "faithful"
+notes = "mainSocketGroup + calcs skill_number index adjustment."
+
+[[port]]
+name = "loadout-sync"
+ours = "src/data/loadouts.rs"
+upstream = "src/Modules/Build.lua"
+anchor = "function buildMode:SyncLoadouts"
+sha256 = "46bdbe32c4367ab80a72224534671d6cc90fcd893499052510969efb7f2c4165"
+status = "faithful"
+
+[[port]]
+name = "spec-save-shape"
+ours = "tests/interaction_tests.rs::test_build_xml_roundtrip"
+upstream = "src/Classes/PassiveSpec.lua"
+anchor = "function PassiveSpecClass:Save(xml)"
+sha256 = "c8d4839cfb71074bc0ea386fc55942b4b7f5ba8afec511289a718bb74ce2275c"
+status = "faithful"
+notes = "The round-trip canonicalization assumes nodes/masteryEffects are hash-ordered sets."
+
+[[port]]
+name = "char-import-tree-shaping"
+ours = "src/data/char_import.rs::import_passive_tree_and_jewels"
+upstream = "src/Classes/ImportTab.lua"
+anchor = "function ImportTabClass:DownloadPassiveTree"
+end_anchor = "function ImportTabClass:DownloadItems"
+sha256 = "98f7ea7ba248a6cd4a85d0d7912dd41d38647077f234a1f85b4d9066baf6058d"
+status = "faithful"
+notes = "charData shaping for the legacy site API (passives/jewels fields)."
+
+[[port]]
+name = "char-import-items-shaping"
+ours = "src/data/char_import.rs::import_items_and_skills"
+upstream = "src/Classes/ImportTab.lua"
+anchor = "function ImportTabClass:DownloadItems"
+end_anchor = "function ImportTabClass:DownloadSiteCharacterList"
+sha256 = "8ef34d046712fda609fdc2ce598492a4c1e5544a491e29f41969ea4557718729"
+status = "faithful"
+notes = "charData shaping for the legacy site API (equipment field, top-level level)."

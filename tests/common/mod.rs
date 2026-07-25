@@ -1,3 +1,5 @@
+#![allow(dead_code)] // shared across test binaries; not all use every helper
+
 use std::path::PathBuf;
 
 /// Find the repo root by walking up from the test executable.
