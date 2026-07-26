@@ -147,7 +147,12 @@ impl ConfigPanel {
         // Toolbar: search + ineligible toggle
         ui.horizontal(|ui| {
             ui.label("Search:");
-            ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(200.0));
+            let response =
+                ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(200.0));
+            // Ctrl+F focuses the search box (upstream ConfigTab key handling)
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+                response.request_focus();
+            }
             if !self.search.is_empty() && ui.button("x").clicked() {
                 self.search.clear();
             }

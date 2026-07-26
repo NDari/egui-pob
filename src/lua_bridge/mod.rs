@@ -236,15 +236,16 @@ impl LuaBridge {
 
     /// Save the current build to disk with a given name (Save As).
     /// Mirrors upstream's OpenSaveAsPopup: the file goes to
-    /// main.buildPath .. name .. ".xml" with illegal filename characters
-    /// replaced, and build.dbFileName/buildName are updated so subsequent
-    /// saves write to the same file.
-    pub fn save_build_as(&self, name: &str) -> Result<()> {
+    /// main.buildPath .. sub_path .. name .. ".xml" with illegal filename
+    /// characters replaced, and build.dbFileName/dbFileSubPath/buildName are
+    /// updated so subsequent saves write to the same file. `sub_path` is
+    /// relative to the builds root and either empty or "a/b/"-shaped.
+    pub fn save_build_as(&self, name: &str, sub_path: &str) -> Result<()> {
         let err: Option<String> = self
             .lua
             .load(
                 r#"
-                local name = ...
+                local name, subPath = ...
                 local main = mainObject_ref.main
                 local build = main.modes['BUILD']
                 name = name:gsub("[\\/:%*%?\"<>|%c]", "-")
@@ -252,8 +253,8 @@ impl LuaBridge {
                     return "Build name cannot be empty"
                 end
                 MakeDir(main.buildPath)
-                build.dbFileName = main.buildPath .. name .. ".xml"
-                build.dbFileSubPath = ""
+                build.dbFileName = main.buildPath .. subPath .. name .. ".xml"
+                build.dbFileSubPath = subPath
                 build.buildName = name
                 -- SaveDBFile returns true on failure (unwritable path, etc.)
                 if build:SaveDBFile() then
@@ -263,13 +264,22 @@ impl LuaBridge {
                 return nil
             "#,
             )
-            .call(name)
+            .call((name, sub_path))
             .map_err(lua_err("Save As failed"))?;
 
         if let Some(err) = err {
             anyhow::bail!("{err}");
         }
         Ok(())
+    }
+
+    /// The build's folder relative to the builds root ("" or "a/b/"),
+    /// upstream's build.dbFileSubPath.
+    pub fn build_file_sub_path(&self) -> String {
+        self.lua
+            .load("return mainObject_ref.main.modes['BUILD'].dbFileSubPath or ''")
+            .eval()
+            .unwrap_or_default()
     }
 
     /// Switch to the build list mode.

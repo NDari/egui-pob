@@ -671,3 +671,73 @@ pub fn remove_gem(lua: &Lua, group_index: usize, gem_index: usize) -> Result<(),
     ))
     .exec()
 }
+
+/// Build the full upstream gem tooltip (GemTooltip.AddGemTooltip) for a gem
+/// in a socket group. Returns empty lines when the gem has no gemData
+/// (unrecognised name).
+pub fn gem_tooltip_lines(
+    lua: &Lua,
+    group_index: usize,
+    gem_index: usize,
+) -> Result<Vec<super::items::TooltipLine>, mlua::Error> {
+    let result: LuaTable = lua
+        .load(
+            r#"
+            local groupIndex, gemIndex = ...
+            local build = mainObject_ref.main.modes['BUILD']
+            local group = build.skillsTab.socketGroupList[groupIndex]
+            local gemInstance = group and group.gemList[gemIndex]
+            if not gemInstance or not gemInstance.gemData then
+                return { lines = {} }
+            end
+            local gemTooltip = LoadModule("Classes/GemTooltip")
+            local tt = new("Tooltip")
+            local ok, err = pcall(function()
+                gemTooltip.AddGemTooltip(tt, build, gemInstance)
+            end)
+            local lines = {}
+            for _, line in ipairs(tt.lines) do
+                table.insert(lines, {
+                    text = line.text or "",
+                    size = line.size or 16,
+                    sep = line.text == nil,
+                })
+            end
+            return { lines = lines, err = not ok and tostring(err) or nil }
+        "#,
+        )
+        .call((group_index, gem_index))?;
+
+    if let Ok(err) = result.get::<String>("err") {
+        log::warn!("AddGemTooltip failed for gem {group_index}/{gem_index}: {err}");
+    }
+
+    let lines_table: LuaTable = result.get("lines")?;
+    let mut lines = Vec::new();
+    for pair in lines_table.sequence_values::<LuaTable>() {
+        let line = pair?;
+        lines.push(super::items::TooltipLine {
+            text: line.get("text").unwrap_or_default(),
+            size: line.get("size").unwrap_or(16.0),
+            is_separator: line.get("sep").unwrap_or(false),
+        });
+    }
+    Ok(lines)
+}
+
+/// Open the wiki page for a gem in a socket group, via upstream's
+/// itemLib.wiki.openGem (OpenURL is bound to the system browser).
+pub fn open_gem_wiki(lua: &Lua, group_index: usize, gem_index: usize) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local groupIndex, gemIndex = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local group = build.skillsTab.socketGroupList[groupIndex]
+        local gemInstance = group and group.gemList[gemIndex]
+        if gemInstance and gemInstance.gemData then
+            itemLib.wiki.openGem(gemInstance.gemData)
+        end
+    "#,
+    )
+    .call((group_index, gem_index))
+}

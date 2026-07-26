@@ -1,6 +1,7 @@
 //! Build view: container for an open build with stat sidebar and tabs.
 
 use pob_egui::data::CalcOutput;
+use pob_egui::data::build_list::{self, BuildEntry};
 use pob_egui::data::display_stats::{self, SidebarStats};
 use pob_egui::data::loadouts;
 use pob_egui::lua_bridge::LuaBridge;
@@ -91,6 +92,66 @@ struct SaveAsDialog {
     /// True when triggered by leaving the build (back button): offers
     /// Discard, and navigates back after saving.
     then_close: bool,
+    /// Builds root directory (main.buildPath, trailing slash).
+    build_path: String,
+    /// Target folder relative to the builds root ("" or "a/b/"), like
+    /// upstream's dbFileSubPath.
+    sub_path: String,
+    /// Subfolders of `sub_path` shown in the folder browser.
+    folders: Vec<String>,
+    /// New-folder input state: (name, error), Some while the input is open.
+    new_folder: Option<(String, Option<String>)>,
+}
+
+impl SaveAsDialog {
+    fn new(name: String, then_close: bool, bridge: &LuaBridge) -> Self {
+        let mut dialog = Self {
+            name,
+            error: None,
+            then_close,
+            build_path: bridge.build_path().unwrap_or_default(),
+            sub_path: bridge.build_file_sub_path(),
+            folders: Vec::new(),
+            new_folder: None,
+        };
+        dialog.refresh_folders();
+        dialog
+    }
+
+    fn refresh_folders(&mut self) {
+        self.folders = build_list::scan_builds(&self.build_path, &self.sub_path)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                BuildEntry::Folder(f) => Some(f.folder_name),
+                BuildEntry::Build(_) => None,
+            })
+            .collect();
+    }
+
+    /// Target file for the current name, with illegal filename characters
+    /// replaced the same way the Lua save path does.
+    fn target_file(&self) -> Option<std::path::PathBuf> {
+        let sanitized: String = self
+            .name
+            .trim()
+            .chars()
+            .map(|c| {
+                if "\\/:*?\"<>|".contains(c) || c.is_control() {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        if sanitized.trim().is_empty() {
+            return None;
+        }
+        Some(
+            std::path::Path::new(&self.build_path)
+                .join(&self.sub_path)
+                .join(format!("{sanitized}.xml")),
+        )
+    }
 }
 
 impl BuildView {
@@ -182,11 +243,7 @@ impl BuildView {
     /// Save the build, opening the Save As dialog if it has no file yet.
     fn request_save(&mut self, bridge: &LuaBridge) {
         if bridge.build_file_name().is_none() {
-            self.save_as_dialog = Some(SaveAsDialog {
-                name: self.build_name.clone(),
-                error: None,
-                then_close: false,
-            });
+            self.save_as_dialog = Some(SaveAsDialog::new(self.build_name.clone(), false, bridge));
         } else {
             match bridge.save_build() {
                 Ok(()) => log::info!("Build saved"),
@@ -201,11 +258,7 @@ impl BuildView {
         let dirty = bridge.is_build_dirty();
         if bridge.build_file_name().is_none() && (self.is_unsaved_new || dirty) {
             // Never saved: needs a name before it can be kept
-            self.save_as_dialog = Some(SaveAsDialog {
-                name: self.build_name.clone(),
-                error: None,
-                then_close: true,
-            });
+            self.save_as_dialog = Some(SaveAsDialog::new(self.build_name.clone(), true, bridge));
             false
         } else if dirty {
             self.save_prompt = true;
@@ -266,6 +319,21 @@ impl BuildView {
             let mut do_save = false;
             let mut discard = false;
             let then_close = dialog.then_close;
+            // Deferred folder actions (applied after the window closure)
+            let mut nav_to: Option<String> = None;
+            let mut enter_folder: Option<String> = None;
+            let mut do_create_folder = false;
+            let mut cancel_new_folder = false;
+
+            // Upstream refuses to overwrite a different build's file; saving
+            // over this build's own file is a normal save
+            let target = dialog.target_file();
+            let overwrite_blocked = target.as_ref().is_some_and(|t| {
+                t.exists()
+                    && bridge
+                        .build_file_name()
+                        .is_none_or(|f| std::path::Path::new(&f) != t)
+            });
 
             egui::Window::new("Save Build As")
                 .collapsible(false)
@@ -274,14 +342,83 @@ impl BuildView {
                 .show(ui.ctx(), |ui| {
                     ui.label("Enter a name for this build:");
                     let response = ui.text_edit_singleline(&mut dialog.name);
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if response.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && !overwrite_blocked
+                    {
                         do_save = true;
+                    }
+
+                    // Folder breadcrumb (Builds / a / b, each segment jumps)
+                    ui.horizontal(|ui| {
+                        ui.label("Folder:");
+                        if ui.selectable_label(false, "Builds").clicked() {
+                            nav_to = Some(String::new());
+                        }
+                        let components: Vec<&str> = dialog
+                            .sub_path
+                            .split('/')
+                            .filter(|c| !c.is_empty())
+                            .collect();
+                        for (i, component) in components.iter().enumerate() {
+                            ui.label("/");
+                            if ui.selectable_label(false, *component).clicked() {
+                                nav_to = Some(format!("{}/", components[..=i].join("/")));
+                            }
+                        }
+                    });
+                    egui::ScrollArea::vertical()
+                        .id_salt("save_as_folders")
+                        .max_height(180.0)
+                        .show(ui, |ui| {
+                            for folder in &dialog.folders {
+                                if ui.button(format!("📁 {folder}")).clicked() {
+                                    enter_folder = Some(folder.clone());
+                                }
+                            }
+                            if dialog.folders.is_empty() {
+                                ui.weak("(no subfolders)");
+                            }
+                        });
+
+                    // New folder input
+                    if let Some((folder_name, folder_err)) = &mut dialog.new_folder {
+                        ui.horizontal(|ui| {
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(folder_name)
+                                    .hint_text("Folder name")
+                                    .desired_width(180.0),
+                            );
+                            let submit =
+                                resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if ui.button("Create").clicked() || submit {
+                                do_create_folder = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel_new_folder = true;
+                            }
+                        });
+                        if let Some(err) = folder_err {
+                            ui.colored_label(egui::Color32::RED, err.as_str());
+                        }
+                    } else if ui.button("+ New Folder").clicked() {
+                        dialog.new_folder = Some((String::new(), None));
+                    }
+
+                    if overwrite_blocked {
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            "A build with this name already exists in this folder.",
+                        );
                     }
                     if let Some(ref err) = dialog.error {
                         ui.colored_label(egui::Color32::RED, err);
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
+                        if ui
+                            .add_enabled(!overwrite_blocked, egui::Button::new("Save"))
+                            .clicked()
+                        {
                             do_save = true;
                         }
                         if then_close && ui.button("Discard").clicked() {
@@ -293,12 +430,38 @@ impl BuildView {
                     });
                 });
 
+            // Apply deferred folder actions
+            if cancel_new_folder {
+                dialog.new_folder = None;
+            }
+            if let Some(sub_path) = nav_to {
+                dialog.sub_path = sub_path;
+                dialog.refresh_folders();
+            }
+            if let Some(folder) = enter_folder {
+                dialog.sub_path = format!("{}{folder}/", dialog.sub_path);
+                dialog.refresh_folders();
+            }
+            if do_create_folder && let Some((folder_name, _)) = dialog.new_folder.clone() {
+                let folder_name = folder_name.trim().to_string();
+                match build_list::create_folder(&dialog.build_path, &dialog.sub_path, &folder_name)
+                {
+                    Ok(()) => {
+                        // Navigate into the new folder like upstream
+                        dialog.sub_path = format!("{}{folder_name}/", dialog.sub_path);
+                        dialog.new_folder = None;
+                        dialog.refresh_folders();
+                    }
+                    Err(e) => dialog.new_folder = Some((folder_name, Some(e))),
+                }
+            }
+
             if do_save {
                 let name = dialog.name.trim().to_string();
                 if name.is_empty() {
                     dialog.error = Some("Name cannot be empty.".to_string());
                 } else {
-                    match bridge.save_build_as(&name) {
+                    match bridge.save_build_as(&name, &dialog.sub_path) {
                         Ok(()) => {
                             self.build_name = name;
                             self.is_unsaved_new = false;
@@ -396,11 +559,8 @@ impl BuildView {
                 request_save = true;
             }
             if ui.button("Save As").clicked() {
-                self.save_as_dialog = Some(SaveAsDialog {
-                    name: self.build_name.clone(),
-                    error: None,
-                    then_close: false,
-                });
+                self.save_as_dialog =
+                    Some(SaveAsDialog::new(self.build_name.clone(), false, bridge));
             }
 
             ui.separator();

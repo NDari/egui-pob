@@ -3,9 +3,12 @@
 use std::collections::HashMap;
 
 use pob_egui::data::gems::{self, GemChoice};
+use pob_egui::data::items::TooltipLine;
 use pob_egui::data::skill_sets::{self, SkillSetInfo};
 use pob_egui::data::skills::{self, GemOptions, GemProperty, SocketGroup};
 use pob_egui::lua_bridge::LuaBridge;
+
+use super::items_tab::show_tooltip_lines;
 
 /// Pending name prompt in the skill set manager.
 enum SetAction {
@@ -99,6 +102,11 @@ pub struct SkillsPanel {
     /// Gem list/default options (mirrors upstream SkillsTab fields).
     options: GemOptions,
     show_options: bool,
+    /// Cached gem tooltips keyed by (group index, gem index); cleared on
+    /// every change since content depends on level/quality/build state.
+    gem_tooltip_cache: HashMap<(usize, usize), Vec<TooltipLine>>,
+    /// Gem under the cursor this frame (group index, gem index), for F1.
+    hovered_gem: Option<(usize, usize)>,
 }
 
 impl SkillsPanel {
@@ -137,6 +145,8 @@ impl SkillsPanel {
                     confirm_delete_set: None,
                     options: options.clone(),
                     show_options: false,
+                    gem_tooltip_cache: HashMap::new(),
+                    hovered_gem: None,
                 }
             }
             Err(e) => {
@@ -157,6 +167,8 @@ impl SkillsPanel {
                     confirm_delete_set: None,
                     options: options.clone(),
                     show_options: false,
+                    gem_tooltip_cache: HashMap::new(),
+                    hovered_gem: None,
                 }
             }
         }
@@ -169,6 +181,7 @@ impl SkillsPanel {
             return false;
         }
 
+        self.hovered_gem = None;
         let mut actions: Vec<SkillAction> = Vec::new();
 
         // Ctrl+C copies the main socket group, Ctrl+V pastes one from the
@@ -398,6 +411,8 @@ impl SkillsPanel {
                             &mut actions,
                             &mut self.confirm_delete,
                             &mut self.suggest,
+                            &mut self.gem_tooltip_cache,
+                            &mut self.hovered_gem,
                         )
                     })
                     .inner;
@@ -447,6 +462,14 @@ impl SkillsPanel {
             }
         }
 
+        // F1 opens the wiki for the hovered gem (upstream itemLib.wiki)
+        if let Some((group, gem)) = self.hovered_gem
+            && ui.input(|i| i.key_pressed(egui::Key::F1))
+            && let Err(e) = skills::open_gem_wiki(bridge.lua(), group, gem)
+        {
+            log::error!("Failed to open gem wiki: {e}");
+        }
+
         let changed = self.apply_actions(bridge, actions);
         if changed {
             match skills::extract_skills(bridge.lua()) {
@@ -463,6 +486,7 @@ impl SkillsPanel {
             // Group indices may have shifted; drop stale edit buffers
             self.label_edits.clear();
             self.add_gem_text.clear();
+            self.gem_tooltip_cache.clear();
         }
         changed
     }
@@ -667,6 +691,8 @@ fn show_socket_group(
     actions: &mut Vec<SkillAction>,
     confirm_delete: &mut Option<usize>,
     suggest: &mut GemSuggest,
+    gem_tooltip_cache: &mut HashMap<(usize, usize), Vec<TooltipLine>>,
+    hovered_gem: &mut Option<(usize, usize)>,
 ) -> egui::Response {
     let title = socket_group_title(group);
     let (title, title_color) = if group.is_main {
@@ -841,7 +867,24 @@ fn show_socket_group(
                     } else {
                         super::theme::Theme::GEM_ACTIVE
                     };
-                    ui.colored_label(color, &gem.name);
+                    let name_resp = ui.colored_label(color, &gem.name);
+                    // Upstream gem tooltip (GemTooltip.lua) on hover; F1 on
+                    // the hovered gem opens its wiki page
+                    if name_resp.hovered() {
+                        *hovered_gem = Some((group_index, gem_index));
+                        let lines = gem_tooltip_cache
+                            .entry((group_index, gem_index))
+                            .or_insert_with(|| {
+                                skills::gem_tooltip_lines(bridge.lua(), group_index, gem_index)
+                                    .unwrap_or_else(|e| {
+                                        log::error!("Gem tooltip failed: {e}");
+                                        Vec::new()
+                                    })
+                            });
+                        if !lines.is_empty() {
+                            name_resp.on_hover_ui(|ui| show_tooltip_lines(ui, lines));
+                        }
+                    }
 
                     let level_response = ui.add(
                         egui::DragValue::new(&mut gem.level)

@@ -175,6 +175,8 @@ pub struct ItemsPanel {
     addmod_catalog_cache: Option<(i64, String, Vec<crafting::ModCatalogEntry>)>,
     /// Cached add-modifier sort values keyed by (item, source, stat index).
     addmod_sort_cache: Option<(i64, String, usize, Vec<f64>)>,
+    /// Item under the cursor this frame (slot or list), for E/Ctrl+C/F1.
+    hovered_item: Option<i64>,
 }
 
 /// Raw-text item editor state. `item_id` is None when creating a new item.
@@ -244,6 +246,7 @@ impl ItemsPanel {
             addmod_sources_cache: None,
             addmod_catalog_cache: None,
             addmod_sort_cache: None,
+            hovered_item: None,
         }
     }
 
@@ -255,6 +258,7 @@ impl ItemsPanel {
         }
 
         let mut changed = false;
+        self.hovered_item = None;
 
         // Undo/redo (Ctrl+Z / Ctrl+Y), only when no widget (e.g. a search or
         // edit field) has keyboard focus
@@ -435,6 +439,45 @@ impl ItemsPanel {
                     });
             });
         });
+
+        // Hovered-item shortcuts: E opens the text editor (upstream's plain
+        // "e" over a slot), Ctrl+C copies the item text (upstream's item-list
+        // copy, CRLF line endings), F1 opens the wiki page
+        if let Some(item_id) = self.hovered_item {
+            let no_focus = ui.ctx().memory(|m| m.focused().is_none());
+            if no_focus && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::E)) {
+                match items::get_item_raw(bridge.lua(), item_id) {
+                    Ok(raw) if !raw.is_empty() => {
+                        self.edit_dialog = Some(EditItemDialog {
+                            item_id: Some(item_id),
+                            text: raw,
+                            error: None,
+                            valid: true,
+                            validated_text: String::new(),
+                            info: None,
+                        });
+                    }
+                    Ok(_) => log::error!("Item {item_id} has no raw text"),
+                    Err(e) => log::error!("Failed to get item text: {e}"),
+                }
+            }
+            if no_focus && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)) {
+                match items::get_item_raw(bridge.lua(), item_id) {
+                    Ok(raw) if !raw.is_empty() => {
+                        if let Ok(mut clip) = arboard::Clipboard::new() {
+                            let _ = clip.set_text(raw.replace('\n', "\r\n"));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => log::error!("Failed to copy item: {e}"),
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::F1))
+                && let Err(e) = items::open_item_wiki(bridge.lua(), item_id)
+            {
+                log::error!("Failed to open item wiki: {e}");
+            }
+        }
 
         changed
     }
@@ -2370,6 +2413,7 @@ impl ItemsPanel {
                                     let resp = hover_tooltip(
                                         resp,
                                         &mut self.tooltip_cache,
+                                        &mut self.hovered_item,
                                         bridge,
                                         choice.id,
                                         Some(&slot.slot_name),
@@ -2413,6 +2457,7 @@ impl ItemsPanel {
                             hover_tooltip(
                                 combo_resp.response,
                                 &mut self.tooltip_cache,
+                                &mut self.hovered_item,
                                 bridge,
                                 slot.sel_item_id,
                                 Some(&slot.slot_name),
@@ -2579,7 +2624,14 @@ impl ItemsPanel {
                         ui.close_menu();
                     }
                 });
-                hover_tooltip(resp, &mut self.tooltip_cache, bridge, entry.id, None);
+                hover_tooltip(
+                    resp,
+                    &mut self.tooltip_cache,
+                    &mut self.hovered_item,
+                    bridge,
+                    entry.id,
+                    None,
+                );
 
                 if let Some(ref slot) = entry.equipped_slot {
                     ui.colored_label(Theme::TEXT_DIM, format!("({slot})"));
@@ -3063,6 +3115,7 @@ fn show_item_edit_controls(
 fn hover_tooltip(
     resp: egui::Response,
     cache: &mut HashMap<(i64, Option<String>), Vec<TooltipLine>>,
+    hovered: &mut Option<i64>,
     bridge: &LuaBridge,
     item_id: i64,
     slot_name: Option<&str>,
@@ -3070,6 +3123,7 @@ fn hover_tooltip(
     if !resp.hovered() {
         return resp;
     }
+    *hovered = Some(item_id);
     let key = (item_id, slot_name.map(str::to_owned));
     if !cache.contains_key(&key) {
         let lines =
@@ -3105,7 +3159,7 @@ fn item_set_label(set: &ItemSetInfo) -> String {
 }
 
 /// Render item tooltip lines (shared by build items and DB items).
-fn show_tooltip_lines(ui: &mut egui::Ui, lines: &[TooltipLine]) {
+pub(super) fn show_tooltip_lines(ui: &mut egui::Ui, lines: &[TooltipLine]) {
     ui.spacing_mut().item_spacing.y = 2.0;
     for line in lines {
         if line.is_separator {

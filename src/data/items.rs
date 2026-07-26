@@ -706,6 +706,21 @@ pub fn item_tooltip_lines(
     Ok(lines)
 }
 
+/// Open the wiki page for an item, via upstream's itemLib.wiki.openItem
+/// (unique/relic title or base name; OpenURL is bound to the system browser).
+pub fn open_item_wiki(lua: &Lua, item_id: i64) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local itemId = ...
+        local item = mainObject_ref.main.modes['BUILD'].itemsTab.items[itemId]
+        if item then
+            itemLib.wiki.openItem(item)
+        end
+    "#,
+    )
+    .call(item_id)
+}
+
 fn lua_string_list(table: &LuaTable, key: &str) -> Vec<String> {
     table
         .get::<LuaTable>(key)

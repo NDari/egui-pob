@@ -28,7 +28,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 ### Save System
 - [x] Save build to disk (Save)
 - [x] Save As (new name, for new builds)
-- [ ] Save As with folder browser (like upstream's folder list + new folder)
+- [x] Save As with folder browser (subfolder list + breadcrumb navigation, New Folder, overwrite guard, dbFileSubPath tracking like upstream's OpenSaveAsPopup)
 - [x] Save confirmation popup on close/switch with unsaved changes
 - [~] Auto-save / dirty-state tracking (dirty tracking via upstream build.unsaved done; auto-save not planned)
 
@@ -246,7 +246,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 ### Corruption & Influence
 - [x] Corrupt item popup (two group-exclusive implicit dropdowns; corrupting with none marks Corrupted only)
 - [x] Add implicit popup (Exarch/Eater when influenced, Delve, Custom; tiered groups; eldritch replaces in place. Synthesis omitted like upstream; Scourge not implemented)
-- [ ] Crucible modifier popup (5-node tree selection)
+- Crucible modifier popup - deferred, see §16
 
 ### Cluster Jewels
 - [x] Cluster jewel skill dropdown (in the craft editor; upstream skill list minus unavailable attrs)
@@ -318,9 +318,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 ## 9. Party Tab
 
-- [ ] Party tab for configuring party member effects
-- [ ] Party aura/buff configuration
-- [ ] Enemy modifier list from party
+Deferred - see §16.
 
 ---
 
@@ -402,14 +400,14 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Ctrl+W: Close build (with save prompt)
 - [x] Ctrl+Z: Undo (tree, items, config)
 - [x] Ctrl+Y: Redo (tree, items, config)
-- [~] Ctrl+F: Focus search (tree, calcs done; config pending)
+- [x] Ctrl+F: Focus search (tree, calcs, config)
 - [x] Ctrl+I: Open Import/Export
 - [x] Ctrl+1-7: Switch tabs (Tree, Skills, Items, Calcs, Config, Notes, Import/Export; no Party tab yet)
 - [x] Ctrl+V: Paste item (in items tab)
-- [~] Ctrl+C: Copy (skills tab copies the main socket group; items-tab copy pending)
-- [ ] Ctrl+E: Edit equipped item
+- [x] Ctrl+C: Copy (skills tab copies the main socket group; items tab copies the hovered item's text with CRLF endings like upstream's item-list copy)
+- [x] E: Edit hovered item (upstream binds plain "e" over a slot, not Ctrl+E; ours opens the text editor for any hovered slot or list item)
 - [x] Ctrl+D: Toggle stat differences (in node tooltips, on the tree tab)
-- [ ] F1: Open wiki for hovered item/gem
+- [x] F1: Open wiki for hovered item/gem (via upstream itemLib.wiki; items and skills tabs)
 - [x] Mouse4: Close build
 
 ---
@@ -427,7 +425,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [ ] Copy/paste support throughout
 - [ ] Consistent theme/styling matching upstream
 - [ ] Responsive layout for different window sizes
-- [ ] Wiki integration (F1 to open wiki for items/gems)
+- [x] Wiki integration (F1 opens poewiki.net for hovered items/gems via upstream itemLib.wiki)
 - [ ] Similar builds popup (from PoB Archives)
 
 ---
@@ -443,6 +441,18 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Power calculation coroutine (upstream PowerBuilder driven via per-frame stepping with progress display)
 - [ ] Config condition evaluation (mainEnv tracking)
 - [ ] Asset extraction pipeline (Rust tool to extract from PoE GGPK/bundles)
+
+---
+
+## 16. Deferred
+
+Items parked deliberately - revisit when the core parity work is done.
+
+- [ ] Party tab for configuring party member effects
+- [ ] Party aura/buff configuration
+- [ ] Enemy modifier list from party
+- [ ] Crucible modifier popup (5-node tree selection; Crucible is a past league, upstream keeps it for legacy builds)
+- [ ] Hover shortcuts in the item-DB browser (F1 wiki and Ctrl+C copy work on hovered slot/list items but not in the unique/rare-template DB window; upstream's ItemDBControl supports both)
 
 ---
 
@@ -528,7 +538,7 @@ not listed.
 ### Skills/Gems
 - [ ] Progressive gem sort results while typing (we drive the new DPSBuilder to completion synchronously instead)
 - [ ] Imbued Supports (new GemSelectControl imbued mode)
-- [ ] Gem tooltips (new GemTooltip.lua)
+- [x] Gem tooltips (GemTooltip.AddGemTooltip called headless, shown on skills-tab gem-name hover)
 - [x] Gem color indicators on socket group labels (R/G/B/W letters per gem on player group headers)
 - [ ] Sort gem suggestions by minion-specific stats (data side done via powerStatList; UI dropdown lists them already)
 

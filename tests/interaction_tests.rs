@@ -1077,7 +1077,7 @@ fn test_save_as_writes_to_build_path() {
 
     // Save As sanitises the name and writes <buildPath><name>.xml
     bridge
-        .save_build_as("My: Save/Test?")
+        .save_build_as("My: Save/Test?", "")
         .expect("Save As failed");
     assert!(!bridge.is_build_dirty(), "Save As should clear dirty state");
 
@@ -1122,6 +1122,21 @@ fn test_save_as_writes_to_build_path() {
     assert!(
         !bridge.is_build_dirty(),
         "build opened from its own file starts clean"
+    );
+
+    // Save As into a subfolder (folder browser): the file lands under
+    // <buildPath><subPath> and dbFileSubPath tracks the folder
+    pob_egui::data::build_list::create_folder(&build_path, "", "SubFolder")
+        .expect("create folder failed");
+    bridge
+        .save_build_as("Nested Build", "SubFolder/")
+        .expect("Save As into subfolder failed");
+    let nested = tmp_dir.join("SubFolder").join("Nested Build.xml");
+    assert!(nested.is_file(), "expected {} to exist", nested.display());
+    assert_eq!(
+        bridge.build_file_sub_path(),
+        "SubFolder/",
+        "dbFileSubPath tracks the save folder"
     );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -3131,6 +3146,43 @@ fn test_corrupt_and_implicits() {
         raw3.contains("+13 to maximum Life"),
         "custom implicit: {raw3}"
     );
+}
+
+#[test]
+fn test_gem_tooltip_lines() {
+    use pob_egui::data::skills;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    let group = groups
+        .iter()
+        .find(|g| !g.gems.is_empty())
+        .expect("a group with gems");
+    let gem_name = &group.gems[0].name;
+
+    let lines = skills::gem_tooltip_lines(lua, group.index, 1).expect("tooltip failed");
+    assert!(
+        lines.len() > 5,
+        "gem tooltip has content, got {} lines",
+        lines.len()
+    );
+    let text: String = lines
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let first_word = gem_name.split(' ').next().unwrap_or("");
+    assert!(
+        text.contains(first_word),
+        "tooltip should mention '{gem_name}': {text}"
+    );
+
+    // Out-of-range indices return no lines instead of erroring
+    let empty = skills::gem_tooltip_lines(lua, 999, 1).expect("tooltip failed");
+    assert!(empty.is_empty(), "missing gem yields no lines");
 }
 
 #[test]
