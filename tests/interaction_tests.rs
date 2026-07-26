@@ -2822,6 +2822,35 @@ fn test_enchantments() {
 
     let catalog = crafting::enchant_catalog(lua, boots_id, None).expect("catalog failed");
     assert!(!catalog.is_empty(), "boot enchant sources exist");
+
+    // Popup sorting: per-line power-stat values nested in the catalog shape
+    // (upstream's v2.66 popup sort). The movement-speed enchant moves the
+    // Move speed stat while regen/leech lines do not, so values spread.
+    let move_speed = pob_egui::data::node_power::list_power_stats(lua)
+        .expect("stats failed")
+        .into_iter()
+        .find(|s| s.label == "Move speed")
+        .expect("a Move speed power stat");
+    let values = crafting::enchant_sort_values(lua, boots_id, None, 1, move_speed.index)
+        .expect("sort values failed");
+    assert_eq!(values.len(), catalog.len(), "one value group per source");
+    for ((source, lines), vals) in catalog.iter().zip(&values) {
+        assert_eq!(
+            vals.len(),
+            lines.len(),
+            "one value per line in {}",
+            source.label
+        );
+    }
+    let (min, max) = values
+        .iter()
+        .flatten()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    assert!(
+        max > min,
+        "movement-speed enchants should spread Move speed values: {min}..{max}"
+    );
+
     let (source, lines) = catalog
         .iter()
         .find(|(_, lines)| !lines.is_empty())
@@ -3102,6 +3131,114 @@ fn test_corrupt_and_implicits() {
         raw3.contains("+13 to maximum Life"),
         "custom implicit: {raw3}"
     );
+}
+
+#[test]
+fn test_add_modifier_catalog() {
+    use pob_egui::data::{crafting, items};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Crafted rare helmet: bench/essence/veiled/beastcraft/necropolis/delve
+    // sources, but no Prefix/Suffix (crafted items use the affix editor)
+    let helm_id = crafting::craft_item(lua, "RARE", "Helmet: Armour", 1, "Catalog Helm")
+        .expect("craft failed")
+        .expect("id");
+    let sources = crafting::mod_catalog_sources(lua, helm_id).expect("sources failed");
+    let ids: Vec<&str> = sources.iter().map(|(_, id)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "MASTER",
+            "ESSENCE",
+            "VEILED",
+            "BEASTCRAFT",
+            "NECROPOLIS",
+            "DELVE",
+            "CUSTOM"
+        ],
+        "crafted helmet sources"
+    );
+
+    // Bench catalog exists for helmets
+    let bench = crafting::mod_catalog(lua, helm_id, "MASTER").expect("catalog failed");
+    assert!(bench.len() > 10, "bench mods for a helmet: {}", bench.len());
+
+    // Essence catalog: one entry per essence, labeled with the essence name
+    let essences = crafting::mod_catalog(lua, helm_id, "ESSENCE").expect("catalog failed");
+    assert!(essences.len() > 50, "essence mods: {}", essences.len());
+    assert!(
+        essences[0].label.contains("Essence"),
+        "essence label: {}",
+        essences[0].label
+    );
+    assert!(!essences[0].lines.is_empty(), "essence entry has mod lines");
+
+    // Popup sorting: one value per entry; life essences move the Life stat
+    // while mana/resistance essences do not, so values spread
+    let life = pob_egui::data::node_power::list_power_stats(lua)
+        .expect("stats failed")
+        .into_iter()
+        .find(|s| s.label == "Life")
+        .expect("a Life power stat");
+    let values = crafting::mod_catalog_sort_values(lua, helm_id, "ESSENCE", life.index)
+        .expect("sort values failed");
+    assert_eq!(
+        values.len(),
+        essences.len(),
+        "one sort value per essence entry"
+    );
+    let (min, max) = values
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    assert!(
+        max > min,
+        "life essences should spread Life values: {min}..{max}"
+    );
+
+    // Applying an entry lands its lines on the item as explicit mods
+    let entry = essences[0].clone();
+    crafting::apply_catalog_mod(lua, helm_id, "ESSENCE", 1).expect("apply failed");
+    let raw = items::get_item_raw(lua, helm_id).expect("raw failed");
+    let line = &entry.lines[0];
+    // Compare ignoring rolled numbers: match the alpha part of the line
+    let pattern: String = line
+        .chars()
+        .filter(|c| c.is_alphabetic() || c.is_whitespace())
+        .collect();
+    let pattern = pattern.split_whitespace().collect::<Vec<_>>().join(" ");
+    let raw_normalized: String = raw
+        .chars()
+        .filter(|c| c.is_alphabetic() || c.is_whitespace())
+        .collect();
+    let raw_normalized = raw_normalized
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        raw_normalized.contains(&pattern),
+        "essence mod '{line}' should be on the item: {raw}"
+    );
+
+    // An uncrafted rare from the build exposes Prefix/Suffix sources with
+    // spawn-weight-filtered mod pools
+    let uncrafted = items::extract_item_list(lua)
+        .expect("list failed")
+        .iter()
+        .find(|e| e.rarity == "RARE" && !e.crafted)
+        .map(|e| e.id);
+    if let Some(id) = uncrafted {
+        let sources = crafting::mod_catalog_sources(lua, id).expect("sources failed");
+        let ids: Vec<&str> = sources.iter().map(|(_, id)| id.as_str()).collect();
+        assert!(
+            ids.contains(&"PREFIX") && ids.contains(&"SUFFIX"),
+            "uncrafted rare offers prefix/suffix sources: {ids:?}"
+        );
+        let prefixes = crafting::mod_catalog(lua, id, "PREFIX").expect("catalog failed");
+        assert!(!prefixes.is_empty(), "prefix pool for an uncrafted rare");
+    }
 }
 
 // ---------------------------------------------------------------------------

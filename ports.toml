@@ -156,6 +156,23 @@ status = "faithful"
 notes = "charData shaping for the legacy site API (equipment field, top-level level)."
 
 [[port]]
+name = "add-modifier-popup"
+ours = "src/data/crafting.rs::MOD_CATALOG_LUA"
+upstream = "src/Classes/ItemsTab.lua"
+anchor = "function ItemsTabClass:AddCustomModifierToDisplayItem"
+sha256 = "23f13c9ac603ede066d6a3cc97780bb0c59de94b80381f112aab31e74faa6208"
+status = "faithful"
+notes = "Source eligibility + per-source mod-list building/sorting + apply/sort-value semantics. Labels drop the ^8 color codes (egui styling instead)."
+
+[[port]]
+name = "check-line-for-allocates"
+ours = "src/data/crafting.rs::MOD_CATALOG_LUA"
+upstream = "src/Classes/ItemsTab.lua"
+anchor = "local function checkLineForAllocates"
+sha256 = "409470b168bda11a7181ba3b0cbe475f176819fa806d486a28447bf62fefc95c"
+status = "faithful"
+
+[[port]]
 name = "catalyst-list"
 ours = "src/data/crafting.rs::CATALYSTS"
 upstream = "src/Classes/Item.lua"

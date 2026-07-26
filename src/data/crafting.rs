@@ -1229,6 +1229,82 @@ pub fn enchant_catalog(
     Ok(catalog)
 }
 
+/// Sort values for the enchant popup: one value per enchant line, nested in
+/// the same (source, lines) shape as [`enchant_catalog`]. Each value applies
+/// the line to a clone of the item (same two-line "a/b" and slot handling as
+/// [`apply_enchant`]) and reads the selected power stat with the clone
+/// equipped (upstream's popup sorting; one throwaway calc pass per line).
+/// `stat_index` is 1-based into `data.powerStatList`.
+pub fn enchant_sort_values(
+    lua: &Lua,
+    item_id: i64,
+    skill: Option<&str>,
+    slot: usize,
+    stat_index: usize,
+) -> Result<Vec<Vec<f64>>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(
+            r#"
+        local itemId, skill, slot, statIndex = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local baseItem = itemsTab.items[itemId]
+        local stat = data.powerStatList[statIndex]
+        local out = {}
+        if not baseItem or not baseItem.enchantments or not stat or not stat.stat then
+            return out
+        end
+        local list = skill and baseItem.enchantments[skill] or baseItem.enchantments
+        if not list then
+            return out
+        end
+        local slotName = baseItem:GetPrimarySlot()
+        local calcFunc = build.calcsTab:GetMiscCalculator(build)
+        local useFullDPS = stat.stat == "FullDPS"
+        for _, source in ipairs(build.data.enchantmentSource) do
+            if list[source.name] then
+                local vals = {}
+                for _, line in ipairs(list[source.name]) do
+                    local item = new("Item", baseItem:BuildRaw())
+                    item.id = baseItem.id
+                    local first, second = line:match("([^/]+)/([^/]+)")
+                    if first then
+                        item.enchantModLines = {
+                            { crafted = true, line = first },
+                            { crafted = true, line = second },
+                        }
+                    else
+                        if not item.canHaveTwoEnchants and #item.enchantModLines > 1 then
+                            item.enchantModLines = { item.enchantModLines[1] }
+                        end
+                        if #item.enchantModLines >= slot then
+                            table.remove(item.enchantModLines, slot)
+                        end
+                        table.insert(item.enchantModLines, slot, { crafted = true, line = line })
+                    end
+                    item:BuildAndParseRaw()
+                    local output = calcFunc({ repSlotName = slotName, repItem = item }, useFullDPS)
+                    table.insert(vals, data.powerStatList.GetFromOutput(output, stat) or 0)
+                end
+                table.insert(out, vals)
+            end
+        end
+        return out
+    "#,
+        )
+        .call((item_id, skill, slot, stat_index))?;
+    let mut values = Vec::new();
+    for group in list.sequence_values::<LuaTable>() {
+        let group = group?;
+        let mut vals = Vec::new();
+        for v in group.sequence_values::<f64>() {
+            vals.push(v?);
+        }
+        values.push(vals);
+    }
+    Ok(values)
+}
+
 /// Apply an enchantment (by source + 1-based index), mirroring upstream's
 /// enchantItem: handles the two-line "a/b" enchants and the single-enchant
 /// limit. Pass `remove` via [`remove_enchant`].
@@ -1605,4 +1681,371 @@ pub fn add_custom_mod(
     "#,
     )
     .call((item_id, line, crafted))
+}
+
+/// Shared list-building for the add-modifier popup, ported from upstream's
+/// ItemsTab:AddCustomModifierToDisplayItem (source eligibility + the
+/// per-source buildMods bodies + the checkLineForAllocates helper; registered
+/// in ports.toml). Every function below builds the list through these so the
+/// order is identical across listing, applying, and sorting.
+const MOD_CATALOG_LUA: &str = r#"
+    local function checkLineForAllocates(line, nodes)
+        if nodes and string.match(line, "Allocates") then
+            local nodeId = tonumber(string.match(line, "%d+"))
+            if nodes[nodeId] then
+                return "Allocates "..nodes[nodeId].name
+            end
+        end
+        return line
+    end
+    local function buildModSourceList(item)
+        local sourceList = {}
+        if item.type ~= "Tincture" and item.type ~= "Graft" then
+            if item.type ~= "Jewel" then
+                table.insert(sourceList, { label = "Crafting Bench", sourceId = "MASTER" })
+            end
+            if item.type ~= "Jewel" and item.type ~= "Flask" and item.type ~= "Graft" then
+                table.insert(sourceList, { label = "Essence", sourceId = "ESSENCE" })
+                table.insert(sourceList, { label = "Veiled", sourceId = "VEILED" })
+                table.insert(sourceList, { label = "Beastcraft", sourceId = "BEASTCRAFT" })
+            end
+            if item.type == "Helmet" or item.type == "Body Armour"
+               or item.type == "Gloves" or item.type == "Boots" then
+                table.insert(sourceList, { label = "Necropolis", sourceId = "NECROPOLIS" })
+            end
+            if not item.clusterJewel and item.type ~= "Flask" and item.type ~= "Graft" then
+                table.insert(sourceList, { label = "Delve", sourceId = "DELVE" })
+            end
+            if not item.crafted then
+                table.insert(sourceList, { label = "Prefix", sourceId = "PREFIX" })
+                table.insert(sourceList, { label = "Suffix", sourceId = "SUFFIX" })
+            end
+        end
+        table.insert(sourceList, { label = "Custom", sourceId = "CUSTOM" })
+        return sourceList
+    end
+    local function buildModCatalog(build, item, sourceId)
+        local modList = {}
+        if sourceId == "MASTER" then
+            local excludeGroups = {}
+            for _, modLine in ipairs({ item.prefixes, item.suffixes }) do
+                for i = 1, (modLine.limit or (item.affixLimit / 2)) do
+                    if modLine[i] and modLine[i].modId ~= "None" then
+                        excludeGroups[item.affixes[modLine[i].modId].group] = true
+                    end
+                end
+            end
+            for i, craft in ipairs(build.data.masterMods) do
+                if craft.types[item.type] and not excludeGroups[craft.group] then
+                    table.insert(modList, {
+                        label = table.concat(craft, "/") .. " (" .. craft.type .. ")",
+                        mod = craft,
+                        type = "crafted",
+                        affixType = craft.type,
+                        defaultOrder = i,
+                    })
+                end
+            end
+            table.sort(modList, function(a, b)
+                if a.affixType ~= b.affixType then
+                    return a.affixType == "Prefix" and b.affixType == "Suffix"
+                else
+                    return a.defaultOrder < b.defaultOrder
+                end
+            end)
+        elseif sourceId == "ESSENCE" then
+            for _, essence in pairs(build.data.essences) do
+                local modId = essence.mods[item.type]
+                local mod = item.affixes[modId]
+                table.insert(modList, {
+                    label = essence.name .. "   [" .. table.concat(mod, "/") .. "]"
+                        .. " (" .. mod.type .. ")",
+                    mod = mod,
+                    type = "custom",
+                    essence = essence,
+                })
+            end
+            table.sort(modList, function(a, b)
+                if a.essence.type ~= b.essence.type then
+                    return a.essence.type > b.essence.type
+                else
+                    return a.essence.tier > b.essence.tier
+                end
+            end)
+        elseif sourceId == "PREFIX" or sourceId == "SUFFIX" then
+            for _, mod in pairs(item.affixes) do
+                if sourceId:lower() == mod.type:lower() and item:GetModSpawnWeight(mod) > 0 then
+                    table.insert(modList, {
+                        label = mod.affix .. "   [" .. table.concat(mod, "/") .. "]",
+                        mod = mod,
+                        type = "custom",
+                    })
+                end
+            end
+            table.sort(modList, function(a, b)
+                local modA = a.mod
+                local modB = b.mod
+                for i = 1, math.max(#modA, #modB) do
+                    if not modA[i] then
+                        return true
+                    elseif not modB[i] then
+                        return false
+                    elseif modA.statOrder[i] ~= modB.statOrder[i] then
+                        return modA.statOrder[i] < modB.statOrder[i]
+                    end
+                end
+                return modA.level > modB.level
+            end)
+        elseif sourceId == "VEILED" then
+            for i, mod in pairs(build.data.veiledMods) do
+                if item:GetModSpawnWeight(mod) > 0 then
+                    table.insert(modList, {
+                        label = table.concat(mod, "/") .. " (" .. mod.type .. ")",
+                        mod = mod,
+                        affixType = mod.type,
+                        type = "custom",
+                        defaultOrder = i,
+                    })
+                end
+            end
+            table.sort(modList, function(a, b)
+                if a.affixType ~= b.affixType then
+                    return a.affixType == "Prefix" and b.affixType == "Suffix"
+                else
+                    return a.defaultOrder < b.defaultOrder
+                end
+            end)
+        elseif sourceId == "DELVE" then
+            for i, mod in pairs(item.affixes) do
+                if item:CheckIfModIsDelve(mod) and item:GetModSpawnWeight(mod) > 0 then
+                    table.insert(modList, {
+                        label = table.concat(mod, "/") .. " (" .. mod.type .. ")",
+                        mod = mod,
+                        affixType = mod.type,
+                        type = "custom",
+                        defaultOrder = i,
+                    })
+                end
+            end
+            table.sort(modList, function(a, b)
+                if a.affixType ~= b.affixType then
+                    return a.affixType == "Prefix" and b.affixType == "Suffix"
+                else
+                    return a.defaultOrder < b.defaultOrder
+                end
+            end)
+        elseif sourceId == "NECROPOLIS" then
+            for i, mod in pairs(build.data.necropolisMods) do
+                if item:GetNecropolisModSpawnWeight(mod) > 0 then
+                    table.insert(modList, {
+                        label = table.concat(mod, "/") .. " (" .. mod.type .. ")",
+                        mod = mod,
+                        affixType = mod.type,
+                        type = "custom",
+                        defaultOrder = i,
+                    })
+                end
+            end
+            table.sort(modList, function(a, b)
+                if a.affixType ~= b.affixType then
+                    return a.affixType == "Prefix" and b.affixType == "Suffix"
+                else
+                    return a.defaultOrder < b.defaultOrder
+                end
+            end)
+        elseif sourceId == "BEASTCRAFT" then
+            for i, mod in pairs(build.data.beastCraft) do
+                table.insert(modList, {
+                    label = table.concat(mod, "/") .. " (" .. mod.type .. ")",
+                    mod = mod,
+                    affixType = mod.type,
+                    type = "custom",
+                    defaultOrder = i,
+                })
+            end
+            table.sort(modList, function(a, b)
+                if a.affixType ~= b.affixType then
+                    return a.affixType == "Prefix" and b.affixType == "Suffix"
+                else
+                    return a.defaultOrder < b.defaultOrder
+                end
+            end)
+        end
+        return modList
+    end
+"#;
+
+/// One entry of the add-modifier catalog.
+#[derive(Debug, Clone)]
+pub struct ModCatalogEntry {
+    /// Display label (upstream's, with color codes stripped).
+    pub label: String,
+    /// The mod text lines this entry would add.
+    pub lines: Vec<String>,
+}
+
+/// Mod sources available for an item in the add-modifier popup (label, id),
+/// per upstream's eligibility rules. "Custom" (free text) is always last.
+pub fn mod_catalog_sources(lua: &Lua, item_id: i64) -> Result<Vec<(String, String)>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(format!(
+            r#"
+        local itemId = ...
+        {MOD_CATALOG_LUA}
+        local build = mainObject_ref.main.modes['BUILD']
+        local item = build.itemsTab.items[itemId]
+        if not item then
+            return {{}}
+        end
+        return buildModSourceList(item)
+    "#
+        ))
+        .call(item_id)?;
+    let mut sources = Vec::new();
+    for entry in list.sequence_values::<LuaTable>() {
+        let entry = entry?;
+        sources.push((
+            entry.get("label").unwrap_or_default(),
+            entry.get("sourceId").unwrap_or_default(),
+        ));
+    }
+    Ok(sources)
+}
+
+/// The mod list for one source of the add-modifier popup, in upstream's
+/// display order. Entries are applied by 1-based index via
+/// [`apply_catalog_mod`].
+pub fn mod_catalog(
+    lua: &Lua,
+    item_id: i64,
+    source_id: &str,
+) -> Result<Vec<ModCatalogEntry>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(format!(
+            r#"
+        local itemId, sourceId = ...
+        {MOD_CATALOG_LUA}
+        local build = mainObject_ref.main.modes['BUILD']
+        local item = build.itemsTab.items[itemId]
+        local out = {{}}
+        if not item then
+            return out
+        end
+        for _, listMod in ipairs(buildModCatalog(build, item, sourceId)) do
+            local entry = {{
+                label = (listMod.label:gsub("%^x%x%x%x%x%x%x", ""):gsub("%^%d", "")),
+                lines = {{}},
+            }}
+            for _, line in ipairs(listMod.mod) do
+                table.insert(entry.lines, line)
+            end
+            table.insert(out, entry)
+        end
+        return out
+    "#
+        ))
+        .call((item_id, source_id))?;
+    let mut entries = Vec::new();
+    for entry in list.sequence_values::<LuaTable>() {
+        let entry = entry?;
+        let lines: LuaTable = entry.get("lines")?;
+        entries.push(ModCatalogEntry {
+            label: entry.get("label").unwrap_or_default(),
+            lines: lines.sequence_values::<String>().flatten().collect(),
+        });
+    }
+    Ok(entries)
+}
+
+/// Apply a catalog mod (1-based index into [`mod_catalog`]'s order) to an
+/// item, mirroring upstream's addModifier: all of the mod's lines are added
+/// as explicits, flagged crafted (bench) or custom per the source.
+pub fn apply_catalog_mod(
+    lua: &Lua,
+    item_id: i64,
+    source_id: &str,
+    index: usize,
+) -> Result<(), mlua::Error> {
+    lua.load(format!(
+        r#"
+        local itemId, sourceId, index = ...
+        {MOD_CATALOG_LUA}
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if not item then
+            return
+        end
+        local listMod = buildModCatalog(build, item, sourceId)[index]
+        if not listMod then
+            return
+        end
+        local newItem = new("Item", item:BuildRaw())
+        newItem.id = item.id
+        for _, line in ipairs(listMod.mod) do
+            table.insert(newItem.explicitModLines,
+                {{ line = line, modTags = listMod.mod.modTags, [listMod.type] = true }})
+        end
+        newItem:BuildAndParseRaw()
+        itemsTab:AddItem(newItem, true)
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#
+    ))
+    .call((item_id, source_id, index))
+}
+
+/// Sort values for the add-modifier popup: one value per catalog entry (in
+/// [`mod_catalog`] order), computed by applying the entry's lines to a clone
+/// of the item and reading the selected power stat with the clone equipped
+/// (upstream's popup sorting incl. the checkLineForAllocates substitution;
+/// one throwaway calc pass per entry). `stat_index` is 1-based into
+/// `data.powerStatList`.
+pub fn mod_catalog_sort_values(
+    lua: &Lua,
+    item_id: i64,
+    source_id: &str,
+    stat_index: usize,
+) -> Result<Vec<f64>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(format!(
+            r#"
+        local itemId, sourceId, statIndex = ...
+        {MOD_CATALOG_LUA}
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        local stat = data.powerStatList[statIndex]
+        local out = {{}}
+        if not item or not stat or not stat.stat then
+            return out
+        end
+        local slotName = item:GetPrimarySlot()
+        local calcFunc = build.calcsTab:GetMiscCalculator(build)
+        local useFullDPS = stat.stat == "FullDPS"
+        for _, listMod in ipairs(buildModCatalog(build, item, sourceId)) do
+            local newItem = new("Item", item:BuildRaw())
+            newItem.id = item.id
+            for _, line in ipairs(listMod.mod) do
+                table.insert(newItem.explicitModLines, {{
+                    line = checkLineForAllocates(line, build.spec.nodes),
+                    modTags = listMod.mod.modTags,
+                    [listMod.type] = true,
+                }})
+            end
+            newItem:BuildAndParseRaw()
+            local output = calcFunc({{ repSlotName = slotName, repItem = newItem }}, useFullDPS)
+            table.insert(out, data.powerStatList.GetFromOutput(output, stat) or 0)
+        end
+        return out
+    "#
+        ))
+        .call((item_id, source_id, stat_index))?;
+    let mut values = Vec::new();
+    for v in list.sequence_values::<f64>() {
+        values.push(v?);
+    }
+    Ok(values)
 }

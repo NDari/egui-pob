@@ -72,6 +72,9 @@ pub struct CraftUi {
     enchant_all_skills: bool,
     /// (source name, 1-based line index) selected in the enchant dialog.
     enchant_selection: Option<(String, usize)>,
+    /// Sort mode for enchant lines (0 = default order, else 1-based into
+    /// the popup sort stat list).
+    enchant_sort: usize,
     /// Item being corrupted; selections are 0 = None else 1-based option idx.
     corrupt_item: Option<i64>,
     corrupt_sel: (usize, usize),
@@ -89,6 +92,18 @@ pub struct CraftUi {
     /// Sort mode for implicit groups (0 = default order, else 1-based into
     /// the popup sort stat list).
     implicit_sort: usize,
+    /// Item receiving a catalog modifier (Add Modifier dialog).
+    addmod_item: Option<i64>,
+    addmod_source_idx: usize,
+    /// Selected catalog entry (0 = none, else 1-based index).
+    addmod_sel: usize,
+    /// Sort mode for catalog mods (0 = default order, else 1-based into
+    /// the popup sort stat list).
+    addmod_sort: usize,
+    /// Free-text line for the Custom source.
+    addmod_custom: String,
+    /// Mark the custom line as a crafted (bench) mod.
+    addmod_custom_crafted: bool,
 }
 
 const CRAFT_RARITIES: [(&str, &str); 3] =
@@ -96,6 +111,10 @@ const CRAFT_RARITIES: [(&str, &str); 3] =
 
 /// Enchant catalog cache: (item id, skill filter, sources with their lines).
 type EnchantCatalogCache = (i64, Option<String>, Vec<(EnchantSource, Vec<String>)>);
+
+/// Enchant sort-value cache: (item id, skill filter, stat index, values
+/// nested per source, parallel to the catalog).
+type EnchantSortCache = (i64, Option<String>, usize, Vec<Vec<f64>>);
 
 /// Socket dialog cache: (item id, sockets, catalyst state).
 type SocketCache = (i64, Option<crafting::ItemSockets>, Option<(usize, i64)>);
@@ -134,6 +153,8 @@ pub struct ItemsPanel {
     enchant_opts_cache: Option<(i64, EnchantOptions)>,
     /// Cached enchant catalog keyed by (item, skill).
     enchant_catalog_cache: Option<EnchantCatalogCache>,
+    /// Cached enchant sort values keyed by (item, skill, stat index).
+    enchant_sort_cache: Option<EnchantSortCache>,
     /// Cached corrupted-implicit options.
     corrupt_opts_cache: Option<(i64, Vec<crafting::CorruptOption>)>,
     /// Power stats for crafting-popup sorting (upstream buildModSortList).
@@ -148,6 +169,12 @@ pub struct ItemsPanel {
     implicit_sources_cache: Option<(i64, Vec<(String, String)>)>,
     /// Cached implicit mod groups keyed by (item, source).
     implicit_mods_cache: Option<(i64, String, Vec<crafting::ImplicitGroup>)>,
+    /// Cached mod sources for the Add Modifier dialog.
+    addmod_sources_cache: Option<(i64, Vec<(String, String)>)>,
+    /// Cached mod catalog keyed by (item, source).
+    addmod_catalog_cache: Option<(i64, String, Vec<crafting::ModCatalogEntry>)>,
+    /// Cached add-modifier sort values keyed by (item, source, stat index).
+    addmod_sort_cache: Option<(i64, String, usize, Vec<f64>)>,
 }
 
 /// Raw-text item editor state. `item_id` is None when creating a new item.
@@ -206,6 +233,7 @@ impl ItemsPanel {
             anoint_preview_cache: None,
             enchant_opts_cache: None,
             enchant_catalog_cache: None,
+            enchant_sort_cache: None,
             corrupt_opts_cache: None,
             sort_stats: pob_egui::data::node_power::list_power_stats(lua).unwrap_or_default(),
             corrupt_sort_cache: None,
@@ -213,6 +241,9 @@ impl ItemsPanel {
             socket_cache: None,
             implicit_sources_cache: None,
             implicit_mods_cache: None,
+            addmod_sources_cache: None,
+            addmod_catalog_cache: None,
+            addmod_sort_cache: None,
         }
     }
 
@@ -976,6 +1007,47 @@ impl ItemsPanel {
                         });
                 self.enchant_catalog_cache = Some((item_id, skill_key.clone(), catalog));
             }
+            // Resolve the line ordering: sorted by a power stat when a sort
+            // mode is selected (upstream's popup sorting; one calc pass per
+            // line, cached per item + skill + stat)
+            if self.craft_ui.enchant_sort > 0 {
+                let stat_index = self
+                    .sort_stats
+                    .get(self.craft_ui.enchant_sort - 1)
+                    .map(|s| s.index)
+                    .unwrap_or(0);
+                let stale = self
+                    .enchant_sort_cache
+                    .as_ref()
+                    .is_none_or(|(id, skill, si, _)| {
+                        *id != item_id || *skill != skill_key || *si != stat_index
+                    });
+                if stale && stat_index > 0 {
+                    match crafting::enchant_sort_values(
+                        bridge.lua(),
+                        item_id,
+                        skill_key.as_deref(),
+                        1,
+                        stat_index,
+                    ) {
+                        Ok(values) => {
+                            self.enchant_sort_cache =
+                                Some((item_id, skill_key.clone(), stat_index, values));
+                        }
+                        Err(e) => {
+                            log::error!("Enchant sort failed: {e}");
+                            self.craft_ui.enchant_sort = 0;
+                        }
+                    }
+                }
+            }
+            let enchant_sort_values: Option<Vec<Vec<f64>>> = (self.craft_ui.enchant_sort > 0)
+                .then(|| {
+                    self.enchant_sort_cache
+                        .as_ref()
+                        .map(|(_, _, _, v)| v.clone())
+                })
+                .flatten();
             let catalog = &self.enchant_catalog_cache.as_ref().unwrap().2;
 
             let item_name = self
@@ -988,6 +1060,7 @@ impl ItemsPanel {
             let mut apply = false;
             let mut remove = false;
             let mut new_skill: Option<String> = None;
+            let mut new_sort: Option<usize> = None;
 
             egui::Window::new(format!("Enchant: {item_name}"))
                 .id(egui::Id::new("enchant_dialog"))
@@ -1037,22 +1110,76 @@ impl ItemsPanel {
                         });
                         ui.separator();
                     }
+                    ui.horizontal(|ui| {
+                        ui.label("Sort by:");
+                        let current = if self.craft_ui.enchant_sort == 0 {
+                            "Default".to_string()
+                        } else {
+                            self.sort_stats
+                                .get(self.craft_ui.enchant_sort - 1)
+                                .map(|s| s.label.clone())
+                                .unwrap_or_else(|| "?".to_string())
+                        };
+                        egui::ComboBox::from_id_salt("enchant_sort")
+                            .selected_text(current)
+                            .width(180.0)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(self.craft_ui.enchant_sort == 0, "Default")
+                                    .clicked()
+                                {
+                                    new_sort = Some(0);
+                                }
+                                for (i, stat) in self.sort_stats.iter().enumerate() {
+                                    if ui
+                                        .selectable_label(
+                                            self.craft_ui.enchant_sort == i + 1,
+                                            &stat.label,
+                                        )
+                                        .clicked()
+                                    {
+                                        new_sort = Some(i + 1);
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Sort enchantments by their impact on this stat \
+                                 (one calc pass per line on first use)",
+                            );
+                    });
 
                     egui::ScrollArea::vertical()
                         .id_salt("enchant_scroll")
                         .max_height(280.0)
                         .show(ui, |ui| {
-                            for (source, lines) in catalog {
+                            for (src_idx, (source, lines)) in catalog.iter().enumerate() {
                                 ui.label(
                                     egui::RichText::new(&source.label)
                                         .strong()
                                         .color(Theme::TEXT_MUTED),
                                 );
-                                for (i, line) in lines.iter().enumerate() {
+                                let vals = enchant_sort_values
+                                    .as_ref()
+                                    .and_then(|v| v.get(src_idx))
+                                    .filter(|v| v.len() == lines.len());
+                                let mut order: Vec<usize> = (0..lines.len()).collect();
+                                if let Some(vals) = vals {
+                                    order.sort_by(|&a, &b| {
+                                        vals[b]
+                                            .partial_cmp(&vals[a])
+                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                    });
+                                }
+                                for &i in &order {
                                     let key = (source.name.clone(), i + 1);
                                     let is_sel =
                                         self.craft_ui.enchant_selection.as_ref() == Some(&key);
-                                    if ui.selectable_label(is_sel, line).clicked() {
+                                    let text = match vals {
+                                        Some(vals) => format!("{}  [{:.1}]", lines[i], vals[i]),
+                                        None => lines[i].clone(),
+                                    };
+                                    if ui.selectable_label(is_sel, text).clicked() {
                                         self.craft_ui.enchant_selection = Some(key);
                                     }
                                 }
@@ -1086,6 +1213,9 @@ impl ItemsPanel {
                 self.craft_ui.enchant_skill = Some(skill);
                 self.craft_ui.enchant_selection = None;
             }
+            if let Some(s) = new_sort {
+                self.craft_ui.enchant_sort = s;
+            }
             if apply && let Some((source, index)) = self.craft_ui.enchant_selection.clone() {
                 match crafting::apply_enchant(
                     bridge.lua(),
@@ -1109,6 +1239,8 @@ impl ItemsPanel {
                 self.craft_ui.enchant_item = None;
                 self.enchant_opts_cache = None;
                 self.enchant_catalog_cache = None;
+                self.enchant_sort_cache = None;
+                self.craft_ui.enchant_sort = 0;
             }
         }
 
@@ -1779,6 +1911,277 @@ impl ItemsPanel {
             }
         }
 
+        // Add Modifier dialog (upstream AddCustomModifierToDisplayItem)
+        if let Some(item_id) = self.craft_ui.addmod_item {
+            if self
+                .addmod_sources_cache
+                .as_ref()
+                .is_none_or(|(id, _)| *id != item_id)
+            {
+                let sources =
+                    crafting::mod_catalog_sources(bridge.lua(), item_id).unwrap_or_else(|e| {
+                        log::error!("Failed to load mod sources: {e}");
+                        Vec::new()
+                    });
+                self.addmod_sources_cache = Some((item_id, sources));
+            }
+            let sources = self.addmod_sources_cache.as_ref().unwrap().1.clone();
+            let source_idx = self
+                .craft_ui
+                .addmod_source_idx
+                .min(sources.len().saturating_sub(1));
+            let source_id = sources
+                .get(source_idx)
+                .map(|(_, id)| id.clone())
+                .unwrap_or_default();
+            let is_custom = source_id == "CUSTOM";
+            if !is_custom
+                && self
+                    .addmod_catalog_cache
+                    .as_ref()
+                    .is_none_or(|(id, src, _)| *id != item_id || *src != source_id)
+            {
+                let catalog = crafting::mod_catalog(bridge.lua(), item_id, &source_id)
+                    .unwrap_or_else(|e| {
+                        log::error!("Failed to load mod catalog: {e}");
+                        Vec::new()
+                    });
+                self.addmod_catalog_cache = Some((item_id, source_id.clone(), catalog));
+            }
+            // Resolve the entry ordering: sorted by a power stat when a sort
+            // mode is selected (one calc pass per entry, cached)
+            if self.craft_ui.addmod_sort > 0 && !is_custom {
+                let stat_index = self
+                    .sort_stats
+                    .get(self.craft_ui.addmod_sort - 1)
+                    .map(|s| s.index)
+                    .unwrap_or(0);
+                let stale = self
+                    .addmod_sort_cache
+                    .as_ref()
+                    .is_none_or(|(id, src, si, _)| {
+                        *id != item_id || *src != source_id || *si != stat_index
+                    });
+                if stale && stat_index > 0 {
+                    match crafting::mod_catalog_sort_values(
+                        bridge.lua(),
+                        item_id,
+                        &source_id,
+                        stat_index,
+                    ) {
+                        Ok(values) => {
+                            self.addmod_sort_cache =
+                                Some((item_id, source_id.clone(), stat_index, values));
+                        }
+                        Err(e) => {
+                            log::error!("Add-modifier sort failed: {e}");
+                            self.craft_ui.addmod_sort = 0;
+                        }
+                    }
+                }
+            }
+            let sort_values: Option<Vec<f64>> = (self.craft_ui.addmod_sort > 0 && !is_custom)
+                .then(|| {
+                    self.addmod_sort_cache
+                        .as_ref()
+                        .map(|(_, _, _, v)| v.clone())
+                })
+                .flatten();
+            let item_name = self
+                .item_list
+                .iter()
+                .find(|e| e.id == item_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "Item".to_string());
+            let mut close = false;
+            let mut do_add = false;
+            let mut new_source: Option<usize> = None;
+            let mut new_sort: Option<usize> = None;
+
+            egui::Window::new(format!("Add Modifier: {item_name}"))
+                .id(egui::Id::new("addmod_dialog"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Source:");
+                        let current = sources
+                            .get(source_idx)
+                            .map(|(label, _)| label.as_str())
+                            .unwrap_or("?");
+                        egui::ComboBox::from_id_salt("addmod_source")
+                            .selected_text(current)
+                            .width(160.0)
+                            .show_ui(ui, |ui| {
+                                for (i, (label, _)) in sources.iter().enumerate() {
+                                    if ui.selectable_label(i == source_idx, label).clicked()
+                                        && i != source_idx
+                                    {
+                                        new_source = Some(i);
+                                    }
+                                }
+                            });
+                    });
+                    if is_custom {
+                        ui.horizontal(|ui| {
+                            ui.label("Modifier:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.craft_ui.addmod_custom)
+                                    .hint_text("e.g. +25 to maximum Life")
+                                    .desired_width(300.0),
+                            );
+                            ui.checkbox(&mut self.craft_ui.addmod_custom_crafted, "Bench craft")
+                                .on_hover_text(
+                                    "Mark the line as a crafted (bench) mod \
+                                     instead of a custom mod",
+                                );
+                        });
+                    } else if let Some((_, _, catalog)) = &self.addmod_catalog_cache {
+                        ui.horizontal(|ui| {
+                            ui.label("Sort by:");
+                            let current = if self.craft_ui.addmod_sort == 0 {
+                                "Default".to_string()
+                            } else {
+                                self.sort_stats
+                                    .get(self.craft_ui.addmod_sort - 1)
+                                    .map(|s| s.label.clone())
+                                    .unwrap_or_else(|| "?".to_string())
+                            };
+                            egui::ComboBox::from_id_salt("addmod_sort")
+                                .selected_text(current)
+                                .width(180.0)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(self.craft_ui.addmod_sort == 0, "Default")
+                                        .clicked()
+                                    {
+                                        new_sort = Some(0);
+                                    }
+                                    for (i, stat) in self.sort_stats.iter().enumerate() {
+                                        if ui
+                                            .selectable_label(
+                                                self.craft_ui.addmod_sort == i + 1,
+                                                &stat.label,
+                                            )
+                                            .clicked()
+                                        {
+                                            new_sort = Some(i + 1);
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Sort modifiers by their impact on this stat \
+                                     (one calc pass per modifier on first use)",
+                                );
+                        });
+                        let mut order: Vec<usize> = (0..catalog.len()).collect();
+                        if let Some(vals) = &sort_values
+                            && vals.len() == catalog.len()
+                        {
+                            order.sort_by(|&a, &b| {
+                                vals[b]
+                                    .partial_cmp(&vals[a])
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Modifier:");
+                            let current = (self.craft_ui.addmod_sel > 0)
+                                .then(|| catalog.get(self.craft_ui.addmod_sel - 1))
+                                .flatten()
+                                .map(|e| truncate_label(&e.label, 60))
+                                .unwrap_or_else(|| "-".to_string());
+                            egui::ComboBox::from_id_salt("addmod_select")
+                                .selected_text(current)
+                                .width(460.0)
+                                .show_ui(ui, |ui| {
+                                    for &pos in &order {
+                                        let entry = &catalog[pos];
+                                        let text = match &sort_values {
+                                            Some(vals) if vals.len() == catalog.len() => {
+                                                format!(
+                                                    "{}  [{:.1}]",
+                                                    truncate_label(&entry.label, 60),
+                                                    vals[pos]
+                                                )
+                                            }
+                                            _ => truncate_label(&entry.label, 60),
+                                        };
+                                        if ui
+                                            .selectable_label(
+                                                self.craft_ui.addmod_sel == pos + 1,
+                                                text,
+                                            )
+                                            .on_hover_text(entry.lines.join("\n"))
+                                            .clicked()
+                                        {
+                                            self.craft_ui.addmod_sel = pos + 1;
+                                        }
+                                    }
+                                    if catalog.is_empty() {
+                                        ui.colored_label(Theme::TEXT_DIM, "No modifiers available");
+                                    }
+                                });
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        let can_add = if is_custom {
+                            !self.craft_ui.addmod_custom.trim().is_empty()
+                        } else {
+                            self.craft_ui.addmod_sel > 0
+                        };
+                        if ui.add_enabled(can_add, egui::Button::new("Add")).clicked() {
+                            do_add = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if let Some(i) = new_source {
+                self.craft_ui.addmod_source_idx = i;
+                self.craft_ui.addmod_sel = 0;
+            }
+            if let Some(s) = new_sort {
+                self.craft_ui.addmod_sort = s;
+            }
+            if do_add {
+                let result = if is_custom {
+                    crafting::add_custom_mod(
+                        bridge.lua(),
+                        item_id,
+                        self.craft_ui.addmod_custom.trim(),
+                        self.craft_ui.addmod_custom_crafted,
+                    )
+                } else {
+                    crafting::apply_catalog_mod(
+                        bridge.lua(),
+                        item_id,
+                        &source_id,
+                        self.craft_ui.addmod_sel,
+                    )
+                };
+                match result {
+                    Ok(()) => {
+                        changed = true;
+                        close = true;
+                    }
+                    Err(e) => log::error!("Failed to add modifier: {e}"),
+                }
+            }
+            if close {
+                self.craft_ui.addmod_item = None;
+                self.addmod_sources_cache = None;
+                self.addmod_catalog_cache = None;
+                self.addmod_sort_cache = None;
+                self.craft_ui.addmod_sort = 0;
+                self.craft_ui.addmod_custom.clear();
+            }
+        }
+
         changed
     }
 
@@ -2162,6 +2565,17 @@ impl ItemsPanel {
                         self.craft_ui.implicit_group_idx = 0;
                         self.craft_ui.implicit_tier_idx = 0;
                         self.craft_ui.implicit_custom.clear();
+                        ui.close_menu();
+                    }
+                    // Upstream shows "Add modifier..." for magic/rare items
+                    if (entry.rarity == "MAGIC" || entry.rarity == "RARE")
+                        && ui.button("Add modifier...").clicked()
+                    {
+                        self.craft_ui.addmod_item = Some(entry.id);
+                        self.craft_ui.addmod_source_idx = 0;
+                        self.craft_ui.addmod_sel = 0;
+                        self.craft_ui.addmod_sort = 0;
+                        self.craft_ui.addmod_custom.clear();
                         ui.close_menu();
                     }
                 });

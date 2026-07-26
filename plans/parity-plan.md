@@ -234,7 +234,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Craft item popup (select base type, rarity; rare gets a name; opens the affix editor)
 - [x] Affix selection (prefix/suffix dropdowns; tiers listed flat with ilvl, eligibility via upstream GetModSpawnWeight)
 - [x] Affix range sliders (roll position within the tier, re-crafts via Item:Craft)
-- [~] Custom modifier popup (free-text custom mod with a bench-craft flag; no Essence/Veiled/Beastcraft catalogs yet)
+- [x] Custom modifier popup (Add Modifier dialog: Crafting Bench, Essence, Veiled, Beastcraft, Necropolis, Delve, and Prefix/Suffix catalogs per upstream eligibility, plus free-text custom with a bench-craft flag; ported buildMods registered in ports.toml)
 - [x] Paste item from clipboard (button + Ctrl+V, parsed by upstream Item:ParseRaw)
 
 ### Enchanting & Anointing
@@ -533,7 +533,7 @@ not listed.
 - [ ] Sort gem suggestions by minion-specific stats (data side done via powerStatList; UI dropdown lists them already)
 
 ### Items/Crafting
-- [~] Sorting in add-modifier, enchant, corrupt, and implicit popups (corrupt and add-implicit popups done: power-stat dropdown, one calc pass per option/group, values shown; enchant/add-modifier pending)
+- [x] Sorting in add-modifier, enchant, corrupt, and implicit popups (power-stat dropdown in all four, one calc pass per option/group/line/entry on first use, values shown next to each option)
 - [x] Sinistral and Dextral catalysts (12-entry list synced to upstream's index order; drift-guarded in ports.toml)
 - [ ] Foulborn modifier toggles on uniques (per-mod mutate checkbox + magnitude slider via Item:MutateMod)
 - [ ] Volatile Vaal Orb corruption (per-explicit-mod roll-range sliders, corruptedRange 0.78-1.22 persisted on mod lines)
