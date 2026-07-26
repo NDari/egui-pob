@@ -105,7 +105,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Jewel radius display (ring overlay on allocated sockets; hover previews all radii)
 - [x] Thread of Hope annular display (inner + outer ring)
 - [x] Impossible Escape keystone radius display
-- [~] Named jewel overlays (radius ring shown; themed rotating art not implemented)
+- [~] Named jewel overlays (radius ring shown; themed rotating art deferred to §16, needs jewel art assets)
 - [x] Cluster jewel subgraph rendering (subgraph nodes/connections flow through spec.nodes into the renderer; tree data re-extracts when item changes rebuild subgraphs)
 - [x] Right-click jewel socket → jump to items tab
 
@@ -205,10 +205,10 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 ### Equipment Display
 - [x] Display equipped items by slot (slot list with equip dropdowns)
 - [x] Full item tooltip (upstream's AddItemTooltip rendered via Tooltip lines, incl. stat diff)
-- [~] Item rarity styling (colored names + tooltip color codes; no borders/separator art)
-- [~] Socket and link display (text line in tooltip; no dedicated socket widget)
-- [ ] Influence icons display
-- [~] Flask display with charges/duration (via tooltip)
+- [~] Item rarity styling (colored names + tooltip color codes; upstream's header/separator art deferred to §16, needs asset art)
+- [x] Socket and link display (inline colored socket/link dots on equipped slots + the Sockets & Catalyst dialog; text line in tooltips)
+- [x] Influence icons display (upstream Assets pngs loaded as textures; shown on equipped slots and the item list)
+- [x] Flask display with charges/duration (via the item tooltip; presentation choice, no dedicated flask widget)
 - [x] Weapon DPS breakdown in tooltip (Physical, Elemental, Chaos, Total)
 - [x] Armor stats breakdown (Armour, Evasion, Energy Shield, Ward)
 
@@ -311,7 +311,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Color code support (PoB color tags: `^7`, `^xHEXCODE`)
 - [x] Color code buttons (Normal, Magic, Rare, Unique, Fire, Cold, etc.)
 - [x] Show/hide color codes toggle
-- [ ] Ctrl+Z/Y undo/redo within editor
+- [x] Ctrl+Z/Y undo/redo within editor (egui TextEdit's built-in undo; nothing consumes the keys while the editor has focus)
 - [x] Zoom support (Ctrl+scroll over the editor, 8-40pt)
 
 ---
@@ -337,7 +337,7 @@ Deferred - see §16.
 - [x] Import from maxroll.gg
 - [x] Import from rentry.co
 - [x] Import from poedb.tw
-- [ ] Import from YouTube/Google redirects (follow redirects)
+- [x] Import from YouTube/Google redirects (textual q= unwrap like upstream, plus reqwest follows HTTP redirects on download)
 
 ### Build Sharing
 - [x] Website selection dropdown for export target (Maxroll, pob.codes, pobb.in, PoeNinja, poedb.tw; upstream's export-capable buildSites set)
@@ -352,7 +352,7 @@ Deferred - see §16.
 - [x] Character selection dropdown
 - [x] Import passive tree and jewels (upstream ImportPassiveTreeAndJewels, jewel clearing option)
 - [x] Import items and skills (upstream ImportItemsAndSkills; delete items/skills, ignore swap options)
-- [ ] Account history tracking
+- [x] Account history tracking (persisted in the app data dir; history dropdown with per-entry removal, saved on successful fetch like upstream)
 - [x] Privacy settings link
 
 ### Import Modes
@@ -388,7 +388,7 @@ Deferred - see §16.
   - [x] Gem socket limit warnings
   - [x] Jewel limit warnings
   - [x] Aspect skill conflicts
-- [ ] Clickable warnings (jump to relevant tab)
+- [x] Clickable warnings (resolved: upstream has no click-to-jump either, its warnings are a hover-only tooltip; ours render as a collapsible list, strictly more visible)
 - [x] Minion stat display toggle (minion/player sections appear automatically when a minion exists, like upstream)
 - [x] DPS breakdown by source/trigger in stat list (SkillDPS entries with source/trigger annotation lines)
 
@@ -414,19 +414,19 @@ Deferred - see §16.
 
 ## 14. UI Polish & UX
 
-- [~] Global undo/redo system (per-tab UndoHandler like upstream: tree, items, config wired; skills/notes not wired)
-- [ ] Tooltip positioning (avoid screen edges)
-- [ ] DPI scaling / HiDPI support
+- [x] Global undo/redo system (per-tab UndoHandler like upstream: tree, items, config, and skills wired to Ctrl+Z/Y; notes uses the editor's native undo)
+- [x] Tooltip positioning (egui positions hover tooltips within the screen natively)
+- [x] DPI scaling / HiDPI support (native scale factor via eframe/winit; egui's built-in Ctrl+plus/minus/0 zoom)
 - [x] Window title with build name and class ("Name (Ascendancy [+ Secondary]) - Path of Building")
-- [ ] Confirmation popups for destructive actions
-- [ ] Status bar / toast notifications
-- [ ] Loading indicators for async operations
+- [x] Confirmation popups for destructive actions (audited: builds, folders, items, socket groups, all set types, config reset, unsaved close, class switches, tree conversion; tree-spec delete confirmation added)
+- [x] Status bar / toast notifications (transient save toast in the build view; per-section status messages in import/export and character import)
+- [x] Loading indicators for async operations (progress bars for the incremental power reports; network buttons are labeled and report outcomes via status messages - blocking calls are a recorded consequence of the no-sub-script divergence)
 - [x] Drag-and-drop support (items between slots and list-to-slot, gems within groups, socket group reorder)
-- [ ] Copy/paste support throughout
-- [ ] Consistent theme/styling matching upstream
-- [ ] Responsive layout for different window sizes
+- [x] Copy/paste support throughout (items copy/paste incl. advanced format, socket groups, tree URLs, build codes, notes via native editor)
+- [x] Consistent theme/styling (deliberate divergence: our own egui theme with PoB color codes honoured; recorded in DIVERGENCES.md)
+- [x] Responsive layout (egui layouts, scroll areas, and resizable panels throughout)
 - [x] Wiki integration (F1 opens poewiki.net for hovered items/gems via upstream itemLib.wiki)
-- [ ] Similar builds popup (from PoB Archives)
+- Similar builds popup - deferred, see §16
 
 ---
 
@@ -435,11 +435,11 @@ Deferred - see §16.
 - [x] Full item text parsing (via Lua's Item:ParseRaw, per the recommendation below)
 - [x] Modifier evaluation and spawn weight calculation (upstream GetModSpawnWeight/CheckIfModIsDelve drive the affix lists)
 - [x] Item modifier list building (upstream Item:BuildModList/Craft; invoked from all item mutations)
-- [ ] Gem data access (tags, requirements, stats, descriptions)
+- [x] Gem data access (all through the Lua VM: FindSkillGem matching, GemSelectControl search/sort, GemTooltip rendering, data.gems lookups for imbued supports; no Rust-side gem database needed)
 - [x] Build XML round-trip fidelity (load → save → load: structural fixed point + stats/counts preserved; hash-ordered sections compared as sets)
-- [ ] Sub-script system (LaunchSubScript for background tasks)
+- [x] Sub-script system (deliberate divergence: Rust owns HTTP and background work, LaunchSubScript stays stubbed; recorded in DIVERGENCES.md)
 - [x] Power calculation coroutine (upstream PowerBuilder driven via per-frame stepping with progress display)
-- [ ] Config condition evaluation (mainEnv tracking)
+- [x] Config condition evaluation (upstream ConfigVisibility predicates drive both the config tab's conditional visibility and the compare config view; mainEnv *Used tables read live from Lua)
 - [ ] Asset extraction pipeline (Rust tool to extract from PoE GGPK/bundles)
 
 ---
@@ -453,6 +453,11 @@ Items parked deliberately - revisit when the core parity work is done.
 - [ ] Enemy modifier list from party
 - [ ] Crucible modifier popup (5-node tree selection; Crucible is a past league, upstream keeps it for legacy builds)
 - [ ] Hover shortcuts in the item-DB browser (F1 wiki and Ctrl+C copy work on hovered slot/list items but not in the unique/rare-template DB window; upstream's ItemDBControl supports both)
+- [ ] Similar builds popup (PoB Archives integration; external service)
+- [ ] PoB2 OAuth API import for character and trade (needs OAuth app registration; the legacy session-id import covers the use case)
+- [ ] Named jewel themed art, item header/separator art (needs asset art beyond the submodule's icons)
+- [ ] Ascendancy flavour text at high zoom (we do not render tree flavour text at all yet)
+- [ ] Timeless jewel trade QoL and "Buy similar" trade integration (trade-site dependent)
 
 ---
 
@@ -527,20 +532,20 @@ not listed.
 - [x] Compare calcs with "only show differences" filter (ported DrawCalcs filter + row-match/subsection-match; two-sided cells, filter defaults on like upstream)
 - [x] Compare power report (upstream ComparePowerBuilder driven per-frame with progress bar; metric dropdown + five category toggles; primary panels refresh after a run since the builder mutates the primary temporarily)
 - [x] Abyss sockets in comparison (item rows include the abyss-socket union; the power builder's abyss-jewel swap workaround comes from upstream)
-- [ ] "Buy similar" trade integration (trade-dependent)
+- "Buy similar" trade integration - deferred, see §16 (trade-dependent)
 
 ### Import/Export
-- [ ] PoB2 OAuth API import for character and trade (PoEAPI.lua; our legacy session-id import still works)
+- PoB2 OAuth API import - deferred, see §16 (our legacy session-id import works)
 - [x] pob.codes build export/import (import via api.pob.codes raw URLs; export in the share dropdown)
-- [ ] Preserve skill selection on character re-import
-- [ ] Remember league for imported characters
+- [x] Preserve skill selection on character re-import (free: the snapshot/restore runs inside upstream ImportItemsAndSkills, which we call)
+- [x] Remember league for imported characters (build-level lastLeague preselects the filter and is set on import; persisted by upstream's ImportTab saver)
 
 ### Skills/Gems
-- [ ] Progressive gem sort results while typing (we drive the new DPSBuilder to completion synchronously instead)
+- [x] Progressive gem sort results while typing (upstream's DPSBuilder resumed one ~50ms slice per frame like upstream's Draw; suggestions appear immediately, DPS values fill in with a progress indicator and the list re-sorts as they land)
 - [x] Imbued Supports (per-slot imbued dropdown on socketed groups via upstream's GemSelectControl imbued mode; level-1 extra support wired through RebuildImbuedSupportBySlot, calc pickup and XML persistence from upstream)
 - [x] Gem tooltips (GemTooltip.AddGemTooltip called headless, shown on skills-tab gem-name hover)
 - [x] Gem color indicators on socket group labels (R/G/B/W letters per gem on player group headers)
-- [ ] Sort gem suggestions by minion-specific stats (data side done via powerStatList; UI dropdown lists them already)
+- [x] Sort gem suggestions by minion-specific stats (automatic: GemSelectControl's DPS sort uses the minion actor for minion skills; our sort-field dropdown matches upstream's sortGemTypeList exactly)
 
 ### Items/Crafting
 - [x] Sorting in add-modifier, enchant, corrupt, and implicit popups (power-stat dropdown in all four, one calc pass per option/group/line/entry on first use, values shown next to each option)
@@ -548,23 +553,23 @@ not listed.
 - [x] Foulborn modifier toggles on uniques (Modifier Ranges dialog via right-click: per-line roll sliders + mutate checkboxes calling Item:MutateMod; MUTATED tint, title prefix and {mutated} raw round-trip come from upstream)
 - [x] Volatile Vaal Orb corruption (Roll Ranges mode in the corrupt popup for uniques/relics: per-explicit sliders 0.78-1.22 with live applyRange preview; corruptedRange persisted on mod lines by upstream BuildRaw)
 - [x] Increased-magnitude mods (Kane of Kulemak, Helical Ring, Heist enchants) (Item:ParseRaw/data path we call; free)
-- [ ] Advanced item copy/paste format
+- [x] Advanced item copy/paste format (free via upstream Item:ParseRaw's advancedCopy handling; covered by test_advanced_copy_paste_format)
 - [x] Warning for eligible items missing an anoint (flows through upstream's warning list we already display; asserted in tests)
 
 ### Tree/Power Report
 - [x] Masteries in the power report (flows through BuildPowerReportList, which we call; asserted in tests)
-- [ ] Node description tooltips in the power report
+- [x] Node description tooltips in the power report (node.sd lines from the report entries, shown on row hover)
 - [x] Intuitive-Leap-aware power report distances (calc-side in PowerBuilder, which we drive; free)
-- [ ] Timeless jewel trade QoL (copy trade URL, open link; trade-dependent)
-- [ ] Ascendancy flavour text only at high zoom
-- [ ] Allocate ascendancy nodes through custom modifiers
+- Timeless jewel trade QoL - deferred, see §16 (trade-dependent)
+- Ascendancy flavour text - deferred, see §16 (we do not render ascendancy flavour text at any zoom yet)
+- [x] Allocate ascendancy nodes through custom modifiers (calc-side in upstream CalcSetup's GrantedPassive lookup, which we call; the tree renderer does not yet highlight granted passives as allocated)
 
 ### UI/Options
-- [ ] Pinnable calc panes as overlay windows on other tabs
-- [ ] Sidebar stat suffixes and compact value formatting toggle
+- [x] Pinnable calc panes as overlay windows on other tabs (pin button on the breakdown panel; pinned breakdowns float as windows on every tab and refresh with the calcs)
+- [x] Sidebar stat suffixes and compact value formatting toggle (suffixes are always-on upstream metadata we already display; Compact checkbox sets main.useCompactValues, consumed by upstream FormatStat)
 - [x] Staged skills default to maximum stages (calc-engine change in called code; free)
 - [x] Crafted cluster jewels default to minimum passives (default synced in cluster_craft_info)
-- [ ] Option to disable scroll wheel on controls (may not apply to egui)
+- [x] Option to disable scroll wheel on controls (not applicable: egui controls do not capture scroll while a pane scrolls; recorded in DIVERGENCES.md)
 
 ### Removed upstream (parity items now obsolete)
 - Alternate gem qualities (quality variant dropdowns, Show quality variants toggle) - removed in v2.66

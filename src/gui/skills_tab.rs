@@ -26,6 +26,10 @@ struct SetPrompt {
 /// field has focus at a time).
 #[derive(Default)]
 struct GemSuggest {
+    /// DPS sort still computing (re-poll each frame, upstream DPSBuilder).
+    pending: bool,
+    /// DPS sort progress 0-100 while pending.
+    progress: i64,
     /// (group index, query, sort_by_dps) the current results were computed for.
     query_key: Option<(usize, String, bool)>,
     results: Vec<GemChoice>,
@@ -71,6 +75,9 @@ enum SkillAction {
     CopyGroup(usize),
     /// Paste clipboard text as a new socket group.
     PasteGroup(String),
+    /// No-op mutation marker: the Lua state already changed (undo/redo);
+    /// just refresh the panel.
+    Refresh,
     ActivateSet(i64),
     NewSet(String),
     CopySet(i64, String),
@@ -189,6 +196,26 @@ impl SkillsPanel {
 
         self.hovered_gem = None;
         let mut actions: Vec<SkillAction> = Vec::new();
+
+        // Undo/redo (Ctrl+Z / Ctrl+Y; upstream SkillsTab UndoHandler - every
+        // mutation here calls AddUndoState), when no field has focus
+        if ui.ctx().memory(|m| m.focused().is_none()) {
+            let undo_pressed =
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
+            let redo_pressed =
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y));
+            if undo_pressed || redo_pressed {
+                let result = if undo_pressed {
+                    skills::undo(bridge.lua())
+                } else {
+                    skills::redo(bridge.lua())
+                };
+                match result {
+                    Ok(()) => actions.push(SkillAction::Refresh),
+                    Err(e) => log::error!("Skills undo/redo failed: {e}"),
+                }
+            }
+        }
 
         // Ctrl+C copies the main socket group, Ctrl+V pastes one from the
         // clipboard (upstream's skills tab keys), when no field has focus
@@ -628,6 +655,7 @@ impl SkillsPanel {
         let mut changed = false;
         for action in actions {
             let result = match action {
+                SkillAction::Refresh => Ok(()),
                 SkillAction::SetMain(index) => skills::set_main_socket_group(lua, index),
                 SkillAction::NewGroup => skills::new_socket_group(lua),
                 SkillAction::DeleteGroup(index) => skills::delete_socket_group(lua, index),
@@ -891,6 +919,7 @@ fn show_socket_group(
                                             500,
                                             true,
                                         )
+                                        .map(|r| r.choices)
                                         .unwrap_or_else(|e| {
                                             log::error!("Imbued gem search failed: {e}");
                                             Vec::new()
@@ -1123,25 +1152,45 @@ fn show_socket_group(
                             .is_some_and(|k| k.0 == group_index)));
             if show_list {
                 let key = (group_index, add_text.clone(), suggest.sort_by_dps);
-                if suggest.query_key.as_ref() != Some(&key) {
-                    suggest.results = gems::search_gems(
+                // Re-run while the DPS sort is still computing: each call
+                // resumes upstream's DPSBuilder one slice, and the list
+                // re-sorts progressively like upstream (results appear
+                // immediately with DPS values filling in)
+                if suggest.query_key.as_ref() != Some(&key) || suggest.pending {
+                    match gems::search_gems(
                         bridge.lua(),
                         group_index,
                         add_text.trim(),
                         suggest.sort_by_dps,
                         12,
                         false,
-                    )
-                    .unwrap_or_else(|e| {
-                        log::error!("Gem search failed: {e}");
-                        Vec::new()
-                    });
+                    ) {
+                        Ok(results) => {
+                            suggest.results = results.choices;
+                            suggest.pending = results.pending;
+                            suggest.progress = results.progress;
+                            if results.pending {
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Gem search failed: {e}");
+                            suggest.results = Vec::new();
+                            suggest.pending = false;
+                        }
+                    }
                     suggest.query_key = Some(key);
                 }
 
                 let frame_resp = egui::Frame::group(ui.style())
                     .inner_margin(4.0)
                     .show(ui, |ui| {
+                        if suggest.pending {
+                            ui.colored_label(
+                                super::theme::Theme::TEXT_DIM,
+                                format!("sorting by DPS... {}%", suggest.progress),
+                            );
+                        }
                         if suggest.results.is_empty() {
                             ui.colored_label(super::theme::Theme::TEXT_DIM, "no matches");
                         }

@@ -47,3 +47,21 @@ listed here; presentation is fully ours and needs no entries.
   draggable list row (same OnOrderChange index math).
 - Undo/redo hotkeys only fire when no text widget has focus (egui text
   fields own Ctrl+Z internally).
+
+- **No sub-script system (LaunchSubScript).** Upstream runs HTTP and other
+  background work on Lua worker threads via LaunchSubScript; we do all
+  networking in Rust (reqwest, blocking) and stub LaunchSubScript. Any
+  upstream feature built on sub-scripts is reimplemented on the Rust side
+  (share uploads, character import, URL imports).
+
+- **Our own egui theme.** Colors, spacing, and widget styling are egui-native
+  rather than a recreation of upstream's SimpleGraphic look. PoB color codes
+  (`^7`, `^xRRGGBB`) in Lua-produced text are honoured via
+  `theme::pob_layout_job`. Presentation is fully ours per policy; listed here
+  only because the parity plan tracked "consistent theme/styling matching
+  upstream" as an item.
+
+- **No "disable scroll wheel on controls" option.** Upstream added an option
+  to stop the scroll wheel changing dropdown/slider values while scrolling a
+  pane. egui dropdowns and sliders do not capture scroll while a pane
+  scrolls, so the problem this option solves does not exist here.

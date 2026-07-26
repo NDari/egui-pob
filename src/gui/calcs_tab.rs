@@ -22,6 +22,9 @@ pub struct CalcsPanel {
     socket_group_names: Vec<String>,
     skill_selection: calcs::CalcsSkillSelection,
     breakdown: Option<OpenBreakdown>,
+    /// Pinned breakdowns rendered as floating windows on every tab
+    /// (upstream v2.66's pinnable calc panes).
+    pinned: Vec<OpenBreakdown>,
     search: String,
     error: Option<String>,
 }
@@ -34,6 +37,7 @@ impl CalcsPanel {
             socket_group_names: Vec::new(),
             skill_selection: calcs::CalcsSkillSelection::default(),
             breakdown: None,
+            pinned: Vec::new(),
             search: String::new(),
             error: None,
         };
@@ -68,6 +72,50 @@ impl CalcsPanel {
                 Ok(sections) if !sections.is_empty() => open.sections = sections,
                 _ => self.breakdown = None,
             }
+        }
+        // Refresh pinned breakdowns too; drop any that no longer resolve
+        self.pinned.retain_mut(|open| {
+            let (si, ui_idx, ri, ci) = open.cell;
+            match calcs::fetch_breakdown(lua, si, ui_idx, ri, ci) {
+                Ok(sections) if !sections.is_empty() => {
+                    open.sections = sections;
+                    true
+                }
+                _ => false,
+            }
+        });
+    }
+
+    /// True when any breakdown is pinned as a floating window.
+    pub fn has_pinned(&self) -> bool {
+        !self.pinned.is_empty()
+    }
+
+    /// Draw pinned breakdowns as floating windows. Called by the build view
+    /// every frame, on every tab (upstream's overlay calc panes).
+    pub fn show_pinned_windows(&mut self, ctx: &egui::Context) {
+        let mut unpin: Option<usize> = None;
+        for (i, open) in self.pinned.iter().enumerate() {
+            let mut keep_open = true;
+            egui::Window::new(&open.title)
+                .id(egui::Id::new(("pinned_breakdown", i)))
+                .default_width(380.0)
+                .resizable(true)
+                .open(&mut keep_open)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::both()
+                        .id_salt(("pinned_breakdown_scroll", i))
+                        .max_height(400.0)
+                        .show(ui, |ui| {
+                            show_breakdown_sections(ui, &open.sections);
+                        });
+                });
+            if !keep_open {
+                unpin = Some(i);
+            }
+        }
+        if let Some(i) = unpin {
+            self.pinned.remove(i);
         }
     }
 
@@ -315,11 +363,19 @@ impl CalcsPanel {
             return;
         };
         let mut close = false;
+        let mut pin = false;
         ui.horizontal(|ui| {
             ui.heading(&open.title);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("✕").clicked() {
                     close = true;
+                }
+                if ui
+                    .small_button("📌")
+                    .on_hover_text("Pin as a floating window that stays visible on every tab")
+                    .clicked()
+                {
+                    pin = true;
                 }
             });
         });
@@ -327,57 +383,60 @@ impl CalcsPanel {
         egui::ScrollArea::both()
             .id_salt("calc_breakdown_scroll")
             .show(ui, |ui| {
-                for (idx, section) in open.sections.iter().enumerate() {
-                    match section {
-                        BreakdownSection::Text { lines } => {
-                            for line in lines {
-                                ui.label(theme::pob_layout_job(line, 14.0, Theme::TEXT_DEFAULT));
-                            }
-                        }
-                        BreakdownSection::Table {
-                            label,
-                            footer,
-                            columns,
-                            rows,
-                        } => {
-                            if let Some(label) = label {
-                                ui.label(theme::pob_layout_job(label, 14.0, Theme::TEXT_DEFAULT));
-                            }
-                            egui::Grid::new(format!("breakdown_table_{idx}"))
-                                .striped(true)
-                                .spacing([10.0, 2.0])
-                                .show(ui, |ui| {
-                                    for column in columns {
-                                        ui.label(
-                                            egui::RichText::new(column)
-                                                .strong()
-                                                .size(12.0)
-                                                .color(Theme::TEXT_MUTED),
-                                        );
-                                    }
-                                    ui.end_row();
-                                    for row in rows {
-                                        for value in row {
-                                            ui.label(theme::pob_layout_job(
-                                                value,
-                                                12.0,
-                                                Theme::TEXT_DEFAULT,
-                                            ));
-                                        }
-                                        ui.end_row();
-                                    }
-                                });
-                            if let Some(footer) = footer {
-                                ui.label(theme::pob_layout_job(footer, 12.0, Theme::TEXT_MUTED));
-                            }
-                        }
-                    }
-                    ui.add_space(8.0);
-                }
+                show_breakdown_sections(ui, &open.sections);
             });
-        if close {
+        if pin && let Some(open) = self.breakdown.take() {
+            self.pinned.push(open);
+        } else if close {
             self.breakdown = None;
         }
+    }
+}
+
+/// Render breakdown sections (shared by the side panel and pinned windows).
+fn show_breakdown_sections(ui: &mut egui::Ui, sections: &[BreakdownSection]) {
+    for (idx, section) in sections.iter().enumerate() {
+        match section {
+            BreakdownSection::Text { lines } => {
+                for line in lines {
+                    ui.label(theme::pob_layout_job(line, 14.0, Theme::TEXT_DEFAULT));
+                }
+            }
+            BreakdownSection::Table {
+                label,
+                footer,
+                columns,
+                rows,
+            } => {
+                if let Some(label) = label {
+                    ui.label(theme::pob_layout_job(label, 14.0, Theme::TEXT_DEFAULT));
+                }
+                egui::Grid::new(format!("breakdown_table_{idx}"))
+                    .striped(true)
+                    .spacing([10.0, 2.0])
+                    .show(ui, |ui| {
+                        for column in columns {
+                            ui.label(
+                                egui::RichText::new(column)
+                                    .strong()
+                                    .size(12.0)
+                                    .color(Theme::TEXT_MUTED),
+                            );
+                        }
+                        ui.end_row();
+                        for row in rows {
+                            for value in row {
+                                ui.label(theme::pob_layout_job(value, 12.0, Theme::TEXT_DEFAULT));
+                            }
+                            ui.end_row();
+                        }
+                    });
+                if let Some(footer) = footer {
+                    ui.label(theme::pob_layout_job(footer, 12.0, Theme::TEXT_MUTED));
+                }
+            }
+        }
+        ui.add_space(8.0);
     }
 }
 

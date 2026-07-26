@@ -13,6 +13,9 @@ pub struct ImportPanel {
     export_site_idx: usize,
     // Character import state
     account_name: String,
+    /// Past account names (persisted in the app data dir, upstream's
+    /// account history dropdown).
+    account_history: Vec<String>,
     realm_index: usize,
     sessid: String,
     characters: Vec<CharacterInfo>,
@@ -42,6 +45,7 @@ impl ImportPanel {
             status_message: None,
             export_site_idx: 0,
             account_name: String::new(),
+            account_history: char_import::load_account_history(),
             realm_index: 0,
             sessid: String::new(),
             characters: Vec::new(),
@@ -178,7 +182,9 @@ impl ImportPanel {
             ui.radio_value(&mut self.import_to_new, true, "A new build");
         });
         if ui.button("Import").clicked() && !self.import_code.is_empty() {
-            let input = self.import_code.trim().to_string();
+            // Unwrap youtube.com/redirect and google.com/url wrappers to the
+            // q= target first, like upstream's import handler
+            let input = unwrap_redirect_url(self.import_code.trim());
             // For a new-build import, switch the VM to a fresh build first so
             // the current one is untouched
             let prepared = if self.import_to_new {
@@ -267,6 +273,32 @@ impl ImportPanel {
                 });
             if ui.button("Get characters").clicked() {
                 self.fetch_characters(bridge);
+            }
+            // Account history (persisted across sessions)
+            if !self.account_history.is_empty() {
+                egui::ComboBox::from_id_salt("account_history")
+                    .selected_text("History")
+                    .width(80.0)
+                    .show_ui(ui, |ui| {
+                        for name in self.account_history.clone() {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .selectable_label(self.account_name == name, &name)
+                                    .clicked()
+                                {
+                                    self.account_name = name.clone();
+                                }
+                                if ui
+                                    .small_button("✕")
+                                    .on_hover_text("Remove from history")
+                                    .clicked()
+                                {
+                                    self.account_history =
+                                        char_import::remove_account_history(&name);
+                                }
+                            });
+                        }
+                    });
             }
         });
         ui.horizontal(|ui| {
@@ -385,6 +417,14 @@ impl ImportPanel {
                 }
                 self.char_status = Some((format!("Found {} characters.", chars.len()), false));
                 self.characters = chars;
+                // Successful fetch: remember the account (upstream
+                // SaveAccountHistory) and preselect the build's last league
+                self.account_history = char_import::add_account_history(self.account_name.trim());
+                if let Some(last) = char_import::last_league(bridge.lua())
+                    && let Some(pos) = self.leagues.iter().position(|l| *l == last)
+                {
+                    self.league_index = pos + 1;
+                }
             }
             Err(e) => {
                 self.char_status = Some((format!("{e}"), true));
@@ -623,6 +663,50 @@ fn resolve_download_url(url: &str) -> anyhow::Result<String> {
     )
 }
 
+/// Unwrap youtube.com/redirect and google.com/url indirection to the q=
+/// target (upstream's textual unwrap; no HTTP involved).
+fn unwrap_redirect_url(input: &str) -> String {
+    let trimmed = input.trim().trim_matches('?');
+    if (trimmed.contains("youtube.com/redirect?") || trimmed.contains("google.com/url?"))
+        && let Some(q) = trimmed
+            .split(&['?', '&'][..])
+            .find_map(|part| part.strip_prefix("q="))
+    {
+        return url_decode(q);
+    }
+    trimmed.to_string()
+}
+
+/// Percent-decode a URL query value ('+' becomes space, %XX becomes a byte).
+fn url_decode(s: &str) -> String {
+    let mut out = Vec::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Check if input looks like a URL rather than a raw build code.
 fn looks_like_url(input: &str) -> bool {
     let trimmed = input.trim();
@@ -736,4 +820,30 @@ fn set_export_support(bridge: &LuaBridge, state: bool) -> Result<(), mlua::Error
         "#,
         )
         .call(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unwraps_redirect_urls() {
+        assert_eq!(
+            unwrap_redirect_url(
+                "https://www.youtube.com/redirect?event=desc&q=https%3A%2F%2Fpobb.in%2Fabc123&v=x"
+            ),
+            "https://pobb.in/abc123"
+        );
+        assert_eq!(
+            unwrap_redirect_url(
+                "https://www.google.com/url?sa=t&q=https%3A%2F%2Fpob.codes%2Fb%2Fxyz"
+            ),
+            "https://pob.codes/b/xyz"
+        );
+        // Non-wrapped URLs pass through untouched
+        assert_eq!(
+            unwrap_redirect_url("https://pobb.in/abc"),
+            "https://pobb.in/abc"
+        );
+    }
 }

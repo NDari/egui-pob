@@ -37,6 +37,9 @@ pub struct ItemListEntry {
     pub item_type: String,
     /// True when the base has an enchantment catalog (helmet/boots/gloves...).
     pub has_enchantments: bool,
+    /// Influence keys present on the item (upstream itemLib.influenceInfo
+    /// keys: "shaper", "elder", "crusader", ...).
+    pub influences: Vec<String>,
 }
 
 /// One line of an item tooltip, produced by upstream's AddItemTooltip.
@@ -264,6 +267,12 @@ pub fn extract_item_list(lua: &Lua) -> Result<Vec<ItemListEntry>, mlua::Error> {
             for _, id in ipairs(itemsTab.itemOrderList) do
                 local item = itemsTab.items[id]
                 if item then
+                    local influences = {}
+                    for _, info in ipairs(itemLib.influenceInfo.all) do
+                        if item[info.key] then
+                            table.insert(influences, info.key)
+                        end
+                    end
                     table.insert(result, {
                         id = id,
                         name = item.name or "",
@@ -272,6 +281,7 @@ pub fn extract_item_list(lua: &Lua) -> Result<Vec<ItemListEntry>, mlua::Error> {
                         crafted = item.crafted == true,
                         itemType = item.type or "",
                         hasEnchantments = item.enchantments ~= nil,
+                        influences = influences,
                     })
                 end
             end
@@ -291,6 +301,10 @@ pub fn extract_item_list(lua: &Lua) -> Result<Vec<ItemListEntry>, mlua::Error> {
             crafted: entry.get("crafted").unwrap_or(false),
             item_type: entry.get("itemType").unwrap_or_default(),
             has_enchantments: entry.get("hasEnchantments").unwrap_or(false),
+            influences: entry
+                .get::<LuaTable>("influences")
+                .map(|t| t.sequence_values::<String>().flatten().collect())
+                .unwrap_or_default(),
         });
     }
     Ok(entries)

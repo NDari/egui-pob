@@ -96,6 +96,8 @@ pub struct BuildView {
     spectre_library: Option<SpectreLibrary>,
     /// Compare tab state (entries live in Lua; dropped on build close).
     compare_panel: ComparePanel,
+    /// Transient toast: (message, is_error, shown-at).
+    toast: Option<(String, bool, std::time::Instant)>,
 }
 
 /// Spectre library popup state.
@@ -232,6 +234,7 @@ impl BuildView {
             loadout_prompt: None,
             spectre_library: None,
             compare_panel: ComparePanel::default(),
+            toast: None,
         }
     }
 
@@ -403,8 +406,15 @@ impl BuildView {
             self.save_as_dialog = Some(SaveAsDialog::new(self.build_name.clone(), false, bridge));
         } else {
             match bridge.save_build() {
-                Ok(()) => log::info!("Build saved"),
-                Err(e) => log::error!("Save failed: {e}"),
+                Ok(()) => {
+                    self.toast =
+                        Some(("Build saved.".to_string(), false, std::time::Instant::now()));
+                }
+                Err(e) => {
+                    log::error!("Save failed: {e}");
+                    self.toast =
+                        Some((format!("Save failed: {e}"), true, std::time::Instant::now()));
+                }
             }
         }
     }
@@ -1078,6 +1088,41 @@ impl BuildView {
             }
         });
 
+        // Transient toast (top right, ~2.5s)
+        if let Some((msg, is_error, shown_at)) = &self.toast {
+            if shown_at.elapsed().as_secs_f32() > 2.5 {
+                self.toast = None;
+            } else {
+                let color = if *is_error {
+                    egui::Color32::from_rgb(230, 90, 90)
+                } else {
+                    egui::Color32::from_rgb(120, 220, 120)
+                };
+                egui::Area::new(egui::Id::new("build_toast"))
+                    .anchor(egui::Align2::RIGHT_TOP, [-16.0, 40.0])
+                    .interactable(false)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.colored_label(color, msg);
+                        });
+                    });
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        }
+
+        // Pinned calc breakdowns float above every tab (upstream's overlay
+        // calc panes); keep them fresh when calcs changed on another tab
+        if let Some(ref mut calcs) = self.calcs_panel
+            && calcs.has_pinned()
+        {
+            if self.calcs_stale {
+                calcs.refresh(bridge.lua());
+                self.calcs_stale = false;
+            }
+            calcs.show_pinned_windows(ui.ctx());
+        }
+
         go_back
     }
 
@@ -1310,7 +1355,35 @@ impl BuildView {
         }
 
         ui.separator();
-        ui.strong("Stats");
+        ui.horizontal(|ui| {
+            ui.strong("Stats");
+            // Compact large numbers (upstream main.useCompactValues; the
+            // stat list is rebuilt by upstream FormatStat on the next frame)
+            let mut compact = bridge
+                .lua()
+                .load("return mainObject_ref.main.useCompactValues == true")
+                .eval()
+                .unwrap_or(false);
+            if ui
+                .checkbox(&mut compact, "Compact")
+                .on_hover_text("Compact large numbers (e.g. 12.3K)")
+                .changed()
+            {
+                let result = bridge
+                    .lua()
+                    .load(
+                        r#"
+                        mainObject_ref.main.useCompactValues = ...
+                        _runCallback('OnFrame')
+                    "#,
+                    )
+                    .call::<()>(compact);
+                match result {
+                    Ok(()) => self.refresh_calc_output(bridge),
+                    Err(e) => log::error!("Failed to toggle compact values: {e}"),
+                }
+            }
+        });
         ui.separator();
 
         // Warnings bar (always visible above the scrolling stat list)
@@ -1327,7 +1400,12 @@ impl BuildView {
                 .id_salt("build_warnings")
                 .show(ui, |ui| {
                     for warning in &stats.warnings {
-                        ui.colored_label(egui::Color32::from_rgb(255, 100, 80), warning);
+                        // Warnings may carry PoB color codes
+                        ui.label(super::theme::pob_layout_job(
+                            warning,
+                            13.0,
+                            egui::Color32::from_rgb(255, 100, 80),
+                        ));
                     }
                 });
             ui.separator();

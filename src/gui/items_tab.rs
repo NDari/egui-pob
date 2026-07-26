@@ -186,7 +186,23 @@ pub struct ItemsPanel {
     corrupt_rolls_cache: Option<(i64, Vec<RollRangeEdit>)>,
     /// Cached modifier-range rows for the ranges dialog.
     mod_ranges_cache: Option<(i64, Vec<crafting::ModRangeLine>)>,
+    /// Influence icon textures (upstream Assets pngs), loaded on first use.
+    influence_icons: Option<HashMap<String, egui::TextureHandle>>,
+    /// Cached socket layout per item for the inline socket display.
+    socket_display_cache: HashMap<i64, Vec<(String, i64)>>,
 }
+
+/// Influence key → asset file (upstream itemLib.influenceInfo order).
+const INFLUENCE_ICON_FILES: [(&str, &str); 8] = [
+    ("shaper", "shapericon.png"),
+    ("elder", "eldericon.png"),
+    ("adjudicator", "warlordicon.png"),
+    ("basilisk", "huntericon.png"),
+    ("crusader", "crusadericon.png"),
+    ("eyrie", "redeemericon.png"),
+    ("cleansing", "exarchicon.png"),
+    ("tangle", "eatericon.png"),
+];
 
 /// One slider row in the corrupt dialog's Roll Ranges mode.
 struct RollRangeEdit {
@@ -266,7 +282,38 @@ impl ItemsPanel {
             hovered_item: None,
             corrupt_rolls_cache: None,
             mod_ranges_cache: None,
+            influence_icons: None,
+            socket_display_cache: HashMap::new(),
         }
+    }
+
+    /// Load the influence icon textures once (from the upstream submodule's
+    /// Assets directory; no extraction needed).
+    fn ensure_influence_icons(&mut self, ctx: &egui::Context) {
+        if self.influence_icons.is_some() {
+            return;
+        }
+        let mut map = HashMap::new();
+        if let Some(dir) = super::tree_tab::find_assets_dir() {
+            for (key, file) in INFLUENCE_ICON_FILES {
+                let path = dir.join(file);
+                let Ok(img) = image::open(&path) else {
+                    continue;
+                };
+                let rgba = img.to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+                map.insert(
+                    key.to_string(),
+                    ctx.load_texture(
+                        format!("influence_{key}"),
+                        color_image,
+                        egui::TextureOptions::LINEAR,
+                    ),
+                );
+            }
+        }
+        self.influence_icons = Some(map);
     }
 
     /// Returns true if the build changed (items equipped/added/deleted).
@@ -278,6 +325,7 @@ impl ItemsPanel {
 
         let mut changed = false;
         self.hovered_item = None;
+        self.ensure_influence_icons(ui.ctx());
 
         // Undo/redo (Ctrl+Z / Ctrl+Y), only when no widget (e.g. a search or
         // edit field) has keyboard focus
@@ -2722,6 +2770,25 @@ impl ItemsPanel {
                                         .on_hover_text("Drag to move to another slot");
                                 },
                             );
+                            // Inline socket display + influence icons
+                            let sockets = self
+                                .socket_display_cache
+                                .entry(slot.sel_item_id)
+                                .or_insert_with(|| {
+                                    crafting::item_sockets(bridge.lua(), slot.sel_item_id)
+                                        .ok()
+                                        .flatten()
+                                        .map(|s| s.sockets)
+                                        .unwrap_or_default()
+                                });
+                            if !sockets.is_empty() {
+                                ui.label(socket_display_job(sockets));
+                            }
+                            if let Some(entry) =
+                                self.item_list.iter().find(|e| e.id == slot.sel_item_id)
+                            {
+                                show_influence_icons(ui, &self.influence_icons, &entry.influences);
+                            }
                         }
                     });
 
@@ -2889,6 +2956,7 @@ impl ItemsPanel {
                     entry.id,
                     None,
                 );
+                show_influence_icons(ui, &self.influence_icons, &entry.influences);
 
                 if let Some(ref slot) = entry.equipped_slot {
                     ui.colored_label(Theme::TEXT_DIM, format!("({slot})"));
@@ -3428,4 +3496,47 @@ pub(super) fn show_tooltip_lines(ui: &mut egui::Ui, lines: &[TooltipLine]) {
             ui.label(theme::pob_layout_job(&line.text, size, Theme::TEXT_DEFAULT));
         }
     }
+}
+
+/// Small influence icons drawn after an item name.
+fn show_influence_icons(
+    ui: &mut egui::Ui,
+    icons: &Option<HashMap<String, egui::TextureHandle>>,
+    influences: &[String],
+) {
+    let Some(icons) = icons else {
+        return;
+    };
+    for key in influences {
+        if let Some(tex) = icons.get(key) {
+            ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(14.0, 14.0)));
+        }
+    }
+}
+
+/// Colored socket circles with link separators ("R=G=B  W" as colored dots).
+fn socket_display_job(sockets: &[(String, i64)]) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let format = |color: egui::Color32| egui::TextFormat {
+        font_id: egui::FontId::proportional(11.0),
+        color,
+        ..Default::default()
+    };
+    let mut prev_group: Option<i64> = None;
+    for (color, group) in sockets {
+        if let Some(prev) = prev_group {
+            let linked = *group == prev && color != "A";
+            job.append(if linked { "=" } else { " " }, 0.0, format(Theme::TEXT_DIM));
+        }
+        let dot_color = match color.as_str() {
+            "R" => egui::Color32::from_rgb(224, 80, 48),
+            "G" => egui::Color32::from_rgb(112, 255, 112),
+            "B" => egui::Color32::from_rgb(112, 112, 255),
+            "A" => egui::Color32::from_rgb(120, 220, 120),
+            _ => egui::Color32::WHITE,
+        };
+        job.append("●", 0.0, format(dot_color));
+        prev_group = Some(*group);
+    }
+    job
 }

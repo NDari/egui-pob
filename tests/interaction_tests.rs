@@ -1238,13 +1238,17 @@ fn test_gem_search() {
     let lua = bridge.lua();
 
     // Exact name match ranks first
-    let results = gems::search_gems(lua, 1, "Fireball", false, 12, false).expect("search failed");
+    let results = gems::search_gems(lua, 1, "Fireball", false, 12, false)
+        .expect("search failed")
+        .choices;
     assert!(!results.is_empty(), "Fireball should match");
     assert_eq!(results[0].name, "Fireball");
     assert!(!results[0].is_support);
 
     // Abbreviation matching ("CtF" -> "Cold to Fire")
-    let results = gems::search_gems(lua, 1, "CtF", false, 12, false).expect("search failed");
+    let results = gems::search_gems(lua, 1, "CtF", false, 12, false)
+        .expect("search failed")
+        .choices;
     assert!(
         results.iter().any(|g| g.name == "Cold to Fire"),
         "CtF should match Cold to Fire: {:?}",
@@ -1252,7 +1256,9 @@ fn test_gem_search() {
     );
 
     // Tag search: ":aura" returns only gems with the aura tag
-    let results = gems::search_gems(lua, 1, ":aura", false, 50, false).expect("search failed");
+    let results = gems::search_gems(lua, 1, ":aura", false, 50, false)
+        .expect("search failed")
+        .choices;
     assert!(!results.is_empty(), "aura tag should match gems");
     assert!(
         results.iter().any(|g| g.name == "Anger"),
@@ -1260,8 +1266,9 @@ fn test_gem_search() {
     );
 
     // Tag exclusion: ":aura:-fire" excludes Anger
-    let results =
-        gems::search_gems(lua, 1, ":aura:-fire", false, 50, false).expect("search failed");
+    let results = gems::search_gems(lua, 1, ":aura:-fire", false, 50, false)
+        .expect("search failed")
+        .choices;
     assert!(!results.is_empty());
     assert!(
         !results.iter().any(|g| g.name == "Anger"),
@@ -1270,7 +1277,9 @@ fn test_gem_search() {
 
     // Support-compatibility marks: search supports for the main socket group
     // (test build's group 1 has an active skill)
-    let results = gems::search_gems(lua, 1, "Support", false, 50, false).expect("search failed");
+    let results = gems::search_gems(lua, 1, "Support", false, 50, false)
+        .expect("search failed")
+        .choices;
     let supports: Vec<_> = results.iter().filter(|g| g.is_support).collect();
     assert!(!supports.is_empty(), "should find support gems");
     assert!(
@@ -1278,14 +1287,27 @@ fn test_gem_search() {
         "some support should be compatible with the main skill"
     );
 
-    // DPS sorting produces DPS values and colors
-    let results = gems::search_gems(lua, 1, "Support", true, 20, false).expect("dps search failed");
+    // DPS sorting is progressive (upstream DPSBuilder, one ~50ms slice per
+    // call): drive it to completion like the GUI's per-frame polling does
+    let mut result =
+        gems::search_gems(lua, 1, "Support", true, 20, false).expect("dps search failed");
+    let mut steps = 0;
+    while result.pending {
+        result = gems::search_gems(lua, 1, "Support", true, 20, false).expect("dps step failed");
+        steps += 1;
+        assert!(steps < 1000, "DPS sort did not terminate");
+    }
     assert!(
-        results
+        result
+            .choices
             .iter()
             .any(|g| g.dps > 0.0 && !g.dps_color.is_empty()),
         "DPS sort should compute values"
     );
+    // A repeat search hits the cache and completes immediately
+    let cached =
+        gems::search_gems(lua, 1, "Support", true, 20, false).expect("cached search failed");
+    assert!(!cached.pending, "cached DPS sort is not pending");
 }
 
 // ---------------------------------------------------------------------------
@@ -3150,6 +3172,47 @@ fn test_corrupt_and_implicits() {
 }
 
 #[test]
+fn test_advanced_copy_paste_format() {
+    use pob_egui::data::items;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // GGG's advanced item copy: mod headers like
+    // { Prefix Modifier "Healthy" (Tier: 5) - Life } before each line
+    let raw = "Item Class: Body Armours\n\
+               Rarity: Rare\n\
+               Corpse Shell\n\
+               Astral Plate\n\
+               --------\n\
+               Item Level: 84\n\
+               --------\n\
+               { Prefix Modifier \"Healthy\" (Tier: 5) - Life }\n\
+               +95 to maximum Life\n\
+               { Suffix Modifier \"of the Lion\" (Tier: 4) - Attribute }\n\
+               +40 to Strength\n";
+    let err = items::add_item_from_raw(lua, raw).expect("add failed");
+    assert!(err.is_none(), "advanced-format item parses: {err:?}");
+    let entry_id = items::extract_item_list(lua)
+        .expect("list failed")
+        .iter()
+        .find(|e| e.name.contains("Corpse Shell"))
+        .map(|e| e.id)
+        .expect("advanced item in list");
+    let rebuilt = items::get_item_raw(lua, entry_id).expect("raw failed");
+    assert!(
+        rebuilt.contains("+95 to maximum Life") && rebuilt.contains("+40 to Strength"),
+        "mods survive the advanced parse: {rebuilt}"
+    );
+    let advanced: bool = lua
+        .load("local id = ... return mainObject_ref.main.modes['BUILD'].itemsTab.items[id].advancedCopy == true")
+        .call(entry_id)
+        .expect("flag check failed");
+    assert!(advanced, "item recognised as advanced copy format");
+}
+
+#[test]
 fn test_imbued_supports() {
     use pob_egui::data::{gems, skills};
 
@@ -3167,7 +3230,9 @@ fn test_imbued_supports() {
     let slot = group.slot.clone().unwrap();
 
     // Imbued search mode: supports only, exceptional supports excluded
-    let options = gems::search_gems(lua, group.index, "", false, 500, true).expect("search failed");
+    let options = gems::search_gems(lua, group.index, "", false, 500, true)
+        .expect("search failed")
+        .choices;
     assert!(!options.is_empty(), "imbued choices exist");
     assert!(
         options.iter().all(|c| c.is_support),

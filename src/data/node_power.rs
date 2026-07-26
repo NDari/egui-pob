@@ -34,6 +34,9 @@ pub struct ReportRow {
     pub x: f64,
     pub y: f64,
     pub path_dist: i64,
+    /// The node's stat description lines (upstream node.sd, copied into the
+    /// report entry; shown as the row's hover tooltip).
+    pub sd: Vec<String>,
 }
 
 /// List the power stats available for the heatmap dropdown (upstream's
@@ -206,6 +209,10 @@ pub fn power_report(lua: &Lua) -> Result<Vec<ReportRow>, mlua::Error> {
             x: entry.get("x").unwrap_or(0.0),
             y: entry.get("y").unwrap_or(0.0),
             path_dist: entry.get("pathDist").unwrap_or(1),
+            sd: entry
+                .get::<LuaTable>("sd")
+                .map(|t| t.sequence_values::<String>().flatten().collect())
+                .unwrap_or_default(),
         });
     }
     Ok(rows)

@@ -790,3 +790,31 @@ pub fn open_gem_wiki(lua: &Lua, group_index: usize, gem_index: usize) -> Result<
     )
     .call((group_index, gem_index))
 }
+
+/// Undo the last skills change (Ctrl+Z; upstream SkillsTab UndoHandler).
+pub fn undo(lua: &Lua) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.skillsTab:Undo()
+        build.skillsTab:RebuildImbuedSupportBySlot()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .exec()
+}
+
+/// Redo the last undone skills change (Ctrl+Y).
+pub fn redo(lua: &Lua) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.skillsTab:Redo()
+        build.skillsTab:RebuildImbuedSupportBySlot()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .exec()
+}

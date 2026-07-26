@@ -155,6 +155,9 @@ pub struct TreePanel {
     active_spec: usize,
     manage_specs_open: bool,
     spec_prompt: Option<SpecPrompt>,
+    /// Spec index awaiting delete confirmation (deleting a tree is
+    /// destructive and not covered by the tree undo history).
+    confirm_delete_spec: Option<usize>,
     import_url: String,
     import_error: Option<String>,
     export_url: Option<String>,
@@ -228,6 +231,7 @@ impl TreePanel {
                     active_spec: 1,
                     manage_specs_open: false,
                     spec_prompt: None,
+                    confirm_delete_spec: None,
                     import_url: String::new(),
                     import_error: None,
                     export_url: None,
@@ -287,6 +291,7 @@ impl TreePanel {
             active_spec,
             manage_specs_open: false,
             spec_prompt: None,
+            confirm_delete_spec: None,
             import_url: String::new(),
             import_error: None,
             export_url: None,
@@ -1646,7 +1651,7 @@ impl TreePanel {
         let mut close = false;
         // (action closures collected to run after the UI pass)
         let mut activate: Option<usize> = None;
-        let mut delete: Option<usize> = None;
+        let delete: Option<usize> = None;
         let mut move_spec: Option<(usize, i64)> = None;
 
         egui::Window::new("Manage Passive Trees")
@@ -1667,7 +1672,7 @@ impl TreePanel {
                         ui.label(label);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if self.specs.len() > 1 && ui.small_button("Delete").clicked() {
-                                delete = Some(index);
+                                self.confirm_delete_spec = Some(index);
                             }
                             if ui
                                 .add_enabled(
@@ -1846,6 +1851,47 @@ impl TreePanel {
                     self.refresh_specs(bridge);
                 }
                 Err(e) => log::error!("Failed to delete spec: {e}"),
+            }
+        }
+        // Delete confirmation (a whole passive tree is destroyed; the tree
+        // undo history does not cover spec deletion)
+        if let Some(index) = self.confirm_delete_spec {
+            let name = self
+                .specs
+                .get(index - 1)
+                .map(spec_label)
+                .unwrap_or_else(|| "this tree".to_string());
+            let mut close_confirm = false;
+            egui::Window::new("Delete Tree")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label(format!("Delete the passive tree \"{name}\"?"));
+                    ui.label(
+                        egui::RichText::new("This cannot be undone.")
+                            .small()
+                            .color(super::theme::Theme::TEXT_DIM),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            match tree_specs::delete_spec(bridge.lua(), index) {
+                                Ok(()) => {
+                                    self.request_rebuild = true;
+                                    changed = true;
+                                }
+                                Err(e) => log::error!("Failed to delete spec: {e}"),
+                            }
+                            close_confirm = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close_confirm = true;
+                        }
+                    });
+                });
+            if close_confirm {
+                self.confirm_delete_spec = None;
+                self.refresh_specs(bridge);
             }
         }
         if let Some((index, delta)) = move_spec {
@@ -2062,14 +2108,27 @@ fn show_power_report(power: &mut NodePowerState, ui: &mut egui::Ui) -> Option<(f
                             let name = egui::RichText::new(&row.name).color(name_color).size(12.0);
                             let label = egui::Label::new(name).truncate();
                             let resp = if clickable {
-                                let resp = ui.add_sized(
-                                    [COLS[0].1, 16.0],
-                                    label.sense(egui::Sense::click()),
-                                );
-                                resp.clone().on_hover_text("Click to show on the tree");
-                                resp
+                                ui.add_sized([COLS[0].1, 16.0], label.sense(egui::Sense::click()))
                             } else {
                                 ui.add_sized([COLS[0].1, 16.0], label)
+                            };
+                            // Stat-description tooltip (upstream v2.66's
+                            // power report node tooltips: the node's sd lines)
+                            let resp = if row.sd.is_empty() {
+                                resp
+                            } else {
+                                resp.on_hover_ui(|ui| {
+                                    for line in &row.sd {
+                                        ui.label(super::theme::pob_layout_job(
+                                            line,
+                                            12.0,
+                                            egui::Color32::WHITE,
+                                        ));
+                                    }
+                                    if clickable {
+                                        ui.weak("Click to show on the tree");
+                                    }
+                                })
                             };
                             if clickable && resp.clicked() {
                                 pan = Some((row.x as f32, row.y as f32));
@@ -2153,7 +2212,7 @@ fn find_tree_data_dir(version: &str) -> Option<PathBuf> {
 }
 
 /// Find the upstream Assets directory (contains tooltip header images).
-fn find_assets_dir() -> Option<PathBuf> {
+pub(super) fn find_assets_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let mut candidate = exe.parent()?.to_path_buf();
     for _ in 0..5 {

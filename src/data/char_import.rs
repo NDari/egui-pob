@@ -289,3 +289,86 @@ pub fn import_items_and_skills(
     )
     .call((json, clear_items, clear_skills, ignore_weapon_swap))
 }
+
+/// Path of the account-history file (app data dir, like recent builds).
+fn account_history_file() -> Option<std::path::PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "pob-egui")?;
+    let dir = dirs.data_dir();
+    std::fs::create_dir_all(dir).ok()?;
+    Some(dir.join("account_history.txt"))
+}
+
+/// Load past account names, sorted case-insensitively like upstream's
+/// history dropdown.
+pub fn load_account_history() -> Vec<String> {
+    let Some(file) = account_history_file() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        return Vec::new();
+    };
+    let mut list: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    list.sort_by_key(|a| a.to_lowercase());
+    list.dedup();
+    list
+}
+
+fn save_account_history(list: &[String]) {
+    let Some(file) = account_history_file() else {
+        return;
+    };
+    let text: String = list.iter().map(|n| format!("{n}\n")).collect();
+    if let Err(e) = std::fs::write(&file, text) {
+        log::warn!("Failed to write account history: {e}");
+    }
+}
+
+/// Record an account name after a successful character-list fetch
+/// (upstream SaveAccountHistory: dedupe + sorted insert).
+pub fn add_account_history(name: &str) -> Vec<String> {
+    let mut list = load_account_history();
+    if !list.iter().any(|n| n == name) {
+        list.push(name.to_string());
+        list.sort_by_key(|a| a.to_lowercase());
+        save_account_history(&list);
+    }
+    list
+}
+
+/// Remove an account name from the history (upstream's X button).
+pub fn remove_account_history(name: &str) -> Vec<String> {
+    let mut list = load_account_history();
+    list.retain(|n| n != name);
+    save_account_history(&list);
+    list
+}
+
+/// The build's remembered import league (upstream importTab.lastLeague,
+/// persisted in the build XML by upstream's saver).
+pub fn last_league(lua: &Lua) -> Option<String> {
+    lua.load("return mainObject_ref.main.modes['BUILD'].importTab.lastLeague")
+        .eval::<Option<String>>()
+        .ok()
+        .flatten()
+        .filter(|l| !l.is_empty())
+}
+
+/// Remember the league a character was imported from, if none is remembered
+/// yet (upstream fills lastLeague only when unset on the legacy site path).
+pub fn set_last_league_if_unset(lua: &Lua, league: &str) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local league = ...
+        local importTab = mainObject_ref.main.modes['BUILD'].importTab
+        if not importTab.lastLeague then
+            importTab.lastLeague = league
+        end
+    "#,
+    )
+    .call(league)
+}
