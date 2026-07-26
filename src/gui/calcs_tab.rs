@@ -211,6 +211,52 @@ impl CalcsPanel {
                     });
             }
 
+            // Minion selector (skills with a minion list, e.g. spectres)
+            if self.skill_selection.minions.len() > 1 {
+                let sel = self.skill_selection.selected_minion;
+                let current = self
+                    .skill_selection
+                    .minions
+                    .get(sel)
+                    .map(|(label, _)| label.as_str())
+                    .unwrap_or("?");
+                egui::ComboBox::from_id_salt("calcs_minion")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (i, (label, id)) in self.skill_selection.minions.iter().enumerate() {
+                            if ui.selectable_label(i == sel, label).clicked() && i != sel {
+                                match calcs::set_calcs_minion(bridge.lua(), id) {
+                                    Ok(()) => changed = true,
+                                    Err(e) => log::error!("Failed to set minion: {e}"),
+                                }
+                            }
+                        }
+                    });
+            }
+
+            // Minion skill selector
+            if self.skill_selection.minion_skills.len() > 1 {
+                let sel = self.skill_selection.selected_minion_skill;
+                let current = self
+                    .skill_selection
+                    .minion_skills
+                    .get(sel)
+                    .map(String::as_str)
+                    .unwrap_or("?");
+                egui::ComboBox::from_id_salt("calcs_minion_skill")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (i, name) in self.skill_selection.minion_skills.iter().enumerate() {
+                            if ui.selectable_label(i == sel, name).clicked() && i != sel {
+                                match calcs::set_calcs_minion_skill(bridge.lua(), i + 1) {
+                                    Ok(()) => changed = true,
+                                    Err(e) => log::error!("Failed to set minion skill: {e}"),
+                                }
+                            }
+                        }
+                    });
+            }
+
             // Buff mode selector
             let mode_label = calcs::BUFF_MODES
                 .iter()

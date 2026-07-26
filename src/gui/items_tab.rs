@@ -75,6 +75,9 @@ pub struct CraftUi {
     /// Item being corrupted; selections are 0 = None else 1-based option idx.
     corrupt_item: Option<i64>,
     corrupt_sel: (usize, usize),
+    /// Sort mode for corrupt options (0 = default order, else 1-based into
+    /// the popup sort stat list).
+    corrupt_sort: usize,
     /// Item whose sockets/catalyst are being edited.
     socket_item: Option<i64>,
     /// Item receiving an implicit.
@@ -83,6 +86,9 @@ pub struct CraftUi {
     implicit_group_idx: usize,
     implicit_tier_idx: usize,
     implicit_custom: String,
+    /// Sort mode for implicit groups (0 = default order, else 1-based into
+    /// the popup sort stat list).
+    implicit_sort: usize,
 }
 
 const CRAFT_RARITIES: [(&str, &str); 3] =
@@ -130,6 +136,12 @@ pub struct ItemsPanel {
     enchant_catalog_cache: Option<EnchantCatalogCache>,
     /// Cached corrupted-implicit options.
     corrupt_opts_cache: Option<(i64, Vec<crafting::CorruptOption>)>,
+    /// Power stats for crafting-popup sorting (upstream buildModSortList).
+    sort_stats: Vec<pob_egui::data::node_power::PowerStat>,
+    /// Cached corrupt sort values keyed by (item, powerStatList index).
+    corrupt_sort_cache: Option<(i64, usize, Vec<f64>)>,
+    /// Cached implicit sort values keyed by (item, source, stat index).
+    implicit_sort_cache: Option<(i64, String, usize, Vec<f64>)>,
     /// Cached socket + catalyst state for the socket dialog.
     socket_cache: Option<SocketCache>,
     /// Cached implicit sources.
@@ -195,6 +207,9 @@ impl ItemsPanel {
             enchant_opts_cache: None,
             enchant_catalog_cache: None,
             corrupt_opts_cache: None,
+            sort_stats: pob_egui::data::node_power::list_power_stats(lua).unwrap_or_default(),
+            corrupt_sort_cache: None,
+            implicit_sort_cache: None,
             socket_cache: None,
             implicit_sources_cache: None,
             implicit_mods_cache: None,
@@ -1288,7 +1303,45 @@ impl ItemsPanel {
                 });
                 self.corrupt_opts_cache = Some((item_id, opts));
             }
+            // Resolve the option ordering: sorted by a power stat when a
+            // sort mode is selected (upstream's popup sorting; one calc
+            // pass per option, cached per item + stat)
+            if self.craft_ui.corrupt_sort > 0 {
+                let stat_index = self
+                    .sort_stats
+                    .get(self.craft_ui.corrupt_sort - 1)
+                    .map(|s| s.index)
+                    .unwrap_or(0);
+                let stale = self
+                    .corrupt_sort_cache
+                    .as_ref()
+                    .is_none_or(|(id, si, _)| *id != item_id || *si != stat_index);
+                if stale && stat_index > 0 {
+                    match crafting::corrupt_sort_values(bridge.lua(), item_id, stat_index) {
+                        Ok(values) => {
+                            self.corrupt_sort_cache = Some((item_id, stat_index, values));
+                        }
+                        Err(e) => {
+                            log::error!("Corrupt sort failed: {e}");
+                            self.craft_ui.corrupt_sort = 0;
+                        }
+                    }
+                }
+            }
+            let sort_values: Option<Vec<f64>> = (self.craft_ui.corrupt_sort > 0)
+                .then(|| self.corrupt_sort_cache.as_ref().map(|(_, _, v)| v.clone()))
+                .flatten();
             let options = &self.corrupt_opts_cache.as_ref().unwrap().1;
+            let mut order: Vec<usize> = (0..options.len()).collect();
+            if let Some(vals) = &sort_values
+                && vals.len() == options.len()
+            {
+                order.sort_by(|&a, &b| {
+                    vals[b]
+                        .partial_cmp(&vals[a])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
             let item_name = self
                 .item_list
                 .iter()
@@ -1297,6 +1350,7 @@ impl ItemsPanel {
                 .unwrap_or_else(|| "Item".to_string());
             let mut close = false;
             let mut do_corrupt = false;
+            let mut new_sort: Option<usize> = None;
 
             egui::Window::new(format!("Corrupt: {item_name}"))
                 .id(egui::Id::new("corrupt_dialog"))
@@ -1304,6 +1358,44 @@ impl ItemsPanel {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Sort by:");
+                        let current = if self.craft_ui.corrupt_sort == 0 {
+                            "Default".to_string()
+                        } else {
+                            self.sort_stats
+                                .get(self.craft_ui.corrupt_sort - 1)
+                                .map(|s| s.label.clone())
+                                .unwrap_or_else(|| "?".to_string())
+                        };
+                        egui::ComboBox::from_id_salt("corrupt_sort")
+                            .selected_text(current)
+                            .width(180.0)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(self.craft_ui.corrupt_sort == 0, "Default")
+                                    .clicked()
+                                {
+                                    new_sort = Some(0);
+                                }
+                                for (i, stat) in self.sort_stats.iter().enumerate() {
+                                    if ui
+                                        .selectable_label(
+                                            self.craft_ui.corrupt_sort == i + 1,
+                                            &stat.label,
+                                        )
+                                        .clicked()
+                                    {
+                                        new_sort = Some(i + 1);
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Sort options by their impact on this stat \
+                                 (one calc pass per option on first use)",
+                            );
+                    });
                     let combo = |ui: &mut egui::Ui,
                                  label: &str,
                                  sel: usize,
@@ -1328,14 +1420,18 @@ impl ItemsPanel {
                                     if ui.selectable_label(sel == 0, "None").clicked() {
                                         picked = Some(0);
                                     }
-                                    for opt in options {
+                                    for &pos in &order {
+                                        let opt = &options[pos];
                                         if exclude_group == Some(opt.group.as_str()) {
                                             continue;
                                         }
-                                        if ui
-                                            .selectable_label(sel == opt.index, &opt.label)
-                                            .clicked()
-                                        {
+                                        let text = match &sort_values {
+                                            Some(vals) if vals.len() == options.len() => {
+                                                format!("{}  [{:.1}]", opt.label, vals[pos])
+                                            }
+                                            _ => opt.label.clone(),
+                                        };
+                                        if ui.selectable_label(sel == opt.index, text).clicked() {
                                             picked = Some(opt.index);
                                         }
                                     }
@@ -1373,6 +1469,9 @@ impl ItemsPanel {
                     });
                 });
 
+            if let Some(s) = new_sort {
+                self.craft_ui.corrupt_sort = s;
+            }
             if do_corrupt {
                 let (s1, s2) = self.craft_ui.corrupt_sel;
                 match crafting::corrupt_item(
@@ -1391,6 +1490,8 @@ impl ItemsPanel {
             if close {
                 self.craft_ui.corrupt_item = None;
                 self.corrupt_opts_cache = None;
+                self.corrupt_sort_cache = None;
+                self.craft_ui.corrupt_sort = 0;
             }
         }
 
@@ -1431,6 +1532,46 @@ impl ItemsPanel {
                     });
                 self.implicit_mods_cache = Some((item_id, source_id.clone(), groups));
             }
+            // Resolve the group ordering: sorted by a power stat when a
+            // sort mode is selected (one calc pass per group, cached)
+            if self.craft_ui.implicit_sort > 0 && !is_custom {
+                let stat_index = self
+                    .sort_stats
+                    .get(self.craft_ui.implicit_sort - 1)
+                    .map(|s| s.index)
+                    .unwrap_or(0);
+                let stale = self
+                    .implicit_sort_cache
+                    .as_ref()
+                    .is_none_or(|(id, src, si, _)| {
+                        *id != item_id || *src != source_id || *si != stat_index
+                    });
+                if stale && stat_index > 0 {
+                    match crafting::implicit_sort_values(
+                        bridge.lua(),
+                        item_id,
+                        &source_id,
+                        stat_index,
+                    ) {
+                        Ok(values) => {
+                            self.implicit_sort_cache =
+                                Some((item_id, source_id.clone(), stat_index, values));
+                        }
+                        Err(e) => {
+                            log::error!("Implicit sort failed: {e}");
+                            self.craft_ui.implicit_sort = 0;
+                        }
+                    }
+                }
+            }
+            let implicit_sort_values: Option<Vec<f64>> = (self.craft_ui.implicit_sort > 0
+                && !is_custom)
+                .then(|| {
+                    self.implicit_sort_cache
+                        .as_ref()
+                        .map(|(_, _, _, v)| v.clone())
+                })
+                .flatten();
             let item_name = self
                 .item_list
                 .iter()
@@ -1439,6 +1580,7 @@ impl ItemsPanel {
                 .unwrap_or_else(|| "Item".to_string());
             let mut close = false;
             let mut do_add = false;
+            let mut new_implicit_sort: Option<usize> = None;
 
             egui::Window::new(format!("Add Implicit: {item_name}"))
                 .id(egui::Id::new("implicit_dialog"))
@@ -1477,6 +1619,57 @@ impl ItemsPanel {
                             );
                         });
                     } else if let Some((_, _, groups)) = &self.implicit_mods_cache {
+                        ui.horizontal(|ui| {
+                            ui.label("Sort by:");
+                            let current = if self.craft_ui.implicit_sort == 0 {
+                                "Default".to_string()
+                            } else {
+                                self.sort_stats
+                                    .get(self.craft_ui.implicit_sort - 1)
+                                    .map(|s| s.label.clone())
+                                    .unwrap_or_else(|| "?".to_string())
+                            };
+                            egui::ComboBox::from_id_salt("implicit_sort")
+                                .selected_text(current)
+                                .width(180.0)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(
+                                            self.craft_ui.implicit_sort == 0,
+                                            "Default",
+                                        )
+                                        .clicked()
+                                    {
+                                        new_implicit_sort = Some(0);
+                                    }
+                                    for (i, stat) in self.sort_stats.iter().enumerate() {
+                                        if ui
+                                            .selectable_label(
+                                                self.craft_ui.implicit_sort == i + 1,
+                                                &stat.label,
+                                            )
+                                            .clicked()
+                                        {
+                                            new_implicit_sort = Some(i + 1);
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Sort types by their top tier's impact on this stat \
+                                     (one calc pass per type on first use)",
+                                );
+                        });
+                        let mut group_order: Vec<usize> = (0..groups.len()).collect();
+                        if let Some(vals) = &implicit_sort_values
+                            && vals.len() == groups.len()
+                        {
+                            group_order.sort_by(|&a, &b| {
+                                vals[b]
+                                    .partial_cmp(&vals[a])
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        }
                         let group_idx = self
                             .craft_ui
                             .implicit_group_idx
@@ -1491,13 +1684,18 @@ impl ItemsPanel {
                                 .selected_text(current)
                                 .width(440.0)
                                 .show_ui(ui, |ui| {
-                                    for (i, group) in groups.iter().enumerate() {
-                                        if ui
-                                            .selectable_label(i == group_idx, &group.label)
-                                            .clicked()
-                                            && i != group_idx
+                                    for &pos in &group_order {
+                                        let group = &groups[pos];
+                                        let text = match &implicit_sort_values {
+                                            Some(vals) if vals.len() == groups.len() => {
+                                                format!("{}  [{:.1}]", group.label, vals[pos])
+                                            }
+                                            _ => group.label.clone(),
+                                        };
+                                        if ui.selectable_label(pos == group_idx, text).clicked()
+                                            && pos != group_idx
                                         {
-                                            self.craft_ui.implicit_group_idx = i;
+                                            self.craft_ui.implicit_group_idx = pos;
                                             self.craft_ui.implicit_tier_idx = 0;
                                         }
                                     }
@@ -1545,6 +1743,9 @@ impl ItemsPanel {
                     });
                 });
 
+            if let Some(sort) = new_implicit_sort {
+                self.craft_ui.implicit_sort = sort;
+            }
             if do_add {
                 let result = if is_custom {
                     crafting::add_custom_implicit(
@@ -1573,6 +1774,8 @@ impl ItemsPanel {
                 self.craft_ui.implicit_item = None;
                 self.implicit_sources_cache = None;
                 self.implicit_mods_cache = None;
+                self.implicit_sort_cache = None;
+                self.craft_ui.implicit_sort = 0;
             }
         }
 

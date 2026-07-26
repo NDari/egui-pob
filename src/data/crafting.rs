@@ -338,8 +338,9 @@ pub fn cluster_craft_info(
         out.selected = sel
         out.minNodes = item.clusterJewel.minNodes
         out.maxNodes = item.clusterJewel.maxNodes
+        -- New cluster jewels default to minimum passives (upstream v2.64)
         out.nodeCount = math.min(
-            math.max(item.clusterJewelNodeCount or item.clusterJewel.maxNodes,
+            math.max(item.clusterJewelNodeCount or item.clusterJewel.minNodes,
                 item.clusterJewel.minNodes),
             item.clusterJewel.maxNodes)
         return out
@@ -559,14 +560,20 @@ pub fn add_socket(lua: &Lua, item_id: i64) -> Result<(), mlua::Error> {
 }
 
 /// Catalyst names, in upstream's index order (index 1 = Abrasive).
-pub const CATALYSTS: [&str; 10] = [
+/// Catalyst names, 1-based indices matching upstream Item.lua's
+/// `catalystList` exactly (the index is stored on the item and drives the
+/// scaling in `getCatalystScalar`, so order must never drift; registered in
+/// ports.toml). Sinistral/Dextral were inserted mid-list in v2.66.
+pub const CATALYSTS: [&str; 12] = [
     "Abrasive (Attack)",
     "Accelerating (Speed)",
+    "Dextral (Suffix)",
     "Fertile (Life & Mana)",
     "Imbued (Caster)",
     "Intrinsic (Attribute)",
     "Noxious (Physical & Chaos Damage)",
     "Prismatic (Resistance)",
+    "Sinistral (Prefix)",
     "Tempering (Defense)",
     "Turbulent (Elemental)",
     "Unstable (Critical)",
@@ -1011,6 +1018,62 @@ pub fn add_implicit(
     .call((item_id, source, group_index, tier_index))
 }
 
+/// Sort values for the add-implicit popup: one value per implicit group (in
+/// [`implicit_mods`] order), computed by applying the group's top tier to a
+/// clone of the item and reading the selected power stat with the clone
+/// equipped (upstream's popup sorting; one throwaway calc pass per group).
+/// `stat_index` is 1-based into `data.powerStatList`.
+pub fn implicit_sort_values(
+    lua: &Lua,
+    item_id: i64,
+    source: &str,
+    stat_index: usize,
+) -> Result<Vec<f64>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(format!(
+            r#"
+        local itemId, sourceId, statIndex = ...
+        {IMPLICIT_LISTS_LUA}
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        local stat = data.powerStatList[statIndex]
+        local out = {{}}
+        if not item or not item.affixes or not stat or not stat.stat then
+            return out
+        end
+        local modGroups, modList = buildImplicitLists(item, sourceId)
+        local slotName = itemsTab:GetComparisonSlotNameForItem(item)
+        local calcFunc = build.calcsTab:GetMiscCalculator(build)
+        local useFullDPS = stat.stat == "FullDPS"
+        for _, group in ipairs(modGroups) do
+            local listMod = modList[group.modListIndex][1]
+            local value = 0
+            if listMod then
+                local newItem = new("Item", item:BuildRaw())
+                newItem.id = item.id
+                for _, line in ipairs(listMod.mod) do
+                    table.insert(newItem.implicitModLines,
+                        {{ line = line, modTags = listMod.mod.modTags, [listMod.type] = true }})
+                end
+                newItem:BuildAndParseRaw()
+                local output = calcFunc(
+                    {{ repSlotName = slotName, repItem = newItem }}, useFullDPS)
+                value = data.powerStatList.GetFromOutput(output, stat) or 0
+            end
+            table.insert(out, value)
+        end
+        return out
+    "#
+        ))
+        .call((item_id, source, stat_index))?;
+    let mut values = Vec::new();
+    for v in list.sequence_values::<f64>() {
+        values.push(v?);
+    }
+    Ok(values)
+}
+
 /// Add a custom implicit line.
 pub fn add_custom_implicit(lua: &Lua, item_id: i64, line: &str) -> Result<(), mlua::Error> {
     lua.load(
@@ -1420,6 +1483,60 @@ pub fn anoint_preview(
         )
         .call((item_id, node_name, slot))?;
     Ok(list.sequence_values::<String>().flatten().collect())
+}
+
+/// Power stats selectable for sorting crafting-popup mod lists (upstream's
+/// buildModSortList: powerStatList entries not flagged ignoreForNodes).
+/// `index` is 1-based into the unfiltered upstream list.
+pub fn mod_sort_stats(lua: &Lua) -> Result<Vec<super::node_power::PowerStat>, mlua::Error> {
+    super::node_power::list_power_stats(lua)
+}
+
+/// Sort values for the corrupt popup: for each corrupted-implicit option (in
+/// the same deterministic order as [`corrupt_options`]), apply its mod lines
+/// to a clone of the item and compute the selected power stat with the clone
+/// equipped (upstream's popup sorting; one throwaway calc pass per option).
+/// `stat_index` is 1-based into `data.powerStatList`.
+pub fn corrupt_sort_values(
+    lua: &Lua,
+    item_id: i64,
+    stat_index: usize,
+) -> Result<Vec<f64>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(format!(
+            r#"
+        local itemId, statIndex = ...
+        {CORRUPT_LIST_LUA}
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local baseItem = itemsTab.items[itemId]
+        local stat = data.powerStatList[statIndex]
+        local out = {{}}
+        if not baseItem or not stat or not stat.stat then
+            return out
+        end
+        local slotName = itemsTab:GetComparisonSlotNameForItem(baseItem)
+        local calcFunc = build.calcsTab:GetMiscCalculator(build)
+        local useFullDPS = stat.stat == "FullDPS"
+        for _, mod in ipairs(buildCorruptList(baseItem)) do
+            local item = new("Item", baseItem:BuildRaw())
+            item.id = baseItem.id
+            for _, line in ipairs(mod) do
+                table.insert(item.implicitModLines, {{ line = line }})
+            end
+            item:BuildAndParseRaw()
+            local output = calcFunc({{ repSlotName = slotName, repItem = item }}, useFullDPS)
+            table.insert(out, data.powerStatList.GetFromOutput(output, stat) or 0)
+        end
+        return out
+    "#,
+        ))
+        .call((item_id, stat_index))?;
+    let mut values = Vec::new();
+    for v in list.sequence_values::<f64>() {
+        values.push(v?);
+    }
+    Ok(values)
 }
 
 /// Anoint an item with a notable (None removes the first anoint), mirroring

@@ -676,6 +676,21 @@ fn test_skills_extraction() {
         "should have at least one gem across all groups"
     );
 
+    // Every gem carries a socket colour letter (group label indicators),
+    // and real builds have more than just white
+    let letters: std::collections::HashSet<&str> = groups
+        .iter()
+        .flat_map(|g| g.gems.iter().map(|gem| gem.color_letter.as_str()))
+        .collect();
+    assert!(
+        letters.iter().all(|l| matches!(*l, "R" | "G" | "B" | "W")),
+        "colour letters are R/G/B/W, got {letters:?}"
+    );
+    assert!(
+        letters.len() > 1,
+        "a real build should span multiple gem colours, got {letters:?}"
+    );
+
     for group in &groups {
         let active: Vec<_> = group
             .gems
@@ -1723,6 +1738,17 @@ fn test_sidebar_stats_extraction() {
         "expected a too-many-points warning, got: {:?}",
         stats.warnings
     );
+
+    // Upstream's v2.64 missing-anoint warning flows through the same list
+    // (the fixture's boots have an unanointed eligible enchant)
+    assert!(
+        stats
+            .warnings
+            .iter()
+            .any(|w| w.contains("missing an anoint")),
+        "expected the missing-anoint warning, got: {:?}",
+        stats.warnings
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1967,6 +1993,13 @@ fn test_node_power_build() {
             .iter()
             .any(|r| r.id > 0 && (r.x != 0.0 || r.y != 0.0)),
         "report rows should carry node positions for panning"
+    );
+
+    // Upstream v2.64 added mastery effects to the report (flows through
+    // BuildPowerReportList, which we call)
+    assert!(
+        report.iter().any(|r| r.name.contains("Mastery")),
+        "report should include mastery rows"
     );
 }
 
@@ -2941,6 +2974,28 @@ fn test_corrupt_and_implicits() {
         "helmet has corrupted implicits, got {}",
         options.len()
     );
+    // Popup sorting: per-option power-stat values (upstream's v2.66 popup
+    // sort), parallel to the options and with real spread
+    let ehp = pob_egui::data::node_power::list_power_stats(lua)
+        .expect("stats failed")
+        .into_iter()
+        .find(|s| s.label.contains("Effective Hit Pool") || s.label.contains("EHP"))
+        .expect("an EHP power stat");
+    let values =
+        crafting::corrupt_sort_values(lua, helm_id, ehp.index).expect("sort values failed");
+    assert_eq!(
+        values.len(),
+        options.len(),
+        "one sort value per corrupt option"
+    );
+    let (min, max) = values
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    assert!(
+        max > min,
+        "life/resistance implicits should spread EHP values: {min}..{max}"
+    );
+
     let first = &options[0];
     let second = options
         .iter()
@@ -2957,6 +3012,18 @@ fn test_corrupt_and_implicits() {
     assert!(ids.contains(&"DelveImplicit"));
     assert!(ids.contains(&"CUSTOM"));
     assert!(!ids.contains(&"EXARCH"), "no exarch without influence");
+
+    // Popup sorting for implicit groups: one value per group (this helm's
+    // delve pool is mostly calc-neutral, so only the shape is asserted here;
+    // spread is asserted on the eldritch source below)
+    let delve_groups = crafting::implicit_mods(lua, helm_id, "DelveImplicit").expect("mods failed");
+    let values = crafting::implicit_sort_values(lua, helm_id, "DelveImplicit", ehp.index)
+        .expect("sort values failed");
+    assert_eq!(
+        values.len(),
+        delve_groups.len(),
+        "one sort value per implicit group"
+    );
 
     // Adding Searing Exarch influence exposes the eldritch source
     let raw = items::get_item_raw(lua, helm_id).expect("raw failed");
@@ -2982,6 +3049,18 @@ fn test_corrupt_and_implicits() {
     // Eldritch implicit groups have tiers; applying one lands on the item
     let groups = crafting::implicit_mods(lua, helm_id, "EXARCH").expect("mods failed");
     assert!(!groups.is_empty(), "exarch implicits exist");
+
+    // Eldritch implicits move defensive stats, so sort values spread here
+    let exarch_values = crafting::implicit_sort_values(lua, helm_id, "EXARCH", ehp.index)
+        .expect("sort values failed");
+    assert_eq!(exarch_values.len(), groups.len());
+    let (vmin, vmax) = exarch_values
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    assert!(
+        vmax > vmin,
+        "eldritch implicits should spread EHP values: {vmin}..{vmax}"
+    );
     let group = &groups[0];
     assert!(!group.tiers.is_empty());
     crafting::add_implicit(lua, helm_id, "EXARCH", 1, 1).expect("add failed");
@@ -4158,4 +4237,131 @@ fn test_search_conforms_to_upstream_matcher() {
              (only ours: {only_ours:?}, only upstream: {only_theirs:?})"
         );
     }
+}
+
+#[test]
+fn test_vaal_gem_global_toggles() {
+    use pob_egui::data::skills::{self, GemProperty};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Add a vaal gem to a user socket group
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    let group = groups
+        .iter()
+        .find(|g| !g.from_item)
+        .expect("a user socket group");
+    let err = skills::add_gem(lua, group.index, "Vaal Haste").expect("add failed");
+    assert!(err.is_none(), "vaal gem should resolve: {err:?}");
+
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    let group = groups
+        .iter()
+        .find(|g| g.index == group.index)
+        .expect("group");
+    let (gem_idx0, gem) = group
+        .gems
+        .iter()
+        .enumerate()
+        .find(|(_, g)| g.name.contains("Vaal Haste"))
+        .expect("vaal gem in group");
+    let gem_idx = gem_idx0 + 1;
+
+    // A vaal gem exposes both toggle labels; defaults match upstream
+    // (first effect enabled, second disabled)
+    assert!(
+        gem.global1_label.is_some() && gem.global2_label.is_some(),
+        "vaal gem has both global toggles: {:?} / {:?}",
+        gem.global1_label,
+        gem.global2_label
+    );
+    // Newly added gems default both effects on (upstream's new-gem path;
+    // XML loads default the second one off instead)
+    assert!(gem.enable_global1, "first effect enabled by default");
+    assert!(
+        gem.enable_global2,
+        "second effect enabled on freshly added gems"
+    );
+
+    // Toggling round-trips
+    skills::set_gem_property(lua, group.index, gem_idx, GemProperty::EnableGlobal2(false))
+        .expect("toggle failed");
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    let gem = &groups
+        .iter()
+        .find(|g| g.index == group.index)
+        .expect("group")
+        .gems[gem_idx0];
+    assert!(!gem.enable_global2, "toggle round-trips");
+
+    // A non-vaal gem shows no toggles
+    let plain = groups
+        .iter()
+        .flat_map(|g| g.gems.iter())
+        .find(|g| !g.name.contains("Vaal"))
+        .expect("a non-vaal gem");
+    assert!(
+        plain.global1_label.is_none() && plain.global2_label.is_none(),
+        "non-vaal gems have no global toggles"
+    );
+}
+
+#[test]
+fn test_calcs_minion_selection() {
+    use pob_egui::data::{calcs, skills};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Add a golem: a minion skill with its own skill list
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    let group = groups
+        .iter()
+        .find(|g| !g.from_item)
+        .expect("a user socket group");
+    let err = skills::add_gem(lua, group.index, "Summon Stone Golem").expect("add failed");
+    assert!(err.is_none(), "golem gem should resolve: {err:?}");
+
+    // Point the calcs tab at that group and select the golem skill
+    calcs::set_skill_number(lua, group.index).expect("set group failed");
+    let sel = calcs::skill_selection(lua).expect("selection failed");
+    let golem_idx = sel
+        .skills
+        .iter()
+        .position(|s| s.contains("Golem"))
+        .expect("golem in calcs skill list");
+    calcs::set_active_skill(lua, golem_idx).expect("set skill failed");
+
+    let sel = calcs::skill_selection(lua).expect("selection failed");
+    assert!(
+        !sel.minions.is_empty(),
+        "golem skill exposes a minion list, got {:?}",
+        sel.minions
+    );
+    assert!(
+        !sel.minion_skills.is_empty(),
+        "the golem has minion skills, got {:?}",
+        sel.minion_skills
+    );
+
+    // Selecting a minion skill round-trips through srcInstance
+    if sel.minion_skills.len() > 1 {
+        let target = sel.minion_skills.len(); // 1-based last
+        calcs::set_calcs_minion_skill(lua, target).expect("set minion skill failed");
+        let sel = calcs::skill_selection(lua).expect("selection failed");
+        assert_eq!(
+            sel.selected_minion_skill,
+            target - 1,
+            "minion skill selection round-trips"
+        );
+    }
+
+    // Selecting the minion round-trips too
+    let (_, first_id) = sel.minions[0].clone();
+    calcs::set_calcs_minion(lua, &first_id).expect("set minion failed");
+    let sel = calcs::skill_selection(lua).expect("selection failed");
+    assert_eq!(sel.selected_minion, 0, "minion selection round-trips");
 }

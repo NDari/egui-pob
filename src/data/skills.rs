@@ -31,6 +31,16 @@ pub struct GemInfo {
     pub count: i64,
     /// True when the count applies (gem grants a non-support effect).
     pub has_count: bool,
+    /// Socket colour letter ("R"/"G"/"B"/"W") from the granted effect,
+    /// upstream's socket group label indicator.
+    pub color_letter: String,
+    /// Labels for the vaal-gem global effect toggles ("Enable <skill>"),
+    /// present when the gem grants that non-support effect (upstream's
+    /// enableGlobal1/2 checkboxes).
+    pub global1_label: Option<String>,
+    pub global2_label: Option<String>,
+    pub enable_global1: bool,
+    pub enable_global2: bool,
 }
 
 /// Extract all socket groups and the main skill index from the loaded build.
@@ -67,6 +77,24 @@ pub fn extract_skills(lua: &Lua) -> Result<Vec<SocketGroup>, mlua::Error> {
                         if gem.gemData and gem.gemData.tags then
                             gemEntry.isSupport = gem.gemData.tags.support == true
                         end
+                        local grantedEffect = gem.grantedEffect
+                            or (gem.gemData and gem.gemData.grantedEffect)
+                        local c = grantedEffect and grantedEffect.color
+                        gemEntry.colorLetter = c == 1 and "R" or c == 2 and "G"
+                            or c == 3 and "B" or "W"
+                        -- Vaal-gem global effect toggles (upstream's
+                        -- enableGlobal1/2 checkbox visibility rules)
+                        if gem.gemData and gem.gemData.vaalGem then
+                            local effects = gem.gemData.grantedEffectList or {}
+                            if effects[1] and not effects[1].support then
+                                gemEntry.global1Label = "Enable " .. effects[1].name
+                            end
+                            if effects[2] and not effects[2].support then
+                                gemEntry.global2Label = "Enable " .. effects[2].name
+                            end
+                        end
+                        gemEntry.enableGlobal1 = gem.enableGlobal1 ~= false
+                        gemEntry.enableGlobal2 = gem.enableGlobal2 == true
                         -- Count applies when the gem grants a usable
                         -- non-support effect (upstream slot.count.shown)
                         local grantedList = gem.gemData and gem.gemData.grantedEffectList
@@ -105,6 +133,11 @@ pub fn extract_skills(lua: &Lua) -> Result<Vec<SocketGroup>, mlua::Error> {
                 is_support: gem.get("isSupport").unwrap_or(false),
                 count: gem.get("count").unwrap_or(1),
                 has_count: gem.get("hasCount").unwrap_or(false),
+                color_letter: gem.get("colorLetter").unwrap_or_else(|_| "W".to_string()),
+                global1_label: gem.get("global1Label").ok(),
+                global2_label: gem.get("global2Label").ok(),
+                enable_global1: gem.get("enableGlobal1").unwrap_or(true),
+                enable_global2: gem.get("enableGlobal2").unwrap_or(false),
             });
         }
         groups.push(SocketGroup {
@@ -540,6 +573,9 @@ pub enum GemProperty {
     Enabled(bool),
     /// Number of copies of the skill.
     Count(i64),
+    /// Vaal-gem global effect toggles (upstream enableGlobal1/2).
+    EnableGlobal1(bool),
+    EnableGlobal2(bool),
 }
 
 /// Set a property on a gem and reprocess the group.
@@ -554,6 +590,8 @@ pub fn set_gem_property(
         GemProperty::Quality(v) => ("quality", LuaValue::Integer(v)),
         GemProperty::Enabled(v) => ("enabled", LuaValue::Boolean(v)),
         GemProperty::Count(v) => ("count", LuaValue::Integer(v.max(1))),
+        GemProperty::EnableGlobal1(v) => ("enableGlobal1", LuaValue::Boolean(v)),
+        GemProperty::EnableGlobal2(v) => ("enableGlobal2", LuaValue::Boolean(v)),
     };
     lua.load(
         r#"

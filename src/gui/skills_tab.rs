@@ -669,15 +669,44 @@ fn show_socket_group(
     suggest: &mut GemSuggest,
 ) -> egui::Response {
     let title = socket_group_title(group);
-    let header_text = if group.is_main {
-        egui::RichText::new(format!("* {title}")).color(super::theme::Theme::MAIN_SKILL)
+    let (title, title_color) = if group.is_main {
+        (format!("* {title}"), super::theme::Theme::MAIN_SKILL)
     } else if !group.enabled {
-        egui::RichText::new(title).color(super::theme::Theme::TEXT_DIM)
+        (title, super::theme::Theme::TEXT_DIM)
     } else {
-        egui::RichText::new(title)
+        (title, ui.visuals().text_color())
     };
 
-    let collapsing = egui::CollapsingHeader::new(header_text)
+    // Gem colour indicators for player groups ("R-G-B" per gem, upstream's
+    // socket group label suffix)
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let mut header_job = egui::text::LayoutJob::default();
+    header_job.append(
+        &title,
+        0.0,
+        egui::TextFormat::simple(font.clone(), title_color),
+    );
+    if !group.from_item && !group.gems.is_empty() {
+        let sep = egui::TextFormat::simple(font.clone(), super::theme::Theme::TEXT_DIM);
+        for (i, gem) in group.gems.iter().enumerate() {
+            let color = match gem.color_letter.as_str() {
+                "R" => egui::Color32::from_rgb(223, 90, 75),
+                "G" => egui::Color32::from_rgb(80, 190, 80),
+                "B" => egui::Color32::from_rgb(100, 130, 255),
+                _ => egui::Color32::from_rgb(200, 200, 200),
+            };
+            header_job.append(
+                &gem.color_letter,
+                if i == 0 { 8.0 } else { 0.0 },
+                egui::TextFormat::simple(font.clone(), color),
+            );
+            if i + 1 < group.gems.len() {
+                header_job.append("-", 0.0, sep.clone());
+            }
+        }
+    }
+
+    let collapsing = egui::CollapsingHeader::new(header_job)
         .id_salt(format!("skill_group_{}", group.index))
         .default_open(group.is_main)
         .show(ui, |ui| {
@@ -853,6 +882,40 @@ fn show_socket_group(
                                 group_index,
                                 gem_index,
                                 GemProperty::Count(gem.count),
+                            ));
+                        }
+                    }
+
+                    // Vaal-gem global effect toggles (upstream enableGlobal1/2)
+                    if let Some(label) = &gem.global1_label {
+                        let mut on = gem.enable_global1;
+                        if ui
+                            .checkbox(&mut on, label.as_str())
+                            .on_hover_text(
+                                "Enable this granted skill's global effects (auras, buffs)",
+                            )
+                            .changed()
+                        {
+                            actions.push(SkillAction::SetGem(
+                                group_index,
+                                gem_index,
+                                GemProperty::EnableGlobal1(on),
+                            ));
+                        }
+                    }
+                    if let Some(label) = &gem.global2_label {
+                        let mut on = gem.enable_global2;
+                        if ui
+                            .checkbox(&mut on, label.as_str())
+                            .on_hover_text(
+                                "Enable this granted skill's global effects (auras, buffs)",
+                            )
+                            .changed()
+                        {
+                            actions.push(SkillAction::SetGem(
+                                group_index,
+                                gem_index,
+                                GemProperty::EnableGlobal2(on),
                             ));
                         }
                     }

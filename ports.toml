@@ -154,3 +154,13 @@ end_anchor = "function ImportTabClass:DownloadSiteCharacterList"
 sha256 = "8ef34d046712fda609fdc2ce598492a4c1e5544a491e29f41969ea4557718729"
 status = "faithful"
 notes = "charData shaping for the legacy site API (equipment field, top-level level)."
+
+[[port]]
+name = "catalyst-list"
+ours = "src/data/crafting.rs::CATALYSTS"
+upstream = "src/Classes/Item.lua"
+anchor = "local catalystList = "
+end_anchor = "local catalystTags = "
+sha256 = "adacf8d3a422dac48882d55d0ba85167c48189c2c8433d3fe0eee030174a065e"
+status = "faithful"
+notes = "1-based catalyst indices drive item scaling; order must match exactly."

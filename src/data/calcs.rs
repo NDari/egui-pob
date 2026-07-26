@@ -224,6 +224,14 @@ pub struct CalcsSkillSelection {
     pub parts: Vec<String>,
     /// Selected part, 0-based.
     pub selected_part: usize,
+    /// Minion choices (label, minion id) when the skill has a minion list.
+    pub minions: Vec<(String, String)>,
+    /// Selected minion, 0-based.
+    pub selected_minion: usize,
+    /// The selected minion's skills (for the minion-skill dropdown).
+    pub minion_skills: Vec<String>,
+    /// Selected minion skill, 0-based.
+    pub selected_minion_skill: usize,
 }
 
 /// Read the calcs-mode active skill / part selection.
@@ -235,7 +243,9 @@ pub fn skill_selection(lua: &Lua) -> Result<CalcsSkillSelection, mlua::Error> {
         local groupIdx = (build.calcsTab.input and build.calcsTab.input.skill_number)
             or build.mainSocketGroup or 1
         local group = build.skillsTab.socketGroupList[groupIdx]
-        local out = { skills = {}, selSkill = 1, parts = {}, selPart = 1 }
+        local out = { skills = {}, selSkill = 1, parts = {}, selPart = 1,
+            minionLabels = {}, minionIds = {}, selMinion = 1,
+            minionSkills = {}, selMinionSkill = 1 }
         if group and group.displaySkillListCalcs then
             for _, skill in ipairs(group.displaySkillListCalcs) do
                 local name = skill.activeEffect and skill.activeEffect.grantedEffect
@@ -252,6 +262,33 @@ pub fn skill_selection(lua: &Lua) -> Result<CalcsSkillSelection, mlua::Error> {
                         table.insert(out.parts, part.name or "?")
                     end
                     out.selPart = src and (src.skillPartCalcs or src.skillPart) or 1
+                end
+                -- Minion selection (upstream RefreshSkillSelectControls with
+                -- the "Calcs" suffix)
+                local minionList = skill.minionList
+                if minionList and minionList[1]
+                   and not (skill.skillFlags and skill.skillFlags.disable) then
+                    local dataMinions = build.data and build.data.minions
+                    for _, mid in ipairs(minionList) do
+                        local mdata = dataMinions and dataMinions[mid]
+                        table.insert(out.minionLabels, mdata and mdata.name or mid)
+                        table.insert(out.minionIds, mid)
+                    end
+                    local cur = src and (src.skillMinionCalcs or src.skillMinion)
+                    for i, mid in ipairs(out.minionIds) do
+                        if mid == cur then
+                            out.selMinion = i
+                            break
+                        end
+                    end
+                    if skill.minion then
+                        for _, minionSkill in ipairs(skill.minion.activeSkillList) do
+                            table.insert(out.minionSkills,
+                                minionSkill.activeEffect.grantedEffect.name)
+                        end
+                        out.selMinionSkill = src
+                            and (src.skillMinionSkillCalcs or src.skillMinionSkill) or 1
+                    end
                 end
             end
         end
@@ -271,6 +308,10 @@ pub fn skill_selection(lua: &Lua) -> Result<CalcsSkillSelection, mlua::Error> {
     };
     let skills = get_vec("skills");
     let parts = get_vec("parts");
+    let minion_labels = get_vec("minionLabels");
+    let minion_ids = get_vec("minionIds");
+    let minions: Vec<(String, String)> = minion_labels.into_iter().zip(minion_ids).collect();
+    let minion_skills = get_vec("minionSkills");
     Ok(CalcsSkillSelection {
         selected_skill: t
             .get::<usize>("selSkill")
@@ -284,7 +325,65 @@ pub fn skill_selection(lua: &Lua) -> Result<CalcsSkillSelection, mlua::Error> {
             .saturating_sub(1)
             .min(parts.len().saturating_sub(1)),
         parts,
+        selected_minion: t
+            .get::<usize>("selMinion")
+            .unwrap_or(1)
+            .saturating_sub(1)
+            .min(minions.len().saturating_sub(1)),
+        minions,
+        selected_minion_skill: t
+            .get::<usize>("selMinionSkill")
+            .unwrap_or(1)
+            .saturating_sub(1)
+            .min(minion_skills.len().saturating_sub(1)),
+        minion_skills,
     })
+}
+
+/// Select the calcs-mode minion (upstream srcInstance.skillMinionCalcs).
+pub fn set_calcs_minion(lua: &Lua, minion_id: &str) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local minionId = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local groupIdx = (build.calcsTab.input and build.calcsTab.input.skill_number)
+            or build.mainSocketGroup or 1
+        local group = build.skillsTab.socketGroupList[groupIdx]
+        local skill = group and group.displaySkillListCalcs
+            and group.displaySkillListCalcs[group.mainActiveSkillCalcs or 1]
+        local src = skill and skill.activeEffect and skill.activeEffect.srcInstance
+        if src then
+            src.skillMinionCalcs = minionId
+            build.modFlag = true
+            build.buildFlag = true
+            _runCallback('OnFrame')
+        end
+    "#,
+    )
+    .call(minion_id)
+}
+
+/// Select the calcs-mode minion skill (1-based index, upstream
+/// srcInstance.skillMinionSkillCalcs).
+pub fn set_calcs_minion_skill(lua: &Lua, index: usize) -> Result<(), mlua::Error> {
+    lua.load(format!(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        local groupIdx = (build.calcsTab.input and build.calcsTab.input.skill_number)
+            or build.mainSocketGroup or 1
+        local group = build.skillsTab.socketGroupList[groupIdx]
+        local skill = group and group.displaySkillListCalcs
+            and group.displaySkillListCalcs[group.mainActiveSkillCalcs or 1]
+        local src = skill and skill.activeEffect and skill.activeEffect.srcInstance
+        if src then
+            src.skillMinionSkillCalcs = {index}
+            build.modFlag = true
+            build.buildFlag = true
+            _runCallback('OnFrame')
+        end
+    "#
+    ))
+    .exec()
 }
 
 /// Select the calcs-mode active skill (0-based index).

@@ -183,7 +183,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Quality variant selection (Default, Anomalous, Divergent, Phantasmal; dropdown shown when the gem has alt-quality stats)
 - [x] Enable/disable individual gem
 - [x] Gem count (for totems, minions, traps, mines; shown for gems granting active effects)
-- [ ] Vaal gem global effect toggles
+- [x] Vaal gem global effect toggles (per-gem Enable <skill> checkboxes for vaal gems, upstream enableGlobal1/2)
 
 ### Gem Options
 - [x] Sort gems by DPS toggle with stat selector (all upstream sort stats)
@@ -285,7 +285,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Search bar for stat filtering (Ctrl+F)
 - [x] Buff/debuff lists (auras, combat buffs, curses - via the View Skill Details section)
 - [x] Show minion stats toggle
-- [ ] Minion selection and skill dropdowns
+- [x] Minion selection and skill dropdowns (calcs-tab minion + minion-skill dropdowns via upstream's Calcs-suffix srcInstance fields)
 
 ---
 
@@ -529,22 +529,22 @@ not listed.
 - [ ] Progressive gem sort results while typing (we drive the new DPSBuilder to completion synchronously instead)
 - [ ] Imbued Supports (new GemSelectControl imbued mode)
 - [ ] Gem tooltips (new GemTooltip.lua)
-- [ ] Gem color indicators on socket group labels
+- [x] Gem color indicators on socket group labels (R/G/B/W letters per gem on player group headers)
 - [ ] Sort gem suggestions by minion-specific stats (data side done via powerStatList; UI dropdown lists them already)
 
 ### Items/Crafting
-- [ ] Sorting in add-modifier, enchant, corrupt, and implicit popups
-- [ ] Sinistral and Dextral catalysts
-- [ ] Foulborn modifier toggles on uniques
-- [ ] Volatile Vaal Orb corruption
-- [ ] Increased-magnitude mods (Kane of Kulemak, Helical Ring, Heist enchants)
+- [~] Sorting in add-modifier, enchant, corrupt, and implicit popups (corrupt and add-implicit popups done: power-stat dropdown, one calc pass per option/group, values shown; enchant/add-modifier pending)
+- [x] Sinistral and Dextral catalysts (12-entry list synced to upstream's index order; drift-guarded in ports.toml)
+- [ ] Foulborn modifier toggles on uniques (per-mod mutate checkbox + magnitude slider via Item:MutateMod)
+- [ ] Volatile Vaal Orb corruption (per-explicit-mod roll-range sliders, corruptedRange 0.78-1.22 persisted on mod lines)
+- [x] Increased-magnitude mods (Kane of Kulemak, Helical Ring, Heist enchants) (Item:ParseRaw/data path we call; free)
 - [ ] Advanced item copy/paste format
-- [ ] Warning for eligible items missing an anoint
+- [x] Warning for eligible items missing an anoint (flows through upstream's warning list we already display; asserted in tests)
 
 ### Tree/Power Report
-- [ ] Masteries in the power report
+- [x] Masteries in the power report (flows through BuildPowerReportList, which we call; asserted in tests)
 - [ ] Node description tooltips in the power report
-- [ ] Intuitive-Leap-aware power report distances
+- [x] Intuitive-Leap-aware power report distances (calc-side in PowerBuilder, which we drive; free)
 - [ ] Timeless jewel trade QoL (copy trade URL, open link; trade-dependent)
 - [ ] Ascendancy flavour text only at high zoom
 - [ ] Allocate ascendancy nodes through custom modifiers
@@ -552,8 +552,8 @@ not listed.
 ### UI/Options
 - [ ] Pinnable calc panes as overlay windows on other tabs
 - [ ] Sidebar stat suffixes and compact value formatting toggle
-- [ ] Staged skills default to maximum stages
-- [ ] Crafted cluster jewels default to minimum passives
+- [x] Staged skills default to maximum stages (calc-engine change in called code; free)
+- [x] Crafted cluster jewels default to minimum passives (default synced in cluster_craft_info)
 - [ ] Option to disable scroll wheel on controls (may not apply to egui)
 
 ### Removed upstream (parity items now obsolete)
