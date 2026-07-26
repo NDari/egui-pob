@@ -9,6 +9,8 @@ pub struct ImportPanel {
     pub import_code: String,
     pub export_code: String,
     pub status_message: Option<(String, bool)>, // (message, is_error)
+    /// Selected share site (index into EXPORT_SITES).
+    export_site_idx: usize,
     // Character import state
     account_name: String,
     realm_index: usize,
@@ -38,6 +40,7 @@ impl ImportPanel {
             import_code: String::new(),
             export_code: String::new(),
             status_message: None,
+            export_site_idx: 0,
             account_name: String::new(),
             realm_index: 0,
             sessid: String::new(),
@@ -91,6 +94,58 @@ impl ImportPanel {
                 let _ = clip.set_text(&self.export_code);
                 self.status_message = Some(("Copied to clipboard.".to_string(), false));
             }
+
+            // Share: upload the code to a build site and replace it with the
+            // share URL (upstream's export dropdown + Share button)
+            ui.separator();
+            let site_idx = self.export_site_idx.min(EXPORT_SITES.len() - 1);
+            egui::ComboBox::from_id_salt("export_site")
+                .selected_text(EXPORT_SITES[site_idx].label)
+                .width(100.0)
+                .show_ui(ui, |ui| {
+                    for (i, site) in EXPORT_SITES.iter().enumerate() {
+                        ui.selectable_value(&mut self.export_site_idx, i, site.label);
+                    }
+                });
+            let already_shared = self.export_code.trim().starts_with("http");
+            if ui
+                .add_enabled(
+                    !self.export_code.is_empty() && !already_shared,
+                    egui::Button::new("Share"),
+                )
+                .on_hover_text(
+                    "Upload the build to the selected website and turn the code \
+                     into a short link (network request)",
+                )
+                .on_disabled_hover_text("Generate a code first")
+                .clicked()
+            {
+                match upload_build(&self.export_code, &EXPORT_SITES[site_idx]) {
+                    Ok(url) => {
+                        self.export_code = url;
+                        self.status_message = Some(("Share link created.".to_string(), false));
+                    }
+                    Err(e) => {
+                        self.status_message = Some((format!("Share failed: {e}"), true));
+                    }
+                }
+            }
+
+            // Party-play export toggle (upstream enablePartyExportBuffs;
+            // persists as exportParty via upstream's ImportTab saver)
+            let mut export_support = export_support_enabled(bridge);
+            if ui
+                .checkbox(&mut export_support, "Export Support")
+                .on_hover_text(
+                    "For party play: include this character's auras, curses and \
+                     enemy modifiers in the export so it can be used as a \
+                     support character",
+                )
+                .changed()
+                && let Err(e) = set_export_support(bridge, export_support)
+            {
+                log::error!("Failed to toggle Export Support: {e}");
+            }
         });
         if !self.export_code.is_empty() {
             // Single line on purpose: the code is huge and a multiline box
@@ -108,7 +163,8 @@ impl ImportPanel {
         // Import section
         ui.heading("Import");
         ui.label(
-            "Paste a build code or URL (pobb.in, pastebin, poe.ninja, maxroll, rentry, poedb):",
+            "Paste a build code or URL (pobb.in, pastebin, poe.ninja, maxroll, rentry, poedb, \
+             pob.codes):",
         );
         ui.add(
             egui::TextEdit::singleline(&mut self.import_code)
@@ -516,6 +572,10 @@ const BUILD_SITES: &[BuildSite] = &[
         pattern: "poedb.tw/pob/",
         download_prefix: "https://poedb.tw/pob/",
     },
+    BuildSite {
+        pattern: "pob.codes/b/",
+        download_prefix: "https://api.pob.codes/",
+    },
 ];
 
 /// Resolve a user-provided URL to the raw download URL for the build code.
@@ -549,13 +609,17 @@ fn resolve_download_url(url: &str) -> anyhow::Result<String> {
             if site.pattern == "poedb.tw/pob/" {
                 download_url.push_str("/raw");
             }
+            // pob.codes raw downloads live at api.pob.codes/<id>/raw
+            if site.pattern == "pob.codes/b/" {
+                download_url.push_str("/raw");
+            }
 
             return Ok(download_url);
         }
     }
 
     anyhow::bail!(
-        "Unrecognized URL. Supported sites: pobb.in, pastebin.com, poe.ninja, maxroll.gg, rentry.co, poedb.tw"
+        "Unrecognized URL. Supported sites: pobb.in, pastebin.com, poe.ninja, maxroll.gg, rentry.co, poedb.tw, pob.codes"
     )
 }
 
@@ -565,4 +629,111 @@ fn looks_like_url(input: &str) -> bool {
     trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
         || BUILD_SITES.iter().any(|s| trimmed.starts_with(s.pattern))
+}
+
+/// Export-capable share sites: upstream buildSites entries that carry
+/// postUrl + postFields + codeOut, in the same order as upstream's filtered
+/// dropdown (Maxroll is the default there too).
+struct ExportSite {
+    label: &'static str,
+    post_url: &'static str,
+    /// Raw body prefix prepended to the build code.
+    post_fields: &'static str,
+    /// Prefix turning the response into a share URL ("" when the API already
+    /// returns a full URL).
+    code_out: &'static str,
+}
+
+const EXPORT_SITES: &[ExportSite] = &[
+    ExportSite {
+        label: "Maxroll",
+        post_url: "https://maxroll.gg/poe/api/pob",
+        post_fields: "pobCode=",
+        code_out: "https://maxroll.gg/poe/pob/",
+    },
+    ExportSite {
+        label: "pob.codes",
+        post_url: "https://api.pob.codes/pob/plain",
+        post_fields: "",
+        code_out: "https://pob.codes/b/",
+    },
+    ExportSite {
+        label: "pobb.in",
+        post_url: "https://pobb.in/pob/",
+        post_fields: "",
+        code_out: "https://pobb.in/",
+    },
+    ExportSite {
+        label: "PoeNinja",
+        post_url: "https://poe.ninja/poe1/pob/api/upload",
+        post_fields: "code=",
+        code_out: "",
+    },
+    ExportSite {
+        label: "poedb.tw",
+        post_url: "https://poedb.tw/pob/api/gen",
+        post_fields: "",
+        code_out: "",
+    },
+];
+
+/// Upload a build code to a share site (upstream buildSites.UploadBuild):
+/// POST postFields..code as a form body; a 200 response body is the share
+/// id/URL, prefixed with codeOut.
+fn upload_build(code: &str, site: &ExportSite) -> anyhow::Result<String> {
+    let response = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| anyhow::anyhow!("HTTP client init failed: {e}"))?
+        .post(site.post_url)
+        .header("User-Agent", "PathOfBuildingCommunity (egui-pob)")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("{}{}", site.post_fields, code))
+        .send()
+        .map_err(|e| anyhow::anyhow!("Upload to {} failed: {e}", site.label))?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if status.as_u16() != 200 {
+        let short: String = body.chars().take(200).collect();
+        anyhow::bail!("{} returned {status}: {short}", site.label);
+    }
+    Ok(format!("{}{}", site.code_out, body.trim()))
+}
+
+/// Read upstream's party-play export toggle (partyTab.enableExportBuffs).
+fn export_support_enabled(bridge: &LuaBridge) -> bool {
+    bridge
+        .lua()
+        .load(
+            r#"
+            local build = mainObject_ref.main.modes['BUILD']
+            return (build.partyTab and build.partyTab.enableExportBuffs == true) or false
+        "#,
+        )
+        .eval()
+        .unwrap_or(false)
+}
+
+/// Set the party-play export toggle. The ImportTab control state is mirrored
+/// so upstream's saver persists it as the exportParty attribute.
+fn set_export_support(bridge: &LuaBridge, state: bool) -> Result<(), mlua::Error> {
+    bridge
+        .lua()
+        .load(
+            r#"
+            local state = ...
+            local build = mainObject_ref.main.modes['BUILD']
+            if build.partyTab then
+                build.partyTab.enableExportBuffs = state
+            end
+            local ctrl = build.importTab and build.importTab.controls
+                and build.importTab.controls.enablePartyExportBuffs
+            if ctrl then
+                ctrl.state = state
+            end
+            build.buildFlag = true
+            _runCallback('OnFrame')
+        "#,
+        )
+        .call(state)
 }

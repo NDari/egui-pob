@@ -255,7 +255,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 ### Item Comparison
 - [x] Stat diff tooltip when hovering unequipped items (in slot dropdowns, via upstream tooltip)
-- [ ] Side-by-side comparison view
+- ~~Side-by-side comparison view~~ (subsumed by the Compare tab, see the v2.66 delta section)
 
 ### Item Database
 - [x] Unique item database browser (window from Items tab; add to build, full tooltips)
@@ -340,9 +340,9 @@ Deferred - see §16.
 - [ ] Import from YouTube/Google redirects (follow redirects)
 
 ### Build Sharing
-- [ ] Website selection dropdown for export target
-- [ ] Share button (upload to website API)
-- [ ] Support character export toggle
+- [x] Website selection dropdown for export target (Maxroll, pob.codes, pobb.in, PoeNinja, poedb.tw; upstream's export-capable buildSites set)
+- [~] Share button (POST postFields+code per upstream UploadBuild, share URL replaces the code box; live upload not yet verified against the real site APIs)
+- [x] Support character export toggle (Export Support checkbox; persists as exportParty via upstream's saver, calc effect awaits the Party tab)
 
 ### Character Import (from PoE Account)
 - [x] Account name input with realm selection (PC, Xbox, PS4, etc.)
@@ -369,7 +369,7 @@ Deferred - see §16.
 - [x] Skill stage count input
 - [x] Active mines count input
 - [x] Minion type dropdown
-- [~] Manage Spectres button (button shown; library popup not implemented)
+- [x] Manage Spectres button (Spectre Library popup: staged in-build list, name/skill-searchable available list, upstream minion tooltips; commits build.spectreList on Save)
 - [x] Minion skill dropdown
 
 ---
@@ -523,21 +523,21 @@ runegrafts, bloodline nodes, spectres) come free through the Lua VM and are
 not listed.
 
 ### Build Comparison Tab (new upstream tab, ~5k lines)
-- [ ] Compare tab: side-by-side build comparison (CompareTab.lua; subsumes the old "Side-by-side comparison view" item)
-- [ ] Compare calcs with "only show differences" filter
-- [ ] Compare power report
-- [ ] Abyss sockets in comparison
+- [x] Compare tab: side-by-side build comparison (upstream CompareEntry gives the comparison build a full calc environment in the same VM; import from the builds folder or share codes, entry management, and sub-views: Summary stat table (ported DrawStatList), Tree (named node/mastery diff lists + copy spec; graphical overlay on the tree renderer not wired), Items (slot union with match/missing/extra/different statuses + copy/equip), Skills (ported Jaccard group pairing with common/additional/missing gems incl. imbued), Config (ported section grouping, diffs first, copy config))
+- [x] Compare calcs with "only show differences" filter (ported DrawCalcs filter + row-match/subsection-match; two-sided cells, filter defaults on like upstream)
+- [x] Compare power report (upstream ComparePowerBuilder driven per-frame with progress bar; metric dropdown + five category toggles; primary panels refresh after a run since the builder mutates the primary temporarily)
+- [x] Abyss sockets in comparison (item rows include the abyss-socket union; the power builder's abyss-jewel swap workaround comes from upstream)
 - [ ] "Buy similar" trade integration (trade-dependent)
 
 ### Import/Export
 - [ ] PoB2 OAuth API import for character and trade (PoEAPI.lua; our legacy session-id import still works)
-- [ ] pob.codes build export/import
+- [x] pob.codes build export/import (import via api.pob.codes raw URLs; export in the share dropdown)
 - [ ] Preserve skill selection on character re-import
 - [ ] Remember league for imported characters
 
 ### Skills/Gems
 - [ ] Progressive gem sort results while typing (we drive the new DPSBuilder to completion synchronously instead)
-- [ ] Imbued Supports (new GemSelectControl imbued mode)
+- [x] Imbued Supports (per-slot imbued dropdown on socketed groups via upstream's GemSelectControl imbued mode; level-1 extra support wired through RebuildImbuedSupportBySlot, calc pickup and XML persistence from upstream)
 - [x] Gem tooltips (GemTooltip.AddGemTooltip called headless, shown on skills-tab gem-name hover)
 - [x] Gem color indicators on socket group labels (R/G/B/W letters per gem on player group headers)
 - [ ] Sort gem suggestions by minion-specific stats (data side done via powerStatList; UI dropdown lists them already)
@@ -545,8 +545,8 @@ not listed.
 ### Items/Crafting
 - [x] Sorting in add-modifier, enchant, corrupt, and implicit popups (power-stat dropdown in all four, one calc pass per option/group/line/entry on first use, values shown next to each option)
 - [x] Sinistral and Dextral catalysts (12-entry list synced to upstream's index order; drift-guarded in ports.toml)
-- [ ] Foulborn modifier toggles on uniques (per-mod mutate checkbox + magnitude slider via Item:MutateMod)
-- [ ] Volatile Vaal Orb corruption (per-explicit-mod roll-range sliders, corruptedRange 0.78-1.22 persisted on mod lines)
+- [x] Foulborn modifier toggles on uniques (Modifier Ranges dialog via right-click: per-line roll sliders + mutate checkboxes calling Item:MutateMod; MUTATED tint, title prefix and {mutated} raw round-trip come from upstream)
+- [x] Volatile Vaal Orb corruption (Roll Ranges mode in the corrupt popup for uniques/relics: per-explicit sliders 0.78-1.22 with live applyRange preview; corruptedRange persisted on mod lines by upstream BuildRaw)
 - [x] Increased-magnitude mods (Kane of Kulemak, Helical Ring, Heist enchants) (Item:ParseRaw/data path we call; free)
 - [ ] Advanced item copy/paste format
 - [x] Warning for eligible items missing an anoint (flows through upstream's warning list we already display; asserted in tests)

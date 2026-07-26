@@ -3,6 +3,7 @@
 pub mod build_list;
 pub mod calcs;
 pub mod char_import;
+pub mod compare;
 pub mod config;
 pub mod config_sets;
 pub mod crafting;
@@ -16,6 +17,7 @@ pub mod loadouts;
 pub mod node_power;
 pub mod skill_sets;
 pub mod skills;
+pub mod spectres;
 pub mod tattoos;
 pub mod timeless;
 pub mod tree;

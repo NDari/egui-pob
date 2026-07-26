@@ -388,3 +388,129 @@ function pob_calcs_set_input(key, value)
     build.buildFlag = true
     _runCallback('OnFrame')
 end
+
+-- Compare-tab calcs view: a port of upstream CompareTab's DrawCalcs filter
+-- block plus its file-local calcRowMatchesBetweenBuilds and
+-- subSectionExtraMatches (registered in ports.toml), emitting two-sided
+-- formatted cells instead of drawing. Only column 1 is rendered, like
+-- upstream. onlyDiff drops rows whose value, mod tabulation, and breakdown
+-- all match between the builds.
+function pob_compare_calc_sections(index, onlyDiff)
+    local build = mainObject_ref.main.modes['BUILD']
+    local entry = build.compareTab.compareEntries[index]
+    local out = {}
+    if not entry then
+        return out
+    end
+    local calcsTab = build.calcsTab
+    local primaryEnv = calcsTab.calcsEnv
+    local compareEnv = entry.calcsTab and entry.calcsTab.calcsEnv
+    if not primaryEnv or not compareEnv then
+        return out
+    end
+    local primaryActor = (calcsTab.input.showMinion and primaryEnv.minion) or primaryEnv.player
+    local compareActor = (entry.calcsTab.input.showMinion and compareEnv.minion)
+        or compareEnv.player
+    local calcsHelpers = LoadModule("Classes/CompareCalcsHelpers")
+
+    local function rowMatches(colData)
+        if not colData or not colData.format then return false end
+        local pOk, pVal = pcall(formatStr, colData.format, primaryActor, colData)
+        local cOk, cVal = pcall(formatStr, colData.format, compareActor, colData)
+        if not pOk or not cOk or tostring(pVal or "") ~= tostring(cVal or "") then
+            return false
+        end
+        for _, sectionData in ipairs(colData) do
+            if sectionData.modName then
+                local pRows = calcsHelpers.TabulateMods(sectionData, primaryActor)
+                local cRows = calcsHelpers.TabulateMods(sectionData, compareActor)
+                if #pRows ~= #cRows then return false end
+                local counts = {}
+                for _, row in ipairs(pRows) do
+                    local key = calcsHelpers.ModRowKey(row) .. "|" .. tostring(row.value)
+                    counts[key] = (counts[key] or 0) + 1
+                end
+                for _, row in ipairs(cRows) do
+                    local key = calcsHelpers.ModRowKey(row) .. "|" .. tostring(row.value)
+                    local count = counts[key]
+                    if not count then return false end
+                    counts[key] = count > 1 and count - 1 or nil
+                end
+            end
+            if sectionData.breakdown then
+                local pLines = calcsHelpers.GetBreakdownLines(sectionData, build)
+                local cLines = calcsHelpers.GetBreakdownLines(sectionData, entry)
+                local pCount = pLines and #pLines or 0
+                local cCount = cLines and #cLines or 0
+                if pCount ~= cCount then return false end
+                for i = 1, pCount do
+                    if pLines[i] ~= cLines[i] then return false end
+                end
+            end
+        end
+        return true
+    end
+    local function extraMatches(subSecData)
+        if not subSecData or not subSecData.extra then return true end
+        local pOk, pText = pcall(formatStr, subSecData.extra, primaryActor)
+        local cOk, cText = pcall(formatStr, subSecData.extra, compareActor)
+        return pOk and cOk and tostring(pText or "") == tostring(cText or "")
+    end
+
+    for _, section in ipairs(calcsTab.sectionList) do
+        local secData = section.subSection[1].data
+        if calcsTab:CheckFlag(secData, primaryActor) then
+            local subSecInfo = {}
+            for _, subSec in ipairs(section.subSection) do
+                local rows = {}
+                for _, rowData in ipairs(subSec.data) do
+                    if rowData.label and rowData[1] and rowData[1].format then
+                        local primaryVisible = calcsTab:CheckFlag(rowData, primaryActor)
+                        local compareVisible = calcsTab:CheckFlag(rowData, compareActor)
+                        if primaryVisible or compareVisible then
+                            local keepRow = true
+                            if onlyDiff and primaryVisible and compareVisible then
+                                keepRow = not rowMatches(rowData[1])
+                            end
+                            if keepRow then
+                                local colData = rowData[1]
+                                local pOk, pText =
+                                    pcall(formatStr, colData.format, primaryActor, colData)
+                                local cOk, cText =
+                                    pcall(formatStr, colData.format, compareActor, colData)
+                                table.insert(rows, {
+                                    label = rowData.label,
+                                    primary = primaryVisible and (pOk and pText or "?") or "",
+                                    compare = compareVisible and (cOk and cText or "?") or "",
+                                })
+                            end
+                        end
+                    end
+                end
+                local keepSubSection = #rows > 0 or (onlyDiff and not extraMatches(subSec.data))
+                if keepSubSection then
+                    local pExtra, cExtra = "", ""
+                    if subSec.data.extra then
+                        local ok, text = pcall(formatStr, subSec.data.extra, primaryActor)
+                        pExtra = ok and text or ""
+                        local ok2, text2 = pcall(formatStr, subSec.data.extra, compareActor)
+                        cExtra = ok2 and text2 or ""
+                    end
+                    table.insert(subSecInfo, {
+                        label = subSec.label or "",
+                        primaryExtra = pExtra,
+                        compareExtra = cExtra,
+                        rows = rows,
+                    })
+                end
+            end
+            if #subSecInfo > 0 then
+                table.insert(out, {
+                    id = section.id or "",
+                    subsections = subSecInfo,
+                })
+            end
+        end
+    end
+    return out
+end

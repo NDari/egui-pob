@@ -1,12 +1,19 @@
 //! Build view: container for an open build with stat sidebar and tabs.
 
+use std::collections::HashMap;
+
 use pob_egui::data::CalcOutput;
 use pob_egui::data::build_list::{self, BuildEntry};
 use pob_egui::data::display_stats::{self, SidebarStats};
+use pob_egui::data::items::TooltipLine;
 use pob_egui::data::loadouts;
+use pob_egui::data::spectres::{self, SpectreEntry};
 use pob_egui::lua_bridge::LuaBridge;
 
+use super::items_tab::show_tooltip_lines;
+
 use super::calcs_tab::CalcsPanel;
+use super::compare_tab::ComparePanel;
 use super::config_tab::ConfigPanel;
 use super::import_tab::ImportPanel;
 use super::items_tab::ItemsPanel;
@@ -23,6 +30,7 @@ pub enum BuildTab {
     Calcs,
     Config,
     Notes,
+    Compare,
     Import,
 }
 
@@ -84,6 +92,21 @@ pub struct BuildView {
     selected_loadout: Option<String>,
     /// Name buffer for the New Loadout prompt (None = closed).
     loadout_prompt: Option<String>,
+    /// Spectre library popup (staged list; committed on Save like upstream).
+    spectre_library: Option<SpectreLibrary>,
+    /// Compare tab state (entries live in Lua; dropped on build close).
+    compare_panel: ComparePanel,
+}
+
+/// Spectre library popup state.
+struct SpectreLibrary {
+    /// Staged (id, name) build list; only Save commits it.
+    dest: Vec<(String, String)>,
+    available: Vec<SpectreEntry>,
+    search: String,
+    /// 0 = Names, 1 = Skills, 2 = Both (upstream's search modes).
+    search_mode: usize,
+    tooltip_cache: HashMap<String, Vec<TooltipLine>>,
 }
 
 struct SaveAsDialog {
@@ -207,6 +230,8 @@ impl BuildView {
             loadouts,
             selected_loadout,
             loadout_prompt: None,
+            spectre_library: None,
+            compare_panel: ComparePanel::default(),
         }
     }
 
@@ -241,6 +266,138 @@ impl BuildView {
     }
 
     /// Save the build, opening the Save As dialog if it has no file yet.
+    /// Spectre Library popup (upstream OpenSpectreLibrary): staged in-build
+    /// list on the left, searchable available list on the right; Save
+    /// commits, Cancel discards.
+    fn show_spectre_library(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) {
+        let Some(lib) = &mut self.spectre_library else {
+            return;
+        };
+        let mut close = false;
+        let mut save = false;
+        let mut add: Option<String> = None;
+        let mut remove: Option<usize> = None;
+
+        egui::Window::new("Spectre Library")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.set_width(560.0);
+                ui.columns(2, |cols| {
+                    let ui = &mut cols[0];
+                    ui.strong("Spectres in Build:");
+                    egui::ScrollArea::vertical()
+                        .id_salt("spectre_dest")
+                        .max_height(250.0)
+                        .show(ui, |ui| {
+                            for (i, (id, name)) in lib.dest.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                                        remove = Some(i);
+                                    }
+                                    let resp = ui.label(name);
+                                    spectre_hover(resp, &mut lib.tooltip_cache, bridge, id);
+                                });
+                            }
+                            if lib.dest.is_empty() {
+                                ui.weak("(none)");
+                            }
+                        });
+
+                    let ui = &mut cols[1];
+                    ui.strong("Available Spectres:");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut lib.search)
+                                .hint_text("Search...")
+                                .desired_width(150.0),
+                        );
+                        egui::ComboBox::from_id_salt("spectre_search_mode")
+                            .selected_text(["Names", "Skills", "Both"][lib.search_mode.min(2)])
+                            .width(70.0)
+                            .show_ui(ui, |ui| {
+                                for (i, label) in ["Names", "Skills", "Both"].iter().enumerate() {
+                                    ui.selectable_value(&mut lib.search_mode, i, *label);
+                                }
+                            });
+                    });
+                    let query = lib.search.to_lowercase();
+                    egui::ScrollArea::vertical()
+                        .id_salt("spectre_source")
+                        .max_height(228.0)
+                        .show(ui, |ui| {
+                            for entry in &lib.available {
+                                if !query.is_empty() {
+                                    let name_match = lib.search_mode != 1
+                                        && entry.name.to_lowercase().contains(&query);
+                                    let skill_match = lib.search_mode != 0
+                                        && entry
+                                            .skills
+                                            .iter()
+                                            .any(|s| s.to_lowercase().contains(&query));
+                                    if !name_match && !skill_match {
+                                        continue;
+                                    }
+                                }
+                                let in_build = lib.dest.iter().any(|(id, _)| id == &entry.id);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add_enabled(!in_build, egui::Button::new("+").small())
+                                        .on_hover_text("Add to build")
+                                        .clicked()
+                                    {
+                                        add = Some(entry.id.clone());
+                                    }
+                                    let resp = ui.label(&entry.name);
+                                    spectre_hover(resp, &mut lib.tooltip_cache, bridge, &entry.id);
+                                });
+                            }
+                        });
+                });
+                ui.add_space(4.0);
+                ui.weak(
+                    "Spectres in your Library must be assigned to an active Raise Spectre gem \
+                     for their buffs and curses to activate.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if let Some(i) = remove {
+            lib.dest.remove(i);
+        }
+        if let Some(id) = add
+            && !lib.dest.iter().any(|(existing, _)| *existing == id)
+        {
+            let name = lib
+                .available
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.name.clone())
+                .unwrap_or_default();
+            lib.dest.push((id, name));
+        }
+        if save {
+            let ids: Vec<String> = lib.dest.iter().map(|(id, _)| id.clone()).collect();
+            match spectres::set_spectre_list(bridge.lua(), &ids) {
+                Ok(()) => {
+                    self.spectre_library = None;
+                    self.refresh_calc_output(bridge);
+                }
+                Err(e) => log::error!("Failed to save spectre list: {e}"),
+            }
+        } else if close {
+            self.spectre_library = None;
+        }
+    }
+
     fn request_save(&mut self, bridge: &LuaBridge) {
         if bridge.build_file_name().is_none() {
             self.save_as_dialog = Some(SaveAsDialog::new(self.build_name.clone(), false, bridge));
@@ -273,7 +430,8 @@ impl BuildView {
         let mut go_back = false;
 
         // Keyboard shortcuts (skipped while a modal is open)
-        let modal_open = self.save_as_dialog.is_some() || self.save_prompt;
+        let modal_open =
+            self.save_as_dialog.is_some() || self.save_prompt || self.spectre_library.is_some();
         if !modal_open {
             // Ctrl+S: save (no-op when there is nothing to save, like the button)
             if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S))
@@ -803,6 +961,7 @@ impl BuildView {
                 ui.selectable_value(&mut self.active_tab, BuildTab::Calcs, "Calcs");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Config, "Config");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Notes, "Notes");
+                ui.selectable_value(&mut self.active_tab, BuildTab::Compare, "Compare");
                 ui.selectable_value(&mut self.active_tab, BuildTab::Import, "Import/Export");
             });
             ui.separator();
@@ -896,6 +1055,13 @@ impl BuildView {
                 BuildTab::Notes => {
                     if let Some(ref mut notes) = self.notes_panel {
                         notes.show(ui, bridge);
+                    }
+                }
+                BuildTab::Compare => {
+                    if self.compare_panel.show(ui, bridge) {
+                        // Copy-to-primary actions (or a finished power run)
+                        // touched the primary build: refresh everything
+                        self.refresh_all(bridge);
                     }
                 }
                 BuildTab::Import => {
@@ -1069,14 +1235,27 @@ impl BuildView {
                 }
             }
 
-            // Manage Spectres (placeholder — spectre library popup not implemented yet)
-            if skill_info.show_spectre_library {
-                ui.add_enabled_ui(false, |ui| {
-                    ui.button("Manage Spectres…").on_disabled_hover_text(
-                        "Spectre library not implemented yet. Use upstream PoB to curate spectres.",
-                    );
-                });
+            // Manage Spectres (upstream OpenSpectreLibrary popup)
+            if skill_info.show_spectre_library && ui.button("Manage Spectres…").clicked() {
+                match (
+                    spectres::list_in_build(bridge.lua()),
+                    spectres::list_available(bridge.lua()),
+                ) {
+                    (Ok(dest), Ok(available)) => {
+                        self.spectre_library = Some(SpectreLibrary {
+                            dest,
+                            available,
+                            search: String::new(),
+                            search_mode: 0,
+                            tooltip_cache: HashMap::new(),
+                        });
+                    }
+                    (Err(e), _) | (_, Err(e)) => {
+                        log::error!("Failed to open spectre library: {e}")
+                    }
+                }
             }
+            self.show_spectre_library(ui, bridge);
 
             // Minion skill dropdown
             if skill_info.show_minions && !skill_info.minion_skills.is_empty() {
@@ -1883,4 +2062,28 @@ fn set_minion_skill(lua: &mlua::Lua, index: usize) -> Result<(), mlua::Error> {
     "#
     ))
     .exec()
+}
+
+/// Attach the spectre tooltip (upstream MinionListControl:AddValueTooltip)
+/// to a response, computing and caching the lines on first hover.
+fn spectre_hover(
+    resp: egui::Response,
+    cache: &mut HashMap<String, Vec<TooltipLine>>,
+    bridge: &LuaBridge,
+    id: &str,
+) {
+    if !resp.hovered() {
+        return;
+    }
+    if !cache.contains_key(id) {
+        let lines = spectres::spectre_tooltip(bridge.lua(), id).unwrap_or_else(|e| {
+            log::error!("Spectre tooltip failed: {e}");
+            Vec::new()
+        });
+        cache.insert(id.to_string(), lines);
+    }
+    let lines = &cache[id];
+    if !lines.is_empty() {
+        resp.on_hover_ui(|ui| show_tooltip_lines(ui, lines));
+    }
 }

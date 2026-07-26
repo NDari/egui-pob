@@ -16,6 +16,9 @@ pub struct SocketGroup {
     pub include_in_full_dps: bool,
     /// Count multiplier (upstream shows it for item-granted groups only).
     pub group_count: i64,
+    /// Imbued support gem name (3.29 mechanic; lives on the group, not in
+    /// gemList, and applies as an extra level-1 support for the slot).
+    pub imbued_support: Option<String>,
     pub gems: Vec<GemInfo>,
 }
 
@@ -62,6 +65,7 @@ pub fn extract_skills(lua: &Lua) -> Result<Vec<SocketGroup>, mlua::Error> {
                     fromItem = group.source ~= nil,
                     includeInFullDPS = group.includeInFullDPS == true,
                     groupCount = group.groupCount or 1,
+                    imbuedSupport = group.imbuedSupport,
                     gems = {}
                 }
                 if group.gemList then
@@ -149,6 +153,7 @@ pub fn extract_skills(lua: &Lua) -> Result<Vec<SocketGroup>, mlua::Error> {
             from_item: entry.get("fromItem").unwrap_or(false),
             include_in_full_dps: entry.get("includeInFullDPS").unwrap_or(false),
             group_count: entry.get("groupCount").unwrap_or(1),
+            imbued_support: entry.get("imbuedSupport").ok(),
             gems,
         });
     }
@@ -282,6 +287,8 @@ pub fn set_group_slot(lua: &Lua, index: usize, slot_name: Option<&str>) -> Resul
         local group = build.skillsTab.socketGroupList[index]
         if group and not group.source then
             group.slot = slotName
+            -- Imbued supports are keyed by slot; refresh the runtime map
+            build.skillsTab:RebuildImbuedSupportBySlot()
             build.skillsTab:AddUndoState()
             build.buildFlag = true
             _runCallback('OnFrame')
@@ -341,6 +348,7 @@ pub fn delete_all_socket_groups(lua: &Lua) -> Result<(), mlua::Error> {
         end
         build.mainSocketGroup = 1
         skillsTab.displayGroup = nil
+        skillsTab:RebuildImbuedSupportBySlot()
         skillsTab:AddUndoState()
         build.buildFlag = true
         _runCallback('OnFrame')
@@ -521,6 +529,7 @@ pub fn delete_socket_group(lua: &Lua, index: usize) -> Result<(), mlua::Error> {
             if calcsInput and calcsInput.skill_number and calcsInput.skill_number > {index} then
                 calcsInput.skill_number = calcsInput.skill_number - 1
             end
+            skillsTab:RebuildImbuedSupportBySlot()
             skillsTab:AddUndoState()
             build.buildFlag = true
             _runCallback('OnFrame')
@@ -670,6 +679,46 @@ pub fn remove_gem(lua: &Lua, group_index: usize, gem_index: usize) -> Result<(),
     "#
     ))
     .exec()
+}
+
+/// Set or clear a socket group's imbued support (3.29 mechanic). The group
+/// must have a slot; upstream's RebuildImbuedSupportBySlot refreshes the
+/// runtime slot map that CalcSetup reads, and persistence comes free via
+/// upstream save (the imbuedSupport attribute). Returns an error string for
+/// unknown gem names.
+pub fn set_imbued_support(
+    lua: &Lua,
+    group_index: usize,
+    gem_name: Option<&str>,
+) -> Result<Option<String>, mlua::Error> {
+    lua.load(
+        r#"
+        local groupIndex, gemName = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local skillsTab = build.skillsTab
+        local group = skillsTab.socketGroupList[groupIndex]
+        if not group or not group.slot then
+            return "Socket group has no item slot"
+        end
+        if gemName then
+            local gemId = data.gemForBaseName[gemName:lower() .. " support"]
+            local gem = gemId and data.gems[gemId]
+            if not gem then
+                return "Unknown support gem: " .. gemName
+            end
+            group.imbuedSupport = gem.name
+        else
+            group.imbuedSupport = nil
+        end
+        skillsTab:RebuildImbuedSupportBySlot()
+        skillsTab:AddUndoState()
+        build.modFlag = true
+        build.buildFlag = true
+        _runCallback('OnFrame')
+        return nil
+    "#,
+    )
+    .call((group_index, gem_name))
 }
 
 /// Build the full upstream gem tooltip (GemTooltip.AddGemTooltip) for a gem

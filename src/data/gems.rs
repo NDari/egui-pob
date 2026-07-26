@@ -22,17 +22,21 @@ pub struct GemChoice {
 /// Search gems for a socket group using upstream's GemSelectControl matching.
 /// `sort_by_dps` enables upstream's DPS-impact sort (runs one calc per
 /// candidate support on first use; cached per group and build revision).
+/// `imbued` switches to upstream's imbued-select mode: only non-exceptional
+/// supports that can support the group's active skills (a separate cached
+/// control, since imbuedSelect changes list/filter semantics).
 pub fn search_gems(
     lua: &Lua,
     group_index: usize,
     query: &str,
     sort_by_dps: bool,
     limit: usize,
+    imbued: bool,
 ) -> Result<Vec<GemChoice>, mlua::Error> {
     let result: LuaTable = lua
         .load(
             r#"
-            local groupIndex, query, sortByDPS, limit = ...
+            local groupIndex, query, sortByDPS, limit, imbued = ...
             local build = mainObject_ref.main.modes['BUILD']
             local skillsTab = build.skillsTab
             local group = skillsTab.socketGroupList[groupIndex]
@@ -41,11 +45,21 @@ pub fn search_gems(
             end
             skillsTab.displayGroup = group
             skillsTab.sortGemsByDPS = sortByDPS
-            local ctrl = skillsTab._eguiGemSelect
-            if not ctrl then
-                ctrl = new("GemSelectControl", nil, {0, 0, 300, 20}, skillsTab,
-                           #group.gemList + 1, function() end)
-                skillsTab._eguiGemSelect = ctrl
+            local ctrl
+            if imbued then
+                ctrl = skillsTab._eguiImbuedSelect
+                if not ctrl then
+                    ctrl = new("GemSelectControl", nil, {0, 0, 300, 20}, skillsTab,
+                               1, function() end, true, true)
+                    skillsTab._eguiImbuedSelect = ctrl
+                end
+            else
+                ctrl = skillsTab._eguiGemSelect
+                if not ctrl then
+                    ctrl = new("GemSelectControl", nil, {0, 0, 300, 20}, skillsTab,
+                               #group.gemList + 1, function() end)
+                    skillsTab._eguiGemSelect = ctrl
+                end
             end
             ctrl.index = #group.gemList + 1
             ctrl.searchStr = query
@@ -91,7 +105,7 @@ pub fn search_gems(
             return result
         "#,
         )
-        .call((group_index, query, sort_by_dps, limit))?;
+        .call((group_index, query, sort_by_dps, limit, imbued))?;
 
     let mut choices = Vec::new();
     for pair in result.sequence_values::<LuaTable>() {

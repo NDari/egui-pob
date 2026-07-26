@@ -81,6 +81,11 @@ pub struct CraftUi {
     /// Sort mode for corrupt options (0 = default order, else 1-based into
     /// the popup sort stat list).
     corrupt_sort: usize,
+    /// Corrupt dialog mode: 0 = implicits, 1 = roll ranges (uniques/relics,
+    /// upstream's Volatile Vaal Orb mode).
+    corrupt_mode: usize,
+    /// Item whose modifier ranges (roll sliders + Foulborn toggles) are open.
+    ranges_item: Option<i64>,
     /// Item whose sockets/catalyst are being edited.
     socket_item: Option<i64>,
     /// Item receiving an implicit.
@@ -177,6 +182,18 @@ pub struct ItemsPanel {
     addmod_sort_cache: Option<(i64, String, usize, Vec<f64>)>,
     /// Item under the cursor this frame (slot or list), for E/Ctrl+C/F1.
     hovered_item: Option<i64>,
+    /// Editable roll-range rows for the corrupt dialog's Roll Ranges mode.
+    corrupt_rolls_cache: Option<(i64, Vec<RollRangeEdit>)>,
+    /// Cached modifier-range rows for the ranges dialog.
+    mod_ranges_cache: Option<(i64, Vec<crafting::ModRangeLine>)>,
+}
+
+/// One slider row in the corrupt dialog's Roll Ranges mode.
+struct RollRangeEdit {
+    /// 1-based explicitModLines index.
+    index: usize,
+    value: f64,
+    label: String,
 }
 
 /// Raw-text item editor state. `item_id` is None when creating a new item.
@@ -247,6 +264,8 @@ impl ItemsPanel {
             addmod_catalog_cache: None,
             addmod_sort_cache: None,
             hovered_item: None,
+            corrupt_rolls_cache: None,
+            mod_ranges_cache: None,
         }
     }
 
@@ -1478,6 +1497,34 @@ impl ItemsPanel {
                 });
                 self.corrupt_opts_cache = Some((item_id, opts));
             }
+            // Roll Ranges mode is offered for uniques/relics (upstream's
+            // Volatile Vaal Orb); load its slider rows on first use
+            let is_unique = self
+                .item_list
+                .iter()
+                .find(|e| e.id == item_id)
+                .map(|e| e.rarity == "UNIQUE" || e.rarity == "RELIC")
+                .unwrap_or(false);
+            if self.craft_ui.corrupt_mode == 1
+                && self
+                    .corrupt_rolls_cache
+                    .as_ref()
+                    .is_none_or(|(id, _)| *id != item_id)
+            {
+                let rows = crafting::corrupt_roll_ranges(bridge.lua(), item_id)
+                    .unwrap_or_else(|e| {
+                        log::error!("Failed to load roll ranges: {e}");
+                        Vec::new()
+                    })
+                    .into_iter()
+                    .map(|m| RollRangeEdit {
+                        index: m.index,
+                        value: m.current,
+                        label: m.label,
+                    })
+                    .collect();
+                self.corrupt_rolls_cache = Some((item_id, rows));
+            }
             // Resolve the option ordering: sorted by a power stat when a
             // sort mode is selected (upstream's popup sorting; one calc
             // pass per option, cached per item + stat)
@@ -1526,6 +1573,7 @@ impl ItemsPanel {
             let mut close = false;
             let mut do_corrupt = false;
             let mut new_sort: Option<usize> = None;
+            let mut new_mode: Option<usize> = None;
 
             egui::Window::new(format!("Corrupt: {item_name}"))
                 .id(egui::Id::new("corrupt_dialog"))
@@ -1533,6 +1581,85 @@ impl ItemsPanel {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ui.ctx(), |ui| {
+                    // Mode row: implicits vs roll ranges (uniques/relics)
+                    if is_unique {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(self.craft_ui.corrupt_mode == 0, "Implicits")
+                                .clicked()
+                            {
+                                new_mode = Some(0);
+                            }
+                            if ui
+                                .selectable_label(self.craft_ui.corrupt_mode == 1, "Roll Ranges")
+                                .on_hover_text(
+                                    "Volatile Vaal Orb: re-roll explicit modifier magnitudes \
+                                     (0.78x-1.22x) instead of adding implicits",
+                                )
+                                .clicked()
+                            {
+                                new_mode = Some(1);
+                            }
+                        });
+                        ui.separator();
+                    }
+                    if self.craft_ui.corrupt_mode == 1 {
+                        if let Some((_, rows)) = &mut self.corrupt_rolls_cache {
+                            egui::ScrollArea::vertical()
+                                .id_salt("corrupt_rolls")
+                                .max_height(300.0)
+                                .show(ui, |ui| {
+                                    for row in rows.iter_mut() {
+                                        ui.horizontal(|ui| {
+                                            ui.monospace(format!("{:.2}", row.value));
+                                            let resp = ui.add(
+                                                egui::Slider::new(&mut row.value, 0.78..=1.22)
+                                                    .show_value(false)
+                                                    .step_by(0.01),
+                                            );
+                                            if resp.changed() {
+                                                row.value = (row.value * 100.0).round() / 100.0;
+                                                match crafting::preview_roll_range(
+                                                    bridge.lua(),
+                                                    item_id,
+                                                    row.index,
+                                                    row.value,
+                                                ) {
+                                                    Ok(label) => row.label = label,
+                                                    Err(e) => log::error!(
+                                                        "Roll range preview failed: {e}"
+                                                    ),
+                                                }
+                                            }
+                                            ui.label(&row.label);
+                                        });
+                                    }
+                                    if rows.is_empty() {
+                                        ui.colored_label(
+                                            Theme::TEXT_DIM,
+                                            "No scalable modifiers on this item",
+                                        );
+                                    }
+                                });
+                            ui.label(
+                                egui::RichText::new(
+                                    "Corrupting applies the chosen magnitudes to the item's \
+                                     explicit modifiers (no implicits are added).",
+                                )
+                                .small()
+                                .color(Theme::TEXT_DIM),
+                            );
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Corrupt").clicked() {
+                                do_corrupt = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                        return;
+                    }
                     ui.horizontal(|ui| {
                         ui.label("Sort by:");
                         let current = if self.craft_ui.corrupt_sort == 0 {
@@ -1647,14 +1774,27 @@ impl ItemsPanel {
             if let Some(s) = new_sort {
                 self.craft_ui.corrupt_sort = s;
             }
+            if let Some(m) = new_mode {
+                self.craft_ui.corrupt_mode = m;
+            }
             if do_corrupt {
-                let (s1, s2) = self.craft_ui.corrupt_sel;
-                match crafting::corrupt_item(
-                    bridge.lua(),
-                    item_id,
-                    (s1 > 0).then_some(s1),
-                    (s2 > 0).then_some(s2),
-                ) {
+                let result = if self.craft_ui.corrupt_mode == 1 {
+                    let (indices, values): (Vec<usize>, Vec<f64>) = self
+                        .corrupt_rolls_cache
+                        .as_ref()
+                        .map(|(_, rows)| rows.iter().map(|r| (r.index, r.value)).unzip())
+                        .unwrap_or_default();
+                    crafting::corrupt_item_rolls(bridge.lua(), item_id, &indices, &values)
+                } else {
+                    let (s1, s2) = self.craft_ui.corrupt_sel;
+                    crafting::corrupt_item(
+                        bridge.lua(),
+                        item_id,
+                        (s1 > 0).then_some(s1),
+                        (s2 > 0).then_some(s2),
+                    )
+                };
+                match result {
                     Ok(()) => {
                         changed = true;
                         close = true;
@@ -1667,6 +1807,8 @@ impl ItemsPanel {
                 self.corrupt_opts_cache = None;
                 self.corrupt_sort_cache = None;
                 self.craft_ui.corrupt_sort = 0;
+                self.craft_ui.corrupt_mode = 0;
+                self.corrupt_rolls_cache = None;
             }
         }
 
@@ -2225,6 +2367,113 @@ impl ItemsPanel {
             }
         }
 
+        // Modifier Ranges dialog: roll sliders for scalable lines and
+        // Foulborn mutate toggles (upstream's Modifier Range section)
+        if let Some(item_id) = self.craft_ui.ranges_item {
+            if self
+                .mod_ranges_cache
+                .as_ref()
+                .is_none_or(|(id, _)| *id != item_id)
+            {
+                let rows = crafting::mod_range_lines(bridge.lua(), item_id).unwrap_or_else(|e| {
+                    log::error!("Failed to load modifier ranges: {e}");
+                    Vec::new()
+                });
+                self.mod_ranges_cache = Some((item_id, rows));
+            }
+            let item_name = self
+                .item_list
+                .iter()
+                .find(|e| e.id == item_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "Item".to_string());
+            let mut close = false;
+            let mut toggle_mutate: Option<usize> = None;
+            let mut apply_range: Option<(usize, f64)> = None;
+
+            egui::Window::new(format!("Modifier Ranges: {item_name}"))
+                .id(egui::Id::new("ranges_dialog"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    if let Some((_, rows)) = &mut self.mod_ranges_cache {
+                        egui::ScrollArea::vertical()
+                            .id_salt("mod_ranges")
+                            .max_height(320.0)
+                            .show(ui, |ui| {
+                                for row in rows.iter_mut() {
+                                    ui.horizontal(|ui| {
+                                        if row.can_mutate {
+                                            let mut mutated = row.mutated;
+                                            if ui
+                                                .checkbox(&mut mutated, "")
+                                                .on_hover_text(
+                                                    "Foulborn: swap this modifier with its \
+                                                     mutated counterpart",
+                                                )
+                                                .changed()
+                                            {
+                                                toggle_mutate = Some(row.position);
+                                            }
+                                        }
+                                        if row.has_slider {
+                                            let resp = ui.add(
+                                                egui::Slider::new(&mut row.range, 0.0..=1.0)
+                                                    .show_value(false),
+                                            );
+                                            if resp.drag_stopped()
+                                                || (resp.changed() && !resp.dragged())
+                                            {
+                                                apply_range = Some((row.position, row.range));
+                                            }
+                                        }
+                                        // Upstream tints mutated lines MUTATED pink
+                                        let color = if row.mutated {
+                                            egui::Color32::from_rgb(0xCD, 0x22, 0x85)
+                                        } else {
+                                            ui.visuals().text_color()
+                                        };
+                                        ui.colored_label(color, &row.label);
+                                    });
+                                }
+                                if rows.is_empty() {
+                                    ui.colored_label(
+                                        Theme::TEXT_DIM,
+                                        "No adjustable modifiers on this item",
+                                    );
+                                }
+                            });
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+            if let Some(position) = toggle_mutate {
+                match crafting::mutate_mod(bridge.lua(), item_id, position) {
+                    Ok(()) => {
+                        changed = true;
+                        self.mod_ranges_cache = None;
+                    }
+                    Err(e) => log::error!("Failed to mutate mod: {e}"),
+                }
+            }
+            if let Some((position, range)) = apply_range {
+                match crafting::set_mod_range(bridge.lua(), item_id, position, range) {
+                    Ok(()) => {
+                        changed = true;
+                        self.mod_ranges_cache = None;
+                    }
+                    Err(e) => log::error!("Failed to set mod range: {e}"),
+                }
+            }
+            if close {
+                self.craft_ui.ranges_item = None;
+                self.mod_ranges_cache = None;
+            }
+        }
+
         changed
     }
 
@@ -2610,6 +2859,14 @@ impl ItemsPanel {
                         self.craft_ui.implicit_group_idx = 0;
                         self.craft_ui.implicit_tier_idx = 0;
                         self.craft_ui.implicit_custom.clear();
+                        ui.close_menu();
+                    }
+                    // Roll sliders + Foulborn mutate toggles (upstream's
+                    // Modifier Range section, uniques/relics)
+                    if (entry.rarity == "UNIQUE" || entry.rarity == "RELIC")
+                        && ui.button("Modifier ranges...").clicked()
+                    {
+                        self.craft_ui.ranges_item = Some(entry.id);
                         ui.close_menu();
                     }
                     // Upstream shows "Add modifier..." for magic/rare items

@@ -762,6 +762,263 @@ pub fn corrupt_item(
     .call((item_id, first, second))
 }
 
+/// One scalable explicit line eligible for a Vaal-orb roll range (upstream's
+/// "Roll Ranges" corrupt mode; uniques and relics only).
+#[derive(Debug, Clone)]
+pub struct RollRangeMod {
+    /// 1-based index into the item's explicitModLines.
+    pub index: usize,
+    /// Current corruptedRange multiplier (1.0 = unmodified).
+    pub current: f64,
+    /// The line rendered at `current`.
+    pub label: String,
+}
+
+/// Explicit mods that can take a corruptedRange, mirroring upstream
+/// CorruptDisplayItem's slider gate: scalable lines on the selected variant
+/// (or variant-less), for UNIQUE/RELIC items.
+pub fn corrupt_roll_ranges(lua: &Lua, item_id: i64) -> Result<Vec<RollRangeMod>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(
+            r#"
+        local itemId = ...
+        local main = mainObject_ref.main
+        local item = main.modes['BUILD'].itemsTab.items[itemId]
+        local out = {}
+        if not item or (item.rarity ~= "UNIQUE" and item.rarity ~= "RELIC") then
+            return out
+        end
+        for i, mod in ipairs(item.explicitModLines) do
+            local variantIds = {}
+            for id, _ in pairs(mod.variantList or {}) do
+                table.insert(variantIds, id)
+            end
+            local selectedVariant
+            for _, variantId in ipairs(variantIds) do
+                if item.variant == variantId or item.variantAlt == variantId
+                   or item.variantAlt2 == variantId or item.variantAlt3 == variantId
+                   or item.variantAlt4 == variantId or item.variantAlt5 == variantId then
+                    selectedVariant = true
+                end
+            end
+            local modRange = mod.range or main.defaultItemAffixQuality
+            if itemLib.isModLineScalable(mod.line, modRange, mod.valueScalar)
+               and (#variantIds == 0 or selectedVariant) then
+                local current = mod.corruptedRange or 1
+                table.insert(out, {
+                    index = i,
+                    current = current,
+                    label = itemLib.applyRange(mod.line, modRange, mod.valueScalar or 1, current),
+                })
+            end
+        end
+        return out
+    "#,
+        )
+        .call(item_id)?;
+    let mut mods = Vec::new();
+    for entry in list.sequence_values::<LuaTable>() {
+        let entry = entry?;
+        mods.push(RollRangeMod {
+            index: entry.get("index").unwrap_or(0),
+            current: entry.get("current").unwrap_or(1.0),
+            label: entry.get("label").unwrap_or_default(),
+        });
+    }
+    Ok(mods)
+}
+
+/// Render an explicit line at a given corruptedRange multiplier (the live
+/// preview next to the roll-range slider), via upstream itemLib.applyRange.
+pub fn preview_roll_range(
+    lua: &Lua,
+    item_id: i64,
+    index: usize,
+    value: f64,
+) -> Result<String, mlua::Error> {
+    lua.load(
+        r#"
+        local itemId, index, value = ...
+        local main = mainObject_ref.main
+        local item = main.modes['BUILD'].itemsTab.items[itemId]
+        local mod = item and item.explicitModLines[index]
+        if not mod then
+            return ""
+        end
+        return itemLib.applyRange(mod.line, mod.range or main.defaultItemAffixQuality,
+            mod.valueScalar or 1, value)
+    "#,
+    )
+    .call((item_id, index, value))
+}
+
+/// Corrupt an item in "Roll Ranges" mode (Volatile Vaal Orb): implicits are
+/// left alone; each explicit gets its corruptedRange set (nil when 1.0),
+/// mirroring upstream corruptItem's non-implicit branch. `indices` and
+/// `values` are parallel.
+pub fn corrupt_item_rolls(
+    lua: &Lua,
+    item_id: i64,
+    indices: &[usize],
+    values: &[f64],
+) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local itemId, indices, values = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if not item then
+            return
+        end
+        local newItem = new("Item", item:BuildRaw())
+        newItem.id = item.id
+        newItem.corrupted = true
+        for k, i in ipairs(indices) do
+            local modLine = newItem.explicitModLines[i]
+            local corruptedRange = values[k]
+            if modLine and corruptedRange then
+                modLine.corruptedRange = corruptedRange ~= 1 and corruptedRange or nil
+            end
+        end
+        newItem:BuildAndParseRaw()
+        itemsTab:AddItem(newItem, true)
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call((item_id, indices.to_vec(), values.to_vec()))
+}
+
+/// One row of an item's modifier-range list (upstream rangeLineList):
+/// scalable lines get a roll slider, Foulborn-mappable lines get a mutate
+/// toggle.
+#[derive(Debug, Clone)]
+pub struct ModRangeLine {
+    /// 1-based index into the item's rangeLineList.
+    pub position: usize,
+    /// The line rendered at its current roll.
+    pub label: String,
+    /// Roll position within the mod's range (0..1).
+    pub range: f64,
+    /// True when the line is scalable (upstream showSlider).
+    pub has_slider: bool,
+    /// True when the line can be swapped with its Foulborn counterpart
+    /// (upstream modId + newModId, derived from data.foulbornMap).
+    pub can_mutate: bool,
+    /// True when the line currently is the mutated (Foulborn) version.
+    pub mutated: bool,
+}
+
+/// The item's modifier-range rows (upstream's Modifier Range section).
+pub fn mod_range_lines(lua: &Lua, item_id: i64) -> Result<Vec<ModRangeLine>, mlua::Error> {
+    let list: LuaTable = lua
+        .load(
+            r#"
+        local itemId = ...
+        local main = mainObject_ref.main
+        local item = main.modes['BUILD'].itemsTab.items[itemId]
+        local out = {}
+        if not item or not item.rangeLineList then
+            return out
+        end
+        for i, line in ipairs(item.rangeLineList) do
+            table.insert(out, {
+                position = i,
+                label = itemLib.applyRange(line.line,
+                    line.range or main.defaultItemAffixQuality,
+                    line.valueScalar or 1, line.corruptedRange or 1),
+                range = line.range or main.defaultItemAffixQuality or 0.5,
+                hasSlider = line.showSlider and true or false,
+                canMutate = (line.modId and line.newModId) and true or false,
+                mutated = line.mutated and true or false,
+            })
+        end
+        return out
+    "#,
+        )
+        .call(item_id)?;
+    let mut rows = Vec::new();
+    for entry in list.sequence_values::<LuaTable>() {
+        let entry = entry?;
+        rows.push(ModRangeLine {
+            position: entry.get("position").unwrap_or(0),
+            label: entry.get("label").unwrap_or_default(),
+            range: entry.get("range").unwrap_or(0.5),
+            has_slider: entry.get("hasSlider").unwrap_or(false),
+            can_mutate: entry.get("canMutate").unwrap_or(false),
+            mutated: entry.get("mutated").unwrap_or(false),
+        });
+    }
+    Ok(rows)
+}
+
+/// Set a range line's roll position (upstream's Modifier Range slider):
+/// clones the item, updates the line's range, and re-parses.
+pub fn set_mod_range(
+    lua: &Lua,
+    item_id: i64,
+    position: usize,
+    range: f64,
+) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local itemId, position, range = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if not item then
+            return
+        end
+        local newItem = new("Item", item:BuildRaw())
+        newItem.id = item.id
+        local line = newItem.rangeLineList and newItem.rangeLineList[position]
+        if not line then
+            return
+        end
+        line.range = range
+        newItem:BuildAndParseRaw()
+        itemsTab:AddItem(newItem, true)
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call((item_id, position, range))
+}
+
+/// Toggle a line's Foulborn mutation via upstream Item:MutateMod (swaps the
+/// line with its data.foulbornMap counterpart in either direction).
+pub fn mutate_mod(lua: &Lua, item_id: i64, position: usize) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local itemId, position = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local item = itemsTab.items[itemId]
+        if not item then
+            return
+        end
+        local newItem = new("Item", item:BuildRaw())
+        newItem.id = item.id
+        local line = newItem.rangeLineList and newItem.rangeLineList[position]
+        if not line or not line.modId or not line.newModId then
+            return
+        end
+        newItem:MutateMod(line.modId, line.newModId, not line.mutated)
+        itemsTab:AddItem(newItem, true)
+        itemsTab:PopulateSlots()
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call((item_id, position))
+}
+
 /// Lua snippet defining `buildImplicitLists(build, item, sourceId)`, a port
 /// of upstream's AddImplicitToDisplayItem buildMods: returns (modGroups,
 /// modList) with the same deterministic ordering.

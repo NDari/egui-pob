@@ -56,6 +56,8 @@ enum SkillAction {
     SetEnabled(usize, bool),
     SetLabel(usize, String),
     SetSlot(usize, Option<String>),
+    /// Set or clear the group's imbued support (3.29 mechanic).
+    SetImbuedSupport(usize, Option<String>),
     SetFullDps(usize, bool),
     SetGroupCount(usize, i64),
     SetGem(usize, usize, GemProperty),
@@ -105,6 +107,8 @@ pub struct SkillsPanel {
     /// Cached gem tooltips keyed by (group index, gem index); cleared on
     /// every change since content depends on level/quality/build state.
     gem_tooltip_cache: HashMap<(usize, usize), Vec<TooltipLine>>,
+    /// Cached imbued-support choices for one group's dropdown.
+    imbued_options: Option<(usize, Vec<GemChoice>)>,
     /// Gem under the cursor this frame (group index, gem index), for F1.
     hovered_gem: Option<(usize, usize)>,
 }
@@ -146,6 +150,7 @@ impl SkillsPanel {
                     options: options.clone(),
                     show_options: false,
                     gem_tooltip_cache: HashMap::new(),
+                    imbued_options: None,
                     hovered_gem: None,
                 }
             }
@@ -168,6 +173,7 @@ impl SkillsPanel {
                     options: options.clone(),
                     show_options: false,
                     gem_tooltip_cache: HashMap::new(),
+                    imbued_options: None,
                     hovered_gem: None,
                 }
             }
@@ -378,6 +384,19 @@ impl SkillsPanel {
         }
         ui.separator();
 
+        // One imbued support per item slot (upstream isImbuedEnabled): map
+        // slot -> owning group index so other groups' dropdowns disable
+        let imbued_slots: HashMap<String, usize> = self
+            .groups
+            .iter()
+            .filter_map(|g| {
+                g.imbued_support
+                    .as_ref()
+                    .and(g.slot.clone())
+                    .map(|slot| (slot, g.index))
+            })
+            .collect();
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             for group in &mut self.groups {
                 let add_text = self.add_gem_text.entry(group.index).or_default();
@@ -413,6 +432,8 @@ impl SkillsPanel {
                             &mut self.suggest,
                             &mut self.gem_tooltip_cache,
                             &mut self.hovered_gem,
+                            &imbued_slots,
+                            &mut self.imbued_options,
                         )
                     })
                     .inner;
@@ -487,6 +508,7 @@ impl SkillsPanel {
             self.label_edits.clear();
             self.add_gem_text.clear();
             self.gem_tooltip_cache.clear();
+            self.imbued_options = None;
         }
         changed
     }
@@ -618,6 +640,16 @@ impl SkillsPanel {
                 SkillAction::SetSlot(index, ref slot) => {
                     skills::set_group_slot(lua, index, slot.as_deref())
                 }
+                SkillAction::SetImbuedSupport(index, ref name) => {
+                    match skills::set_imbued_support(lua, index, name.as_deref()) {
+                        Ok(Some(err)) => {
+                            log::error!("Imbued support: {err}");
+                            Ok(())
+                        }
+                        Ok(None) => Ok(()),
+                        Err(e) => Err(e),
+                    }
+                }
                 SkillAction::SetFullDps(index, include) => {
                     skills::set_group_full_dps(lua, index, include)
                 }
@@ -693,6 +725,8 @@ fn show_socket_group(
     suggest: &mut GemSuggest,
     gem_tooltip_cache: &mut HashMap<(usize, usize), Vec<TooltipLine>>,
     hovered_gem: &mut Option<(usize, usize)>,
+    imbued_slots: &HashMap<String, usize>,
+    imbued_options: &mut Option<(usize, Vec<GemChoice>)>,
 ) -> egui::Response {
     let title = socket_group_title(group);
     let (title, title_color) = if group.is_main {
@@ -819,6 +853,72 @@ fn show_socket_group(
                     "The item this skill is socketed in; the skill benefits from that \
                      item's socketed-gem modifiers",
                 );
+
+                // Imbued support (3.29): one extra level-1 support per item
+                // slot, from non-exceptional supports for this group's skills
+                if group.slot.is_some() && !group.from_item {
+                    if let Some(name) = &group.imbued_support {
+                        ui.label(
+                            egui::RichText::new(format!("Imbued: {name} (lvl 1)"))
+                                .color(super::theme::Theme::GEM_SUPPORT),
+                        );
+                        if ui
+                            .small_button("✕")
+                            .on_hover_text("Remove the imbued support")
+                            .clicked()
+                        {
+                            actions.push(SkillAction::SetImbuedSupport(group.index, None));
+                        }
+                    } else {
+                        let slot = group.slot.as_deref().unwrap_or("");
+                        let taken = imbued_slots
+                            .get(slot)
+                            .is_some_and(|&owner| owner != group.index);
+                        ui.add_enabled_ui(!taken, |ui| {
+                            egui::ComboBox::from_id_salt(format!("imbued_{}", group.index))
+                                .selected_text("Imbued: None")
+                                .width(150.0)
+                                .show_ui(ui, |ui| {
+                                    if imbued_options
+                                        .as_ref()
+                                        .is_none_or(|(g, _)| *g != group.index)
+                                    {
+                                        let opts = gems::search_gems(
+                                            bridge.lua(),
+                                            group.index,
+                                            "",
+                                            false,
+                                            500,
+                                            true,
+                                        )
+                                        .unwrap_or_else(|e| {
+                                            log::error!("Imbued gem search failed: {e}");
+                                            Vec::new()
+                                        });
+                                        *imbued_options = Some((group.index, opts));
+                                    }
+                                    if let Some((_, opts)) = imbued_options {
+                                        for choice in opts.iter() {
+                                            if ui.selectable_label(false, &choice.name).clicked() {
+                                                actions.push(SkillAction::SetImbuedSupport(
+                                                    group.index,
+                                                    Some(choice.name.clone()),
+                                                ));
+                                            }
+                                        }
+                                        if opts.is_empty() {
+                                            ui.weak("(no eligible supports)");
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Imbued support: adds one level-1 support to skills in \
+                                     this item slot (one imbued per slot)",
+                                );
+                        });
+                    }
+                }
 
                 let mut full_dps = group.include_in_full_dps;
                 if ui.checkbox(&mut full_dps, "Full DPS").changed() {
@@ -1030,6 +1130,7 @@ fn show_socket_group(
                         add_text.trim(),
                         suggest.sort_by_dps,
                         12,
+                        false,
                     )
                     .unwrap_or_else(|e| {
                         log::error!("Gem search failed: {e}");

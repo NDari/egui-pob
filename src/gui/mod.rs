@@ -3,6 +3,7 @@
 mod build_list;
 mod build_view;
 mod calcs_tab;
+mod compare_tab;
 mod config_tab;
 mod import_tab;
 mod items_tab;

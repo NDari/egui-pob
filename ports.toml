@@ -173,6 +173,92 @@ sha256 = "409470b168bda11a7181ba3b0cbe475f176819fa806d486a28447bf62fefc95c"
 status = "faithful"
 
 [[port]]
+name = "compare-stat-list"
+ours = "src/data/compare_helper.lua::pob_compare.statRows"
+upstream = "src/Classes/CompareTab.lua"
+anchor = "function CompareTabClass:DrawStatList"
+sha256 = "7b510261ce137658c8cd834ff386ec1a2ae51361a7512c5a5a2dd021efbd113e"
+status = "faithful"
+notes = "Emits rows instead of DrawString calls; filtering/format/diff logic unchanged."
+
+[[port]]
+name = "compare-match-flags"
+ours = "src/data/compare_helper.lua::matchFlags"
+upstream = "src/Classes/CompareTab.lua"
+anchor = "local function matchFlags"
+sha256 = "53544e92005c7c8644f55beb92124681c6d8b1f24f6534870a51e48b56972b28"
+status = "faithful"
+
+[[port]]
+name = "compare-summary-actors"
+ours = "src/data/compare_helper.lua::pob_compare.statRows"
+upstream = "src/Classes/CompareTab.lua"
+anchor = "function CompareTabClass:DrawSummary"
+sha256 = "3686991e0c522e9f2fc3dff1fca242480e22e3c6d2a70a0f6f228ef5f545a768"
+status = "faithful"
+notes = "Only the actor/output/minion selection at the top of DrawSummary is ported; the rest is drawing."
+
+[[port]]
+name = "compare-skills-pairing"
+ours = "src/data/compare_helper.lua::pob_compare.skillRows"
+upstream = "src/Classes/CompareTab.lua"
+anchor = "function CompareTabClass:DrawSkills"
+sha256 = "dd24303e4f388a3844591900155c0c16d4adc6b0798dd89b796b01207f06703a"
+status = "faithful"
+notes = "getImbuedGem/getGemNameSet/similarity pairing/buildAlignedGemLists ported; adds a deterministic (pIdx,cIdx) tiebreak where upstream's sort is unstable. Drawing not ported."
+
+[[port]]
+name = "compare-items-slots"
+ours = "src/data/compare_helper.lua::pob_compare.itemRows"
+upstream = "src/Classes/CompareTab.lua"
+anchor = "function CompareTabClass:DrawItems"
+sha256 = "eff7d5d3831fae4560b2c0ea512c736c4ebbf7b7bff9bb2aebb27870dbb0ae5d"
+status = "faithful"
+notes = "Slot-list construction (base slots + Ring 3 + abyss sockets) ported; diff labels via called tradeHelpers.getSlotDiffLabel."
+
+[[port]]
+name = "compare-config-rows"
+ours = "src/data/compare_helper.lua::pob_compare.configRows"
+upstream = "src/Classes/CompareTab.lua"
+anchor = "function CompareTabClass:LayoutConfigView"
+sha256 = "b7f59b39935182b6c0b31d3a7901dc17a8feac7c1baa75d480dfdffd55c20864"
+status = "faithful"
+notes = "Section grouping + diff/common split ported (search filter and live controls are ours); normalize/format via called CompareTab methods."
+
+[[port]]
+name = "compare-config-sections"
+ours = "src/data/compare_helper.lua::pob_compare.configRows"
+upstream = "src/Classes/CompareTab.lua"
+anchor = "function CompareTabClass:RebuildConfigControls"
+sha256 = "316b617066f141c6d70ff9b14dca7d492bdc23e8440b16f540f575792402f412"
+status = "faithful"
+
+[[port]]
+name = "compare-calcs-row-match"
+ours = "src/data/calcs_helper.lua::pob_compare_calc_sections"
+upstream = "src/Classes/CompareTab.lua"
+anchor = "local function calcRowMatchesBetweenBuilds"
+sha256 = "e6bd1cee9e5ac76e18a8c2e42ed185b6b43109e30dd4a1d38bfb051d06be5792"
+status = "faithful"
+
+[[port]]
+name = "compare-calcs-subsection-match"
+ours = "src/data/calcs_helper.lua::pob_compare_calc_sections"
+upstream = "src/Classes/CompareTab.lua"
+anchor = "local function subSectionExtraMatches"
+sha256 = "dc06d4190b1b3c83b02cfdd89f76e98cdc1be5faac3e1bd5c9d1ea1844f4f6db"
+status = "faithful"
+
+[[port]]
+name = "compare-calcs-filter"
+ours = "src/data/calcs_helper.lua::pob_compare_calc_sections"
+upstream = "src/Classes/CompareTab.lua"
+anchor = "function CompareTabClass:DrawCalcs"
+sha256 = "271ada846956e581df14b3a45a779376a5276003a47cb97b766002b633828c35"
+status = "faithful"
+notes = "Only the section/subsection/row filter block is ported (with two-sided cells); iterates our sectionList rather than the raw CalcSections module, drawing not ported."
+
+[[port]]
 name = "catalyst-list"
 ours = "src/data/crafting.rs::CATALYSTS"
 upstream = "src/Classes/Item.lua"

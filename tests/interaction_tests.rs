@@ -1238,13 +1238,13 @@ fn test_gem_search() {
     let lua = bridge.lua();
 
     // Exact name match ranks first
-    let results = gems::search_gems(lua, 1, "Fireball", false, 12).expect("search failed");
+    let results = gems::search_gems(lua, 1, "Fireball", false, 12, false).expect("search failed");
     assert!(!results.is_empty(), "Fireball should match");
     assert_eq!(results[0].name, "Fireball");
     assert!(!results[0].is_support);
 
     // Abbreviation matching ("CtF" -> "Cold to Fire")
-    let results = gems::search_gems(lua, 1, "CtF", false, 12).expect("search failed");
+    let results = gems::search_gems(lua, 1, "CtF", false, 12, false).expect("search failed");
     assert!(
         results.iter().any(|g| g.name == "Cold to Fire"),
         "CtF should match Cold to Fire: {:?}",
@@ -1252,7 +1252,7 @@ fn test_gem_search() {
     );
 
     // Tag search: ":aura" returns only gems with the aura tag
-    let results = gems::search_gems(lua, 1, ":aura", false, 50).expect("search failed");
+    let results = gems::search_gems(lua, 1, ":aura", false, 50, false).expect("search failed");
     assert!(!results.is_empty(), "aura tag should match gems");
     assert!(
         results.iter().any(|g| g.name == "Anger"),
@@ -1260,7 +1260,8 @@ fn test_gem_search() {
     );
 
     // Tag exclusion: ":aura:-fire" excludes Anger
-    let results = gems::search_gems(lua, 1, ":aura:-fire", false, 50).expect("search failed");
+    let results =
+        gems::search_gems(lua, 1, ":aura:-fire", false, 50, false).expect("search failed");
     assert!(!results.is_empty());
     assert!(
         !results.iter().any(|g| g.name == "Anger"),
@@ -1269,7 +1270,7 @@ fn test_gem_search() {
 
     // Support-compatibility marks: search supports for the main socket group
     // (test build's group 1 has an active skill)
-    let results = gems::search_gems(lua, 1, "Support", false, 50).expect("search failed");
+    let results = gems::search_gems(lua, 1, "Support", false, 50, false).expect("search failed");
     let supports: Vec<_> = results.iter().filter(|g| g.is_support).collect();
     assert!(!supports.is_empty(), "should find support gems");
     assert!(
@@ -1278,7 +1279,7 @@ fn test_gem_search() {
     );
 
     // DPS sorting produces DPS values and colors
-    let results = gems::search_gems(lua, 1, "Support", true, 20).expect("dps search failed");
+    let results = gems::search_gems(lua, 1, "Support", true, 20, false).expect("dps search failed");
     assert!(
         results
             .iter()
@@ -3146,6 +3147,572 @@ fn test_corrupt_and_implicits() {
         raw3.contains("+13 to maximum Life"),
         "custom implicit: {raw3}"
     );
+}
+
+#[test]
+fn test_imbued_supports() {
+    use pob_egui::data::{gems, skills};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // The main group is socketed; imbued applies per item slot
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    let group = groups
+        .iter()
+        .find(|g| g.is_main && g.slot.is_some() && !g.from_item)
+        .expect("a socketed main group");
+    assert!(group.imbued_support.is_none(), "starts without imbued");
+    let slot = group.slot.clone().unwrap();
+
+    // Imbued search mode: supports only, exceptional supports excluded
+    let options = gems::search_gems(lua, group.index, "", false, 500, true).expect("search failed");
+    assert!(!options.is_empty(), "imbued choices exist");
+    assert!(
+        options.iter().all(|c| c.is_support),
+        "imbued list contains only supports"
+    );
+    assert!(
+        !options.iter().any(|c| c.name.contains("Enlighten")
+            || c.name.contains("Empower")
+            || c.name.contains("Enhance")),
+        "exceptional supports are excluded"
+    );
+
+    // Setting one lands on the group, fills the runtime slot map, and the
+    // calc engine adds it to the main skill's support list
+    let pick = options[0].name.clone();
+    let err = skills::set_imbued_support(lua, group.index, Some(&pick)).expect("set failed");
+    assert!(err.is_none(), "set imbued failed: {err:?}");
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    let group_after = groups.iter().find(|g| g.index == group.index).unwrap();
+    assert_eq!(
+        group_after.imbued_support.as_deref(),
+        Some(pick.as_str()),
+        "imbued support stored on the group"
+    );
+    let slot_mapped: bool = lua
+        .load("local slot = ... return mainObject_ref.main.modes['BUILD'].skillsTab.imbuedSupportBySlot[slot] ~= nil")
+        .call(slot.as_str())
+        .expect("map check failed");
+    assert!(slot_mapped, "imbuedSupportBySlot populated for {slot}");
+    let support_names: String = lua
+        .load(
+            r#"
+        local names = {}
+        local skill = mainObject_ref.main.modes['BUILD'].calcsTab.mainEnv.player.mainSkill
+        for _, effect in ipairs(skill.supportList or {}) do
+            table.insert(names, effect.grantedEffect and effect.grantedEffect.name or "?")
+        end
+        return table.concat(names, "\n")
+    "#,
+        )
+        .eval()
+        .expect("support list failed");
+    assert!(
+        support_names.contains(&pick),
+        "calc picks up the imbued support '{pick}': {support_names}"
+    );
+
+    // Persists as the imbuedSupport attribute via upstream save
+    let tmp_dir = std::env::temp_dir().join(format!("egui-pob-imbued-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let mut build_path = tmp_dir.to_string_lossy().to_string();
+    build_path.push('/');
+    lua.load("mainObject_ref.main.buildPath = ...")
+        .call::<()>(build_path.as_str())
+        .expect("failed to redirect buildPath");
+    bridge
+        .save_build_as("Imbued Test", "")
+        .expect("save failed");
+    let xml = std::fs::read_to_string(tmp_dir.join("Imbued Test.xml")).expect("read failed");
+    assert!(
+        xml.contains("imbuedSupport="),
+        "imbuedSupport attribute persists"
+    );
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    // Clearing removes it again
+    skills::set_imbued_support(lua, group.index, None).expect("clear failed");
+    let groups = skills::extract_skills(lua).expect("skills failed");
+    assert!(
+        groups
+            .iter()
+            .find(|g| g.index == group.index)
+            .unwrap()
+            .imbued_support
+            .is_none(),
+        "imbued support cleared"
+    );
+}
+
+#[test]
+fn test_export_support_toggle_persists() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // The same mutation the Export Support checkbox performs
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        if build.partyTab then
+            build.partyTab.enableExportBuffs = true
+        end
+        local ctrl = build.importTab and build.importTab.controls
+            and build.importTab.controls.enablePartyExportBuffs
+        if ctrl then
+            ctrl.state = true
+        end
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .exec()
+    .expect("toggle failed");
+
+    // Upstream's ImportTab saver persists it as exportParty="true"
+    let tmp_dir =
+        std::env::temp_dir().join(format!("egui-pob-export-support-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let mut build_path = tmp_dir.to_string_lossy().to_string();
+    build_path.push('/');
+    lua.load("mainObject_ref.main.buildPath = ...")
+        .call::<()>(build_path.as_str())
+        .expect("failed to redirect buildPath");
+    bridge
+        .save_build_as("Export Support Test", "")
+        .expect("save failed");
+    let xml =
+        std::fs::read_to_string(tmp_dir.join("Export Support Test.xml")).expect("read failed");
+    assert!(
+        xml.contains("exportParty=\"true\""),
+        "exportParty persists in the build XML"
+    );
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_compare_tab() {
+    use pob_egui::data::compare;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Import the same build as a comparison entry (upstream CompareEntry:
+    // a full second calc environment in the same VM)
+    let xml_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("test_builds")
+        .join("3.28-migrage")
+        .join("reliqlone.xml");
+    let xml = std::fs::read_to_string(&xml_path).expect("read test build");
+    let ok = compare::import_build(lua, &xml, "Mirror").expect("import failed");
+    assert!(ok, "compare import succeeds");
+    let (entries, active) = compare::list_entries(lua).expect("list failed");
+    assert_eq!(entries, ["Mirror"], "one entry with its label");
+    assert_eq!(active, 1, "imported entry becomes active");
+
+    // Identical builds: real stat rows, no differences
+    let rows = compare::stat_rows(lua, 1).expect("rows failed");
+    let stat_rows: Vec<_> = rows.iter().filter(|r| !r.spacer).collect();
+    assert!(
+        stat_rows.len() > 10,
+        "summary has stat rows, got {}",
+        stat_rows.len()
+    );
+    assert!(
+        stat_rows.iter().all(|r| r.better == 0 && r.diff.is_empty()),
+        "identical builds show no diffs: {:?}",
+        stat_rows
+            .iter()
+            .find(|r| r.better != 0)
+            .map(|r| (&r.label, &r.diff))
+    );
+    assert!(
+        stat_rows.iter().any(|r| r.label.contains("Life")),
+        "well-known stats present"
+    );
+
+    // Lower the primary's character level: Life drops, so diffs appear and
+    // the compare side reads as better on Life
+    lua.load(
+        r#"
+        local build = mainObject_ref.main.modes['BUILD']
+        build.characterLevel = build.characterLevel - 20
+        build.configTab:BuildModList()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .exec()
+    .expect("level change failed");
+    let rows = compare::stat_rows(lua, 1).expect("rows failed");
+    assert!(
+        rows.iter().any(|r| r.better != 0),
+        "level change on the primary produces diffs"
+    );
+
+    // Tree diff of a mirror build is empty (level change doesn't touch it)
+    let diff = compare::tree_diff(lua, 1).expect("tree diff failed");
+    assert!(
+        diff.added.is_empty() && diff.removed.is_empty() && diff.mastery.is_empty(),
+        "identical trees show no node diff: +{:?} -{:?}",
+        diff.added,
+        diff.removed
+    );
+
+    // Item rows: slot union with match statuses for a mirror build
+    let items = compare::item_rows(lua, 1).expect("item rows failed");
+    assert!(items.len() > 10, "item rows exist, got {}", items.len());
+    assert!(
+        items
+            .iter()
+            .all(|r| r.status == "(match)" || r.status == "(both empty)"),
+        "mirror build items all match: {:?}",
+        items
+            .iter()
+            .find(|r| r.status != "(match)" && r.status != "(both empty)")
+            .map(|r| (&r.slot, &r.status))
+    );
+
+    // Skills: groups pair up, every gem is common
+    let skills = compare::skill_rows(lua, 1).expect("skill rows failed");
+    assert!(!skills.is_empty(), "skill rows exist");
+    assert!(
+        skills.iter().all(|row| row
+            .primary_gems
+            .iter()
+            .chain(&row.compare_gems)
+            .all(|g| g.status == "common")),
+        "mirror build gems are all common"
+    );
+
+    // Config: sections exist, no diffs on a mirror build
+    let config = compare::config_rows(lua, 1).expect("config rows failed");
+    assert!(
+        config.iter().all(|s| s.diffs.is_empty()),
+        "mirror build config has no diffs: {:?}",
+        config
+            .iter()
+            .find(|s| !s.diffs.is_empty())
+            .map(|s| (&s.name, &s.diffs[0].label))
+    );
+
+    // Copy-to-primary actions: item copy adds an item, spec copy adds a spec
+    let item_count_before: usize = lua
+        .load("local n = 0 for _ in pairs(mainObject_ref.main.modes['BUILD'].itemsTab.items) do n = n + 1 end return n")
+        .eval()
+        .expect("count failed");
+    let copy_row = items
+        .iter()
+        .find(|r| r.can_copy && !r.is_jewel)
+        .expect("a copyable item row");
+    compare::copy_item(
+        lua,
+        1,
+        copy_row.copy_slot.as_deref().unwrap_or(&copy_row.slot),
+        false,
+    )
+    .expect("copy item failed");
+    let item_count_after: usize = lua
+        .load("local n = 0 for _ in pairs(mainObject_ref.main.modes['BUILD'].itemsTab.items) do n = n + 1 end return n")
+        .eval()
+        .expect("count failed");
+    assert_eq!(item_count_after, item_count_before + 1, "item copied over");
+    let specs_before: usize = lua
+        .load("return #mainObject_ref.main.modes['BUILD'].treeTab.specList")
+        .eval()
+        .expect("spec count failed");
+    compare::copy_spec(lua, false).expect("copy spec failed");
+    let specs_after: usize = lua
+        .load("return #mainObject_ref.main.modes['BUILD'].treeTab.specList")
+        .eval()
+        .expect("spec count failed");
+    assert_eq!(specs_after, specs_before + 1, "spec copied over");
+    let copied_title: String = lua
+        .load("local l = mainObject_ref.main.modes['BUILD'].treeTab.specList return l[#l].title or ''")
+        .eval()
+        .expect("title failed");
+    assert!(
+        copied_title.contains("(Compared)"),
+        "copied spec is titled: {copied_title}"
+    );
+    compare::copy_config(lua).expect("copy config failed");
+
+    // Power report: driving completes; a mirror build yields no impact rows
+    let ehp_index: usize = pob_egui::data::node_power::list_power_stats(lua)
+        .expect("stats failed")
+        .into_iter()
+        .find(|s| s.label.contains("Effective Hit Pool"))
+        .expect("EHP stat")
+        .index;
+    compare::power_set_stat(lua, ehp_index, [true; 5]).expect("set stat failed");
+    let mut steps = 0;
+    loop {
+        let (done, _progress) = compare::power_step(lua, 1).expect("power step failed");
+        if done {
+            break;
+        }
+        steps += 1;
+        assert!(steps < 10_000, "power report did not terminate");
+    }
+    let results = compare::power_results(lua).expect("results failed");
+    assert!(
+        results.iter().all(|r| r.impact != 0.0),
+        "zero-impact rows are excluded"
+    );
+
+    // Calcs comparison: the level change makes Life-related rows differ, so
+    // the only-differences filter keeps something; without the filter the
+    // full section set is larger
+    let diff_sections = compare::calc_sections(lua, 1, true).expect("calc sections failed");
+    assert!(
+        !diff_sections.is_empty(),
+        "level change produces calc differences"
+    );
+    let all_sections = compare::calc_sections(lua, 1, false).expect("calc sections failed");
+    let count_rows = |sections: &[pob_egui::data::compare::CalcCompareSection]| -> usize {
+        sections
+            .iter()
+            .flat_map(|s| &s.subsections)
+            .map(|s| s.rows.len())
+            .sum()
+    };
+    assert!(
+        count_rows(&all_sections) > count_rows(&diff_sections),
+        "filter reduces rows: {} vs {}",
+        count_rows(&all_sections),
+        count_rows(&diff_sections)
+    );
+    // Kept rows differ in value, mods, or breakdown; at least some show a
+    // visible value difference (rows kept for mod/breakdown-only diffs may
+    // display identical values, matching upstream)
+    assert!(
+        diff_sections
+            .iter()
+            .flat_map(|s| &s.subsections)
+            .flat_map(|s| &s.rows)
+            .any(|r| r.primary != r.compare),
+        "some kept rows show a visible difference"
+    );
+
+    // Removing the entry empties the list
+    compare::remove_entry(lua, 1).expect("remove failed");
+    let (entries, active) = compare::list_entries(lua).expect("list failed");
+    assert!(entries.is_empty(), "entry removed");
+    assert_eq!(active, 0, "no active entry");
+}
+
+#[test]
+fn test_foulborn_mutate_and_mod_ranges() {
+    use pob_egui::data::{crafting, items};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Add Abyssus (a data.foulbornMap unique) from upstream's uniques data
+    let raw: String = lua
+        .load(
+            r#"
+        for _, raw in ipairs(data.uniques.helmet) do
+            if raw:match("^Abyssus") then
+                return "Rarity: UNIQUE\n" .. raw
+            end
+        end
+        return ""
+    "#,
+        )
+        .eval()
+        .expect("uniques lookup failed");
+    assert!(!raw.is_empty(), "Abyssus exists in data.uniques");
+    let err = items::add_item_from_raw(lua, &raw).expect("add failed");
+    assert!(err.is_none(), "Abyssus should parse: {err:?}");
+    let abyssus_id = items::extract_item_list(lua)
+        .expect("list failed")
+        .iter()
+        .find(|e| e.name.contains("Abyssus"))
+        .map(|e| e.id)
+        .expect("Abyssus in item list");
+
+    // The range list has rows; at least one is Foulborn-mappable and at
+    // least one is scalable
+    let rows = crafting::mod_range_lines(lua, abyssus_id).expect("ranges failed");
+    assert!(!rows.is_empty(), "Abyssus has range lines");
+    let mutable = rows
+        .iter()
+        .find(|r| r.can_mutate)
+        .expect("Abyssus has a foulborn-mappable mod");
+    assert!(!mutable.mutated, "starts unmutated");
+    let scalable = rows
+        .iter()
+        .find(|r| r.has_slider)
+        .expect("Abyssus has a scalable mod");
+
+    // Mutating swaps the line, marks the raw {mutated}, and prefixes the title
+    crafting::mutate_mod(lua, abyssus_id, mutable.position).expect("mutate failed");
+    let raw = items::get_item_raw(lua, abyssus_id).expect("raw failed");
+    assert!(raw.contains("{mutated}"), "mutated flag persists: {raw}");
+    assert!(
+        raw.contains("Foulborn Abyssus"),
+        "title gains the Foulborn prefix: {raw}"
+    );
+    let rows = crafting::mod_range_lines(lua, abyssus_id).expect("ranges failed");
+    let mutated_row = rows
+        .iter()
+        .find(|r| r.mutated)
+        .expect("a mutated row after MutateMod");
+    assert!(mutated_row.can_mutate, "mutated row can be reverted");
+
+    // Toggling again reverts (upstream matches both directions)
+    crafting::mutate_mod(lua, abyssus_id, mutated_row.position).expect("revert failed");
+    let raw = items::get_item_raw(lua, abyssus_id).expect("raw failed");
+    assert!(!raw.contains("{mutated}"), "mutation reverted: {raw}");
+    assert!(!raw.contains("Foulborn"), "title prefix removed: {raw}");
+
+    // The roll slider persists a {range} marker
+    crafting::set_mod_range(lua, abyssus_id, scalable.position, 1.0).expect("range failed");
+    let raw = items::get_item_raw(lua, abyssus_id).expect("raw failed");
+    assert!(raw.contains("{range:1}"), "range roll persists: {raw}");
+}
+
+#[test]
+fn test_volatile_vaal_roll_ranges() {
+    use pob_egui::data::{crafting, items};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Find a unique with scalable explicits (jewels like Forbidden Flesh
+    // have none, so scan rather than take the first)
+    let uniques: Vec<i64> = items::extract_item_list(lua)
+        .expect("list failed")
+        .iter()
+        .filter(|e| e.rarity == "UNIQUE")
+        .map(|e| e.id)
+        .collect();
+    let (unique_id, rolls) = uniques
+        .iter()
+        .find_map(|&id| {
+            let rolls = crafting::corrupt_roll_ranges(lua, id).ok()?;
+            (!rolls.is_empty()).then_some((id, rolls))
+        })
+        .expect("a unique with scalable mods for roll ranges");
+    assert!(
+        rolls.iter().all(|r| (r.current - 1.0).abs() < f64::EPSILON),
+        "uncorrupted mods default to 1.00"
+    );
+
+    // Preview responds to the multiplier
+    let first = &rolls[0];
+    let low = crafting::preview_roll_range(lua, unique_id, first.index, 0.78).expect("preview");
+    let high = crafting::preview_roll_range(lua, unique_id, first.index, 1.22).expect("preview");
+    assert_ne!(low, high, "preview scales with corruptedRange: {low}");
+
+    // Rares are not eligible (upstream gates on UNIQUE/RELIC)
+    let rare_id = crafting::craft_item(lua, "RARE", "Helmet: Armour", 1, "No Rolls")
+        .expect("craft failed")
+        .expect("id");
+    assert!(
+        crafting::corrupt_roll_ranges(lua, rare_id)
+            .expect("rolls failed")
+            .is_empty(),
+        "rares have no roll-range mode"
+    );
+
+    // Applying persists {corruptedRange} on the line and corrupts the item
+    crafting::corrupt_item_rolls(lua, unique_id, &[first.index], &[1.22]).expect("corrupt failed");
+    let raw = items::get_item_raw(lua, unique_id).expect("raw failed");
+    assert!(raw.contains("Corrupted"), "item is corrupted: {raw}");
+    assert!(
+        raw.contains("{corruptedRange:1.22}"),
+        "corruptedRange persists in raw: {raw}"
+    );
+    let rolls = crafting::corrupt_roll_ranges(lua, unique_id).expect("rolls failed");
+    let row = rolls
+        .iter()
+        .find(|r| r.index == first.index)
+        .expect("row survives");
+    assert!(
+        (row.current - 1.22).abs() < 1e-9,
+        "corruptedRange round-trips: {}",
+        row.current
+    );
+}
+
+#[test]
+fn test_spectre_library() {
+    use pob_egui::data::spectres;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Available list: everything in data.spectres, name-sorted like upstream
+    let available = spectres::list_available(lua).expect("list failed");
+    assert!(
+        available.len() > 100,
+        "many spectres exist, got {}",
+        available.len()
+    );
+    assert!(
+        available.windows(2).all(|w| w[0].name <= w[1].name),
+        "available spectres sorted by name"
+    );
+    assert!(
+        available.iter().any(|e| !e.skills.is_empty()),
+        "spectres carry skill names for search"
+    );
+
+    // The test build has no spectres; staging two and committing lands them
+    // on build.spectreList in order
+    assert!(
+        spectres::list_in_build(lua)
+            .expect("list failed")
+            .is_empty(),
+        "test build starts without spectres"
+    );
+    let picks: Vec<String> = available.iter().take(2).map(|e| e.id.clone()).collect();
+    spectres::set_spectre_list(lua, &picks).expect("set failed");
+    let in_build = spectres::list_in_build(lua).expect("list failed");
+    let ids: Vec<String> = in_build.iter().map(|(id, _)| id.clone()).collect();
+    assert_eq!(ids, picks, "committed spectre list round-trips");
+
+    // Tooltip comes from upstream MinionListControl:AddValueTooltip
+    let tooltip = spectres::spectre_tooltip(lua, &picks[0]).expect("tooltip failed");
+    let text: String = tooltip
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("Life Multiplier"),
+        "tooltip has minion stats: {text}"
+    );
+
+    // Persistence: upstream Save writes one <Spectre id=.../> per entry
+    let tmp_dir =
+        std::env::temp_dir().join(format!("egui-pob-spectre-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let mut build_path = tmp_dir.to_string_lossy().to_string();
+    build_path.push('/');
+    lua.load("mainObject_ref.main.buildPath = ...")
+        .call::<()>(build_path.as_str())
+        .expect("failed to redirect buildPath");
+    bridge
+        .save_build_as("Spectre Test", "")
+        .expect("save failed");
+    let xml = std::fs::read_to_string(tmp_dir.join("Spectre Test.xml")).expect("read failed");
+    for id in &picks {
+        assert!(
+            xml.contains(&format!("id=\"{id}\"")),
+            "saved XML contains spectre {id}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
 #[test]
