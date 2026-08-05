@@ -2,7 +2,7 @@
 
 This document tracks every feature needed to reach parity with upstream Path of Building Community. Items are grouped by area rather than priority — ordering and phasing will be decided separately.
 
-**Parity validated against upstream v2.66.1 (PoE 3.29).** Update this stamp on every submodule pin bump (see docs/upstream-upgrade.md).
+**Parity validated against upstream v2.67.0 (PoE 3.29).** Update this stamp on every submodule pin bump (see docs/upstream-upgrade.md).
 
 Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
@@ -575,6 +575,243 @@ not listed.
 - Alternate gem qualities (quality variant dropdowns, Show quality variants toggle) - removed in v2.66
 - ImportTab:ProcessJSON - replaced by direct dkjson decoding
 - Import status messages - import functions no longer report status text
+
+---
+
+## Upstream Delta: v2.66.1 - v2.67.0 (3.29 Allflame, August 2026)
+
+74 upstream commits, ~4k changed lines across 45 files in `src/Classes/` and
+`src/Modules/`. Everything below is new work unless marked otherwise.
+Calc-engine and game-data changes (3.29 uniques, Pacts calcs, tree 3.29.1,
+skill fixes) come free through the Lua VM and are collected at the end.
+
+### Abyss Timeless Jewels (largest new feature)
+
+Upstream added five timeless jewel types that work fundamentally differently
+from Legion jewels: they conquer **allocated** nodes rather than nodes in a
+radius, driven by a new lookup-table pipeline.
+
+- [ ] Five new jewel types in the Find Timeless Jewel dialog (ids 7-11):
+  Festering Vengeance (`abyss_murderous`), Extinguishing Grasp
+  (`abyss_searching`), Baleful Dominion (`abyss_hypnotic`), Destructive
+  Aspiration (`abyss_ghastly`), Reclaimed Malevolence (`abyss_special`)
+- [ ] Their conqueror variants: Tecrod, Ulaman, Kurgal, Amanamu, Zorath
+- [ ] New LUT pipeline: `Modules/DataAbyssJewelLookUpTableHelper` exports
+  `readAbyssJewelLUT` / `resolveAbyssJewelComponent` /
+  `getAbyssJewelComponentRoll`; `Modules/DataJewelFileLoader` and
+  `Data/TimelessJewelData/AbyssNotableNames` are new. Our timeless search
+  reads `readLUT` directly, so the abyss path needs separate wiring
+- [ ] Allocated-node conquest model in `PassiveSpec:BuildAllDependsAndPaths`:
+  abyss conquests are read *before* the node reset, and radius-based
+  `conqueredBy` is suppressed for jewel types >= 7
+- [ ] Zorath (type 11) needs `GetShortestPathToClassStart(socketId)` fed into
+  the LUT read
+- [ ] Zorath ascendancy-notable dropdown in the search dialog (built from
+  `abyss_special_ascendancy_notable_*` nodes, alphabetical, with "Any");
+  those nodes are excluded from the normal notable list
+- [ ] "Protect allocated nodes" now applies to Zorath as well as Eternal
+- [ ] Item text generation for all five new jewel types
+  (`TimelessJewelListControl`, one template per type)
+- [ ] Abyss tree art: connectors between two abyss-conquered nodes use
+  `Abyss`-prefixed atlas assets with bounds-mapped UV quads; abyss
+  notables/keystones/ascendancy notables get `Abyss*Frame*` overlays; abyss
+  jewels draw no radius ring
+- [ ] `PassiveSpec` root check relaxed (no longer requires `connectedToStart`)
+
+### Config Tab (custom modifiers reworked, stat previews added)
+
+- [ ] Custom modifier **groups** replace the single custom-mods text box: each
+  group has a title, enable checkbox, resizable mod text, and delete button,
+  with an "Add Mod Group" button. Mods are sourced as `Custom:<title>`
+- [ ] `<CustomModifierBlock title enabled>` XML persistence, plus migration of
+  the legacy `customMods` input on load (`input.customMods` is then cleared)
+- [ ] Config undo state changed shape: `{ input, customModsList }` instead of
+  a bare input copy (old states still restored via a fallback branch)
+- [ ] "Add Mod" popup per group: catalog built from `masterMods`, `itemMods`,
+  `veiledMods` and `beastCraft`, collapsed by numeric template, sorted
+  ignoring values, with fuzzy multi-word search scoring
+- [ ] Stat-difference tooltips on config options: hovering a checkbox or a
+  dropdown entry shows "Toggling this option will give you:" /
+  "Selecting this option will give you:", cached per `outputRevision`.
+  Number inputs deliberately excluded. `Build.lua` now refreshes
+  `configTab.calcFunc` / `calcBase` on every rebuild
+- [ ] Stat-difference tooltip on each custom-mod group's enable checkbox
+  ("Enabling/Disabling this group will give you:")
+- [ ] `countAllowZero` inputs accept negative and zero values; Enemy Fire /
+  Cold / Lightning / Chaos Resistance moved from `integer` to
+  `countAllowZero` (previously they could not be set to 0)
+- [ ] New "Pact calc mode" list option (Average / Max Hit), gated on Pact skills
+- [ ] "# of Brands attached to enemy (if not maximum)" is now gated by
+  `ifSkillFlag = "brand"` instead of an enemy multiplier
+- [ ] New "# of Permanent Minions (if not maximum)" count option
+- Note: our config tab renders the `text` option type solely for `customMods`,
+  which upstream has now removed from `ConfigOptions`. That control disappears
+  unless the group UI above is built.
+
+### Items Tab
+
+- [ ] Toggle individual mod lines by clicking them in the item tooltip:
+  hover highlight box over the line, `disabled` line flag, struck-through
+  rendering in `DISABLED` colour, round-tripped through the raw text.
+  Requires per-line hit boxes (`Tooltip:AddLine` now takes `modLine` and
+  `background`, and stores `bounds` per drawn line)
+- [ ] Variant groups: new `Version` / `Selected Version` /
+  `Selected Variant Group` / `Allow Duplicate Variants` specs, plus
+  `{group:N}` and `{version:N}` mod-line tags. Items using them get a version
+  dropdown and one dropdown per variant group (with duplicate-selection
+  exclusion) instead of the fixed alt-variant dropdowns. Our variant code
+  drives `variantAlt1-5` directly (`src/data/items.rs`, `src/data/crafting.rs`)
+  and needs the group path added alongside the legacy one
+- [ ] Persistent "Modifier sorting:" power-stat dropdown in the craft panel,
+  replacing upstream's per-popup sorting. Hidden for cluster jewels. We
+  shipped per-popup sorting in the v2.66 delta, so this is a consolidation
+- [ ] Abyssal sockets rendered as real item slots per equipment slot
+  (including weapon swap), not just tooltip text
+- [ ] Item list toolbar reworked: loadout filter dropdown (Any Loadout /
+  Current Loadout / Unused Items / per-loadout entries), Sort button moved
+  into the list, Delete / Del All / Del Unused renamed and reordered
+- [ ] Second enchantment button ("Change Enchantment 2...")
+- [ ] Rare-like uniques (`data.rareLikeUniques`): Subsume the Source, The
+  Crimson Storm, and Dread Captain's Cutlass craft like rares with their own
+  affix pools, prefix/suffix limits, `ignoreModType`, and a restricted set of
+  custom-modifier sources
+- [ ] Fractured affixes round-trip through `Prefix`/`Suffix` specs (a
+  `{fractured}` marker) and per-value roll lists (`{range:a,b,c}`);
+  `itemLib.applyRange` now accepts a table of per-value ranges, which our
+  range-slider previews call directly
+- [ ] Advanced copy/paste fixes: `current(base)` fixed-value form, enum
+  ranges, independent per-value rolls, min/max swap, exact-vs-fallback affix
+  matching, and stat-order sorting of unique explicit lines. Our
+  `test_advanced_copy_paste_format` conformance test should be re-checked
+- [ ] Vestigial items: `vestigial` line flag, `Vestigial ` base-name prefix,
+  `VESTIGIAL` colour code, plus `Intangibility` and `Memory Strands` specs
+  and their tooltip icons
+- [ ] Attribute requirements on socketed items derived from base + local mods
+  rather than the imported total
+- [ ] Crucible passive lines auto-tagged `{crucible}` on parse
+- [ ] Flask in-game state lines ("Lasts N Seconds", "Consumes N of N Charges
+  on use", "Currently has N Charges") no longer parsed as modifiers
+- [ ] Legacy Talisman bases excluded from anointing (`isAnointable`)
+- [ ] Enchantments no longer copied when editing an item
+- [ ] Tooltip lines can carry a background image (gem mod lines, desecrated mods)
+- [ ] Add Implicit crash fix (affects the popup we ported)
+
+### Skills Tab
+
+- [ ] "Item sockets:" label plus an "Optimise Sockets" button on the socket
+  group editor: rewrites the equipped item's socket colours and link groups
+  to match the group's gems, preserving abyssal socket count
+- [ ] Gem quality from a matching socket colour
+  (`data.MatchingSocketQualityBonus = 10`); `CalcSetup` now tracks quality by
+  source and the gem tooltip breaks it down (Item / Support / Global
+  Modifiers / Socket Colour) instead of one combined line
+- [ ] "Light Radius" added to the stat sort list
+- [ ] Gem dropdown fixes: case-insensitive selection sync, re-sort whenever
+  the list is rebuilt (`SortCurrentList` / `SyncSelection`)
+- [ ] Socket groups reprocessed after build load so item-granted groups
+  resolve regardless of load order
+
+### Build List
+
+- [ ] Recursive search: the build tree is indexed once into `buildIndex`, and
+  filtering searches nested folders, showing each hit with its relative
+  subpath prefix
+- [ ] `class:<name>` search term (placeholder `(e.g. class:assassin myfilename)`)
+- [ ] Build headers read from the first 2KB and pattern-matched instead of
+  parsing the whole file as XML
+- [ ] Guard against copying or moving a folder into itself, in both the
+  drag-drop and the copy/move paths
+- [ ] Duplicate-name resolution fixed to produce `name[1].xml` rather than a
+  bare `name[1]`; rename/move failures surface an error popup
+- [ ] Selection tracked by full file name (`SelByFullFileName`) rather than
+  bare file name, so nested results select correctly
+
+### Compare Tab
+
+- [ ] Comparison build picker inherits the recursive search, `class:` filter,
+  and full-path selection
+
+### Calcs Tab
+
+- [ ] New "Pacts" section: Empowered Spells table (uptime, count,
+  projectiles, beam chains, cascades) for Pact of Beidat / Ghorr / K'Tash /
+  Lycia. Flows through `CalcSections`, which we read, so this may be free
+  once the data is present
+- [ ] Cost sections restructured around per-resource cost/efficiency stat
+  groups (mana, life, ES, rage)
+
+### Import/Export
+
+- [ ] Animate Guardian items import into a dedicated "Animate Guardian" item
+  set, auto-assigned to the AG gem's `skillMinionItemSet`. `charData.guardian`
+  is populated inside `DownloadPassiveTree` and `DownloadItems`, both of which
+  we ported, so this needs the port re-sync below plus the new item-set logic
+- [ ] Character re-import keeps bandit and pantheon choices when the API omits
+  them. Also inside `DownloadPassiveTree`, so it arrives with that port
+  re-sync rather than for free
+- [ ] "Importing..." button state distinguished from "Fetching..."
+- [ ] Reimport of skills no longer shows stale gem data. Upstream's fix clears
+  `skillsTab.controls.groupList` selection inside `ImportItemsAndSkills`,
+  which is UI-control state we deliberately do not depend on. Not applicable
+  as written, but our own skills-tab selection should be verified to reset
+  after a re-import
+- OAuth login window 30s -> 60s and URL copied to clipboard - deferred, see
+  §16 (we do not implement OAuth import)
+
+### Search & Controls
+
+- [ ] `SearchHost` gains `ignoreOrder`: multi-word matches no longer require
+  left-to-right order, and overlapping highlight ranges are merged. Used by
+  dropdown search
+- [ ] Dropdown highlight offsets computed from escape-stripped labels (colour
+  codes no longer skew highlight positions)
+- [ ] `EditControl` draws a placeholder string when empty
+- [ ] `ListControl` click handlers can veto selection by returning `false`
+- [ ] New engine global `GetDrawColor()` (the only one added this release).
+  Used at `Tooltip.lua:609` in `Tooltip:Draw` to save the draw colour before
+  painting a mod-line background. We read `tooltip.lines` rather than calling
+  `Draw`, so it should not be reached, but `src/lua_bridge/stubs.rs` needs it
+  to avoid a nil-call if any path ever does.
+
+### Free through the Lua VM (no Rust work)
+
+Pacts support, new 3.29 uniques, Vestigial and Intangibility mod parsing, the
+3.29.1 tree update, Staff Life and Mana Mastery, automatic Brand-count and
+Wintertide-debuff DPS, and the calc/behaviour fixes: Soulwrest Phantasmal
+Might, Mana-Infused Staff, Communion Support, Cleave and Vaal Cleave radius,
+Herald area scaling, Howlcrack life cost, Drillneck, shield block chance,
+Inquisitor Fanaticism, Raise Spider attack speed, Devastator corpse explode,
+Spellslinger trigger selection, Reap of Butchery radius, the cost-efficiency
+revert, and Cane of Kulemak Catarina veiled mods.
+
+### Deferred - trade integration (see §16)
+
+- Currency Exchange API replacing poe.ninja in the trader
+- Talisman enchants and item quality on traded items; trader explicit-parsing fix
+- Pseudo-stat and word-order-insensitive stat search in `TradeQueryGenerator`
+
+### Registered ports needing re-sync
+
+Verified by extracting each `ports.toml` anchor at both pins. These seven
+anchored upstream functions changed and will fail `cargo test --test
+ports_sync` after the pin moves:
+
+| Port | Upstream file |
+|------|---------------|
+| `timeless-seed-search` | `src/Classes/TreeTab.lua` |
+| `timeless-fallback-weights` | `src/Classes/TreeTab.lua` |
+| `timeless-fallback-node-building` | `src/Classes/TreeTab.lua` |
+| `timeless-stat-list` | `src/Classes/TreeTab.lua` |
+| `char-import-tree-shaping` | `src/Classes/ImportTab.lua` |
+| `char-import-items-shaping` | `src/Classes/ImportTab.lua` |
+| `add-modifier-popup` | `src/Classes/ItemsTab.lua` |
+
+Verified causes: the four `timeless-*` ports changed for the abyss jewel
+types; `char-import-tree-shaping` for `charData.guardian` plus the
+bandit/pantheon preservation, and `char-import-items-shaping` for
+`charData.guardian`; `add-modifier-popup` for the rare-like unique
+`supportsCustomModifiers` filter and a nil guard on `listMod` (the Add
+Implicit crash fix). No anchor went missing.
 
 ---
 
