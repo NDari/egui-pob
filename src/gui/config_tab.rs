@@ -30,6 +30,9 @@ pub struct ConfigPanel {
     manage_sets_open: bool,
     set_prompt: Option<SetPrompt>,
     confirm_delete_set: Option<i64>,
+    /// Cached width of the right-aligned label column, measured from the
+    /// widest label. Cleared whenever the option list is rebuilt.
+    label_col_width: Option<f32>,
 }
 
 impl ConfigPanel {
@@ -52,6 +55,7 @@ impl ConfigPanel {
                     manage_sets_open: false,
                     set_prompt: None,
                     confirm_delete_set: None,
+                    label_col_width: None,
                 }
             }
             Err(e) => Self {
@@ -65,8 +69,40 @@ impl ConfigPanel {
                 manage_sets_open: false,
                 set_prompt: None,
                 confirm_delete_set: None,
+                label_col_width: None,
             },
         }
+    }
+
+    /// Width of the label column, measured once from the widest label so no
+    /// label is ever truncated and every control lands on the same x.
+    ///
+    /// Upstream anchors every config control at a fixed x (234px from the
+    /// section edge in `ConfigTab`) and right-aligns the label against it,
+    /// shrinking the font for labels wider than the column. We measure
+    /// instead, which keeps one font size and adapts to theme/DPI changes.
+    fn label_column_width(&mut self, ui: &egui::Ui) -> f32 {
+        if let Some(w) = self.label_col_width {
+            return w;
+        }
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let widest = self
+            .options
+            .iter()
+            .filter(|o| !matches!(o, ConfigOption::Section { .. }))
+            .map(|o| {
+                ui.fonts(|f| {
+                    f.layout_no_wrap(o.label().to_string(), font.clone(), egui::Color32::WHITE)
+                })
+                .rect
+                .width()
+            })
+            .fold(0.0_f32, f32::max);
+        // Leave a gap before the control, and keep a pathological label from
+        // pushing every control off the right edge.
+        let w = (widest + 8.0).clamp(80.0, 520.0);
+        self.label_col_width = Some(w);
+        w
     }
 
     /// Refresh option visibility from the current build state (tooltip + ifX predicates).
@@ -74,6 +110,7 @@ impl ConfigPanel {
     fn refresh_visibility(&mut self, lua: &Lua) {
         if let Ok(refreshed) = config::extract_config_options(lua) {
             self.options = refreshed;
+            self.label_col_width = None;
         }
     }
 
@@ -401,6 +438,7 @@ impl ConfigPanel {
 
     fn show_option(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge, index: usize) -> bool {
         let mut changed = false;
+        let label_width = self.label_column_width(ui);
         let option = &mut self.options[index];
 
         // Grey out when ineligible and the user opted to see them.
@@ -415,10 +453,9 @@ impl ConfigPanel {
                 tooltip,
                 ..
             } => {
-                let resp = ui.checkbox(value, label.as_str());
-                if let Some(t) = tooltip {
-                    resp.clone().on_hover_text(t.as_str());
-                }
+                let resp = labeled_row(ui, label_width, label.as_str(), tooltip.as_deref(), |ui| {
+                    ui.checkbox(value, "")
+                });
                 if resp.changed() {
                     if let Err(e) =
                         config::set_config_value(bridge.lua(), var, LuaValue::Boolean(*value))
@@ -436,11 +473,7 @@ impl ConfigPanel {
                 tooltip,
                 ..
             } => {
-                ui.horizontal(|ui| {
-                    let lbl = ui.label(label.as_str());
-                    if let Some(t) = tooltip {
-                        lbl.on_hover_text(t.as_str());
-                    }
+                labeled_row(ui, label_width, label.as_str(), tooltip.as_deref(), |ui| {
                     let response = ui.add(egui::TextEdit::singleline(value).desired_width(80.0));
                     if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         let lua_val = if let Ok(n) = value.parse::<f64>() {
@@ -464,11 +497,7 @@ impl ConfigPanel {
                 tooltip,
                 ..
             } => {
-                ui.horizontal(|ui| {
-                    let lbl = ui.label(label.as_str());
-                    if let Some(t) = tooltip {
-                        lbl.on_hover_text(t.as_str());
-                    }
+                labeled_row(ui, label_width, label.as_str(), tooltip.as_deref(), |ui| {
                     let current_label = options
                         .get(*selected_index)
                         .map(|e| e.label.as_str())
@@ -502,11 +531,7 @@ impl ConfigPanel {
                 tooltip,
                 ..
             } => {
-                ui.horizontal(|ui| {
-                    let lbl = ui.label(label.as_str());
-                    if let Some(t) = tooltip {
-                        lbl.on_hover_text(t.as_str());
-                    }
+                labeled_row(ui, label_width, label.as_str(), tooltip.as_deref(), |ui| {
                     let response = ui.add(egui::TextEdit::singleline(value).desired_width(200.0));
                     if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         let lua_val = bridge
@@ -532,6 +557,48 @@ impl ConfigPanel {
 
         changed
     }
+}
+
+/// Lay out one config row as upstream does: the label right-aligned in a
+/// fixed-width column, the control immediately after it. Because the column
+/// is the same width for every row, all the trailing "?" and ":" line up and
+/// every checkbox and input shares one vertical axis.
+///
+/// The column is allocated at an exact size, so a label that somehow exceeds
+/// it overhangs to the left (as upstream's right-anchored labels do) instead
+/// of pushing its control out of alignment.
+fn labeled_row<R>(
+    ui: &mut egui::Ui,
+    label_width: f32,
+    label: &str,
+    tooltip: Option<&str>,
+    add_control: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.horizontal(|ui| {
+        let height = ui.spacing().interact_size.y;
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(label_width, height), egui::Sense::hover());
+        let text_pos = egui::pos2(rect.right() - 4.0, rect.center().y);
+        let galley = ui.painter().layout_no_wrap(
+            label.to_string(),
+            egui::TextStyle::Body.resolve(ui.style()),
+            ui.visuals().text_color(),
+        );
+        ui.painter().galley(
+            egui::pos2(
+                text_pos.x - galley.rect.width(),
+                text_pos.y - galley.rect.height() / 2.0,
+            ),
+            galley,
+            ui.visuals().text_color(),
+        );
+        if let Some(t) = tooltip {
+            ui.interact(rect, ui.id().with(label), egui::Sense::hover())
+                .on_hover_text(t);
+        }
+        add_control(ui)
+    })
+    .inner
 }
 
 fn config_set_label(set: &ConfigSetInfo) -> String {

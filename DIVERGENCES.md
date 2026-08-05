@@ -33,6 +33,31 @@ listed here; presentation is fully ours and needs no entries.
   success/failure themselves so the import panel still shows an outcome.
   `char_import::import_passive_tree_and_jewels` / `import_items_and_skills`.
 
+- **Character list is fetched automatically for the remembered account.** On
+  the first view of the Import/Export tab, if an account name was prefilled
+  from history we fetch its character list without waiting for a button
+  press. Upstream always requires clicking "Start". Fires once per build view
+  and only when no characters are loaded yet; because our HTTP is blocking
+  (see the sub-script entry below) it deliberately triggers on first view
+  rather than at startup, so launches that never open the tab pay nothing.
+  `ImportPanel::show` / `auto_fetch_attempted`.
+
+- **We still support POESESSID; upstream does not.** Upstream removed session
+  IDs wholesale in v2.66.0 and imports via OAuth. We keep the legacy
+  session-id path because we have not implemented OAuth (tracked in
+  `plans/parity-plan.md` §16). Note that upstream v2.67.0 still carries dead
+  `gameAccounts[name].sessionID` save/load code in `Main.lua`, fed by an
+  undeclared global at `ImportTab.lua:972` that is never assigned; it is not
+  a behavior to match. We hold the session id in memory only and never write
+  it to disk.
+
+- **League filter defaults to the current league.** When a build has no
+  remembered league (upstream `importTab.lastLeague`), the character-list
+  filter preselects `char_import::CURRENT_LEAGUE` instead of "All", falling
+  back to "All" when the account has no character there. The remembered
+  league still wins when present. Bump the constant each league.
+  `char_import::pick_league_index`.
+
 - **Timeless jewel search omissions:** no protected-nodes list, no
   socket-allocation filter, no devotion-variant trade dropdowns (we have no
   trade integration). These are gaps rather than different behavior; tracked

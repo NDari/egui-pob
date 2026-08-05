@@ -1,31 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <PathOfBuilding>
 	<Build className="Scion" level="95" viewMode="SKILLS" ascendClassName="Reliquarian" bandit="None" targetVersion="3_0" pantheonMajorGod="None" pantheonMinorGod="None" characterLevelAutoMode="false" mainSocketGroup="2">
-		<PlayerStat value="505688.64867418" stat="AverageDamage"/>
-		<PlayerStat value="505688.64867418" stat="AverageBurstDamage"/>
-		<PlayerStat value="9.243" stat="Speed"/>
+		<PlayerStat value="515765.92574536" stat="AverageDamage"/>
+		<PlayerStat value="515765.92574536" stat="AverageBurstDamage"/>
+		<PlayerStat value="9.6174" stat="Speed"/>
 		<PlayerStat value="100" stat="PreEffectiveCritChance"/>
 		<PlayerStat value="100" stat="CritChance"/>
-		<PlayerStat value="6.28" stat="CritMultiplier"/>
+		<PlayerStat value="6.33" stat="CritMultiplier"/>
 		<PlayerStat value="100" stat="HitChance"/>
-		<PlayerStat value="4674080.1796955" stat="TotalDPS"/>
+		<PlayerStat value="4960327.2142635" stat="TotalDPS"/>
 		<PlayerStat value="0" stat="TotalDot"/>
-		<PlayerStat value="4674080.1796955" stat="WithBleedDPS"/>
-		<PlayerStat value="17327.52" stat="IgniteDPS"/>
-		<PlayerStat value="4691407.6996955" stat="WithIgniteDPS"/>
-		<PlayerStat value="4674080.1796955" stat="WithPoisonDPS"/>
-		<PlayerStat value="17327.52" stat="TotalDotDPS"/>
-		<PlayerStat value="521267.52218839" stat="CullingDPS"/>
+		<PlayerStat value="4960327.2142635" stat="WithBleedDPS"/>
+		<PlayerStat value="17695.2384" stat="IgniteDPS"/>
+		<PlayerStat value="4978022.4526635" stat="WithIgniteDPS"/>
+		<PlayerStat value="4960327.2142635" stat="WithPoisonDPS"/>
+		<PlayerStat value="17695.2384" stat="TotalDotDPS"/>
+		<PlayerStat value="553113.6058515" stat="CullingDPS"/>
 		<PlayerStat value="0" stat="ReservationDPS"/>
-		<PlayerStat value="5212675.2218839" stat="CombinedDPS"/>
+		<PlayerStat value="5531136.058515" stat="CombinedDPS"/>
 		<PlayerStat value="2.1" stat="AreaOfEffectRadiusMetres"/>
 		<PlayerStat value="7" stat="ManaCost"/>
 		<PlayerStat value="0" stat="ManaPercentCost"/>
-		<PlayerStat value="64.701" stat="ManaPerSecondCost"/>
+		<PlayerStat value="67.3218" stat="ManaPerSecondCost"/>
 		<PlayerStat value="0" stat="ManaPercentPerSecondCost"/>
 		<PlayerStat value="6" stat="LifeCost"/>
 		<PlayerStat value="0" stat="LifePercentCost"/>
-		<PlayerStat value="55.458" stat="LifePerSecondCost"/>
+		<PlayerStat value="57.7044" stat="LifePerSecondCost"/>
 		<PlayerStat value="0" stat="LifePercentPerSecondCost"/>
 		<PlayerStat value="0" stat="ESCost"/>
 		<PlayerStat value="0" stat="ESPerSecondCost"/>
@@ -52,13 +52,13 @@
 		<PlayerStat value="9453" stat="LifeRecoverable"/>
 		<PlayerStat value="100" stat="LifeUnreservedPercent"/>
 		<PlayerStat value="321.4" stat="LifeRegenRecovery"/>
-		<PlayerStat value="2251.077" stat="LifeLeechGainRate"/>
+		<PlayerStat value="2275.296" stat="LifeLeechGainRate"/>
 		<PlayerStat value="692" stat="Mana"/>
 		<PlayerStat value="0" stat="Spec:ManaInc"/>
 		<PlayerStat value="218" stat="ManaUnreserved"/>
 		<PlayerStat value="31.50289017341" stat="ManaUnreservedPercent"/>
 		<PlayerStat value="14.5" stat="ManaRegenRecovery"/>
-		<PlayerStat value="314.017" stat="ManaLeechGainRate"/>
+		<PlayerStat value="330.748" stat="ManaLeechGainRate"/>
 		<PlayerStat value="0" stat="EnergyShield"/>
 		<PlayerStat value="0" stat="EnergyShieldRecoveryCap"/>
 		<PlayerStat value="30" stat="Spec:EnergyShieldInc"/>
@@ -88,8 +88,8 @@
 		<PlayerStat value="72" stat="ChaosResist"/>
 		<PlayerStat value="0" stat="ChaosResistOverCap"/>
 		<PlayerStat value="1.61" stat="EffectiveMovementSpeedMod"/>
-		<PlayerStat value="8388792.3902368" stat="FullDPS"/>
-		<PlayerStat value="51681.3696" stat="FullDotDPS"/>
+		<PlayerStat value="8651082.4555216" stat="FullDPS"/>
+		<PlayerStat value="52778.4768" stat="FullDotDPS"/>
 		<FullDPSSkill value="4682644.9136425" skillPart="" source="" stat="Cyclone of Tumult"/>
 		<FullDPSSkill value="2815586.8679705" skillPart="Maim Shockwave" source="Void Shockwave" stat="Void Shockwave"/>
 		<FullDPSSkill value="838879.23902368" skillPart="" source="" stat="Full Culling DPS"/>

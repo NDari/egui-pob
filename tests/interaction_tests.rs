@@ -4671,7 +4671,15 @@ fn test_skills_drag_reorder() {
 #[test]
 fn test_build_xml_roundtrip() {
     let _ = env_logger::builder().is_test(true).try_init();
-    let bridge = common::boot_and_load_test_build();
+    for fixture in common::ALL_FIXTURES {
+        roundtrip_one_build(fixture);
+    }
+}
+
+/// Load a fixture, save it, reload the save, and assert the build is a fixed
+/// point both structurally and in its calculated output.
+fn roundtrip_one_build(fixture: &str) {
+    let bridge = common::boot_and_load_build(fixture);
     let lua = bridge.lua();
 
     let save_db = r#"
@@ -4693,10 +4701,10 @@ fn test_build_xml_roundtrip() {
     let save1: String = lua.load(save_db).eval().expect("first save failed");
     assert!(
         save1.starts_with("<?xml") && save1.contains("<Build"),
-        "save produces XML"
+        "{fixture}: save produces XML"
     );
     let save1b: String = lua.load(save_db).eval().expect("second save failed");
-    assert_eq!(save1, save1b, "saving twice is deterministic");
+    assert_eq!(save1, save1b, "{fixture}: saving twice is deterministic");
 
     let stats1: (f64, f64, f64, i64, i64, i64) =
         lua.load(read_stats).eval().expect("stats read failed");
@@ -4712,29 +4720,32 @@ fn test_build_xml_roundtrip() {
 
     assert_eq!(
         stats1.3, stats2.3,
-        "allocated node count survives the round-trip"
+        "{fixture}: allocated node count survives the round-trip"
     );
-    assert_eq!(stats1.4, stats2.4, "item count survives the round-trip");
+    assert_eq!(
+        stats1.4, stats2.4,
+        "{fixture}: item count survives the round-trip"
+    );
     assert_eq!(
         stats1.5, stats2.5,
-        "socket group count survives the round-trip"
+        "{fixture}: socket group count survives the round-trip"
     );
     let close = |a: f64, b: f64| (a - b).abs() <= (a.abs() * 1e-9).max(1e-6);
     assert!(
         close(stats1.0, stats2.0),
-        "DPS survives the round-trip: {} vs {}",
+        "{fixture}: DPS survives the round-trip: {} vs {}",
         stats1.0,
         stats2.0
     );
     assert!(
         close(stats1.1, stats2.1),
-        "Life survives the round-trip: {} vs {}",
+        "{fixture}: Life survives the round-trip: {} vs {}",
         stats1.1,
         stats2.1
     );
     assert!(
         close(stats1.2, stats2.2),
-        "EHP survives the round-trip: {} vs {}",
+        "{fixture}: EHP survives the round-trip: {} vs {}",
         stats1.2,
         stats2.2
     );
@@ -4808,8 +4819,8 @@ fn test_build_xml_roundtrip() {
             .unwrap_or(canon1.len().min(canon2.len()));
         let start = pos.saturating_sub(150);
         panic!(
-            "saved XML differs structurally after reload; first difference \
-             near byte {pos}:\n--- first save ---\n{}\n--- second save ---\n{}",
+            "{fixture}: saved XML differs structurally after reload; first \
+             difference near byte {pos}:\n--- first save ---\n{}\n--- second save ---\n{}",
             &canon1[start..(pos + 150).min(canon1.len())],
             &canon2[start..(pos + 150).min(canon2.len())],
         );

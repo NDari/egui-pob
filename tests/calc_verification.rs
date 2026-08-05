@@ -61,15 +61,48 @@ fn test_calc_output_matches_xml_reference() {
         test_builds.display()
     );
 
-    let xml_path = find_first_xml(&test_builds).expect("no XML files found in test_builds/");
-    let xml_text = std::fs::read_to_string(&xml_path).expect("failed to read test build XML");
+    let xml_paths = find_all_xml(&test_builds);
+    assert!(!xml_paths.is_empty(), "no XML files found in test_builds/");
+
+    let mut failures = Vec::new();
+    for xml_path in &xml_paths {
+        if let Err(report) = verify_build(xml_path, &src_path, &repo_root) {
+            failures.push(report);
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} of {} reference build(s) did not match:\n\n{}",
+        failures.len(),
+        xml_paths.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// Verify one build's calc output against its embedded reference stats.
+/// Returns a human-readable report on mismatch.
+fn verify_build(
+    xml_path: &std::path::Path,
+    src_path: &std::path::Path,
+    repo_root: &std::path::Path,
+) -> Result<(), String> {
+    let name = xml_path
+        .strip_prefix(repo_root)
+        .unwrap_or(xml_path)
+        .display()
+        .to_string();
+    let xml_text = std::fs::read_to_string(xml_path).expect("failed to read test build XML");
 
     // Parse expected stats from XML
     let expected = parse_expected_stats(&xml_text);
-    assert!(!expected.is_empty(), "no <PlayerStat> entries found in XML");
+    assert!(
+        !expected.is_empty(),
+        "no <PlayerStat> entries found in {name}"
+    );
 
     // Boot Lua and load the build
-    let bridge = pob_egui::lua_bridge::LuaBridge::new(&src_path, &repo_root)
+    let bridge = pob_egui::lua_bridge::LuaBridge::new(src_path, repo_root)
         .expect("failed to init Lua bridge");
     bridge.verify_boot().expect("boot verification failed");
     bridge
@@ -112,41 +145,43 @@ fn test_calc_output_matches_xml_reference() {
     let total = expected.len();
     let matched = total - mismatches.len() - missing.len();
 
-    println!("\n=== Calc Verification ===");
+    println!("\n=== Calc Verification: {name} ===");
     println!("Total expected stats: {total}");
     println!("Matched: {matched}");
     println!("Mismatched: {}", mismatches.len());
     println!("Missing: {}", missing.len());
 
-    if !mismatches.is_empty() {
-        println!("\nMismatches:");
-        for m in &mismatches {
-            println!("{m}");
-        }
-    }
-    if !missing.is_empty() {
-        println!("\nMissing:");
-        for m in &missing {
-            println!("{m}");
-        }
+    if mismatches.is_empty() && missing.is_empty() {
+        return Ok(());
     }
 
-    assert!(
-        mismatches.is_empty() && missing.is_empty(),
-        "{} mismatches and {} missing stats out of {total}",
+    mismatches.sort();
+    missing.sort();
+    let mut report = format!(
+        "{name}: {} mismatches and {} missing stats out of {total}",
         mismatches.len(),
         missing.len()
     );
+    if !mismatches.is_empty() {
+        report.push_str("\nMismatches:\n");
+        report.push_str(&mismatches.join("\n"));
+    }
+    if !missing.is_empty() {
+        report.push_str("\nMissing:\n");
+        report.push_str(&missing.join("\n"));
+    }
+    println!("{report}");
+    Err(report)
 }
 
-fn find_first_xml(dir: &std::path::Path) -> Option<PathBuf> {
-    for entry in walkdir::WalkDir::new(dir)
+/// Every build XML under `test_builds/`, in a stable order.
+fn find_all_xml(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = walkdir::WalkDir::new(dir)
         .into_iter()
         .filter_map(|e| e.ok())
-    {
-        if entry.path().extension().is_some_and(|ext| ext == "xml") {
-            return Some(entry.path().to_path_buf());
-        }
-    }
-    None
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "xml"))
+        .map(|e| e.path().to_path_buf())
+        .collect();
+    paths.sort();
+    paths
 }

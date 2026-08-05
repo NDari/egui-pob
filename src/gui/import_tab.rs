@@ -35,6 +35,9 @@ pub struct ImportPanel {
     /// Set after a successful new-build import; the build view resets its
     /// name/unsaved state when it sees this.
     pub new_build_imported: bool,
+    /// Whether the one-shot character fetch for a remembered account has been
+    /// tried yet. Set before the attempt so a failure cannot retry every frame.
+    auto_fetch_attempted: bool,
 }
 
 impl ImportPanel {
@@ -44,7 +47,7 @@ impl ImportPanel {
             export_code: String::new(),
             status_message: None,
             export_site_idx: 0,
-            account_name: String::new(),
+            account_name: char_import::initial_account_name(),
             account_history: char_import::load_account_history(),
             realm_index: 0,
             sessid: String::new(),
@@ -59,12 +62,24 @@ impl ImportPanel {
             ignore_weapon_swap: false,
             import_to_new: false,
             new_build_imported: false,
+            auto_fetch_attempted: false,
         }
     }
 
     /// Draw the import/export panel. Returns true if a build was imported (full reload needed).
     pub fn show(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> bool {
         let mut imported = false;
+
+        // First time this tab is opened, fetch the character list for the
+        // remembered account so it is ready without a click. Fetching is
+        // blocking (the no-sub-script divergence), so this deliberately fires
+        // on first view rather than at startup, and only once per build view.
+        if !self.auto_fetch_attempted {
+            self.auto_fetch_attempted = true;
+            if !self.account_name.trim().is_empty() && self.characters.is_empty() {
+                self.fetch_characters(bridge);
+            }
+        }
 
         // Status message
         if let Some((ref msg, is_error)) = self.status_message {
@@ -418,13 +433,15 @@ impl ImportPanel {
                 self.char_status = Some((format!("Found {} characters.", chars.len()), false));
                 self.characters = chars;
                 // Successful fetch: remember the account (upstream
-                // SaveAccountHistory) and preselect the build's last league
+                // SaveAccountHistory plus main.lastAccountName) and preselect
+                // a league. The build's remembered league wins; otherwise fall
+                // back to the current league rather than showing every league.
                 self.account_history = char_import::add_account_history(self.account_name.trim());
-                if let Some(last) = char_import::last_league(bridge.lua())
-                    && let Some(pos) = self.leagues.iter().position(|l| *l == last)
-                {
-                    self.league_index = pos + 1;
-                }
+                char_import::set_last_account(self.account_name.trim());
+                self.league_index = char_import::pick_league_index(
+                    &self.leagues,
+                    char_import::last_league(bridge.lua()).as_deref(),
+                );
             }
             Err(e) => {
                 self.char_status = Some((format!("{e}"), true));
