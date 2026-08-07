@@ -10,6 +10,24 @@ Rules of thumb (see CLAUDE.md "Upstream usage policy"): interchange formats
 and calc semantics never diverge; interaction semantics may, deliberately and
 listed here; presentation is fully ours and needs no entries.
 
+## Upstream bugs fixed locally
+
+Behavior that differs because upstream is wrong and we are not. These are
+candidates to drop on a pin bump if upstream fixes them; `ports.toml` carries
+an anchor for each so the upgrade surfaces it.
+
+- **Compare entries reprocess their socket groups.** `CompareEntry` loads its
+  Skills section before its Items section, and neither `LoadFromXML` nor
+  `Rebuild` calls `skillsTab:UpdateSocketGroups()` - which `Build.lua` does
+  before every `BuildOutput`, with the comment "reprocess socket groups as
+  they might depend on items which don't necessarily load first". The result
+  is that a compared build's gems never get `MatchingSocketQualityBonus`, so
+  every quality-derived stat reads low: comparing a build against an
+  identical copy of itself showed Average Damage -2.0%. We decorate
+  `CompareEntry:Rebuild` to reprocess first, and rebuild a freshly imported
+  entry (the class is registered lazily, so the first `LoadFromXML` cannot be
+  wrapped in time). `compare_helper.lua`, covered by `test_compare_tab`.
+
 ## Behavioral divergences
 
 - **Slot-to-slot item drag swaps.** Dragging an equipped item onto an
@@ -58,6 +76,14 @@ listed here; presentation is fully ours and needs no entries.
   league still wins when present. Bump the constant each league.
   `char_import::pick_league_index`.
 
+- **No Abyss timeless jewels.** v2.67.0 added jewel types 7-11 (Abyss
+  Tecrod / Ulaman / Kurgal / Amanamu / Zorath) to the seed search, with their
+  own lookup tables (`readAbyssJewelLUT`, `resolveAbyssJewelComponent`,
+  `getAbyssJewelComponentRoll`) and, for Zorath, a shortest-path-to-class-start
+  requirement. `TIMELESS_JEWEL_TYPES` stops at 6, so they are not offerable and
+  the abyss branches of both timeless ports are deliberately absent. Tracked in
+  `plans/parity-plan.md`.
+
 - **Timeless jewel search omissions:** no protected-nodes list, no
   socket-allocation filter, no devotion-variant trade dropdowns (we have no
   trade integration). These are gaps rather than different behavior; tracked
@@ -70,6 +96,14 @@ listed here; presentation is fully ours and needs no entries.
   adjustment matches upstream's OnOrderChange).
 - Socket group reorder via drag handles on collapsing headers instead of a
   draggable list row (same OnOrderChange index math).
+- **Custom modifier group text and titles commit on blur**, not on every
+  keystroke. Upstream's `EditControl` callback fires per character, so each
+  one records an undo state and rebuilds the mod list; ours waits until the
+  field loses focus, making one undo step per edit instead of one per
+  character. Line colouring still updates as you type - it runs
+  `modLib.parseMod` locally without touching the calc. `custom_mods::set_text`
+  / `set_title`.
+
 - Undo/redo hotkeys only fire when no text widget has focus (egui text
   fields own Ctrl+Z internally).
 

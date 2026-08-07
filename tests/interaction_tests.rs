@@ -3379,6 +3379,24 @@ fn test_compare_tab() {
     assert_eq!(entries, ["Mirror"], "one entry with its label");
     assert_eq!(active, 1, "imported entry becomes active");
 
+    // A compare entry loads its Skills section before its Items section, so its
+    // socket groups have to be reprocessed once the items are in place or its
+    // gems miss the matching-socket quality bonus (see DIVERGENCES.md).
+    let (primary_quality, compare_quality): (f64, f64) = lua
+        .load(
+            r#"
+            local build = mainObject_ref.main.modes['BUILD']
+            local entry = build.compareTab.compareEntries[1]
+            return build.calcsTab.mainOutput.GemQuality or 0, entry:GetOutput().GemQuality or 0
+        "#,
+        )
+        .eval()
+        .expect("gem quality query failed");
+    assert_eq!(
+        compare_quality, primary_quality,
+        "the compare entry picks up the matching-socket quality bonus"
+    );
+
     // Identical builds: real stat rows, no differences
     let rows = compare::stat_rows(lua, 1).expect("rows failed");
     let stat_rows: Vec<_> = rows.iter().filter(|r| !r.spacer).collect();
@@ -5196,4 +5214,386 @@ fn test_calcs_minion_selection() {
     calcs::set_calcs_minion(lua, &first_id).expect("set minion failed");
     let sel = calcs::skill_selection(lua).expect("selection failed");
     assert_eq!(sel.selected_minion, 0, "minion selection round-trips");
+}
+
+// ---------------------------------------------------------------------------
+// Config visibility conformance
+// ---------------------------------------------------------------------------
+
+/// Tier 1 conformance: our per-option visibility must equal upstream's shared
+/// `Modules/ConfigVisibility` verdict for every option, on every fixture. This
+/// is what keeps the Config tab and the Compare tab's config view in step.
+#[test]
+fn test_config_visibility_matches_upstream() {
+    for fixture in common::ALL_FIXTURES {
+        let bridge = common::boot_and_load_build(fixture);
+        let lua = bridge.lua();
+
+        let upstream: LuaTable = lua
+            .load(
+                r#"
+                local build = mainObject_ref.main.modes['BUILD']
+                local configVisibility = LoadModule("Modules/ConfigVisibility")
+                local varList = LoadModule("Modules/ConfigOptions")
+                local out = {}
+                for _, varData in ipairs(varList) do
+                    if varData.var then
+                        out[varData.var] = {
+                            relevant = configVisibility.isRelevantForBuild(varData, build) and true or false,
+                            excluded = configVisibility.isShowAllExcluded(varData) and true or false,
+                        }
+                    end
+                end
+                return out
+            "#,
+            )
+            .eval()
+            .expect("upstream visibility query failed");
+
+        let options = pob_egui::data::config::extract_config_options(lua)
+            .expect("failed to extract config options");
+
+        let mut relevant_count = 0;
+        let mut checked = 0;
+        for option in &options {
+            let Some(var) = option.var() else { continue };
+            let expected: LuaTable = upstream
+                .get(var)
+                .unwrap_or_else(|_| panic!("{fixture}: no upstream verdict for '{var}'"));
+            let vis = option.vis();
+            assert_eq!(
+                vis.relevant,
+                expected.get::<bool>("relevant").unwrap(),
+                "{fixture}: relevance mismatch for config option '{var}'"
+            );
+            assert_eq!(
+                vis.show_all_excluded,
+                expected.get::<bool>("excluded").unwrap(),
+                "{fixture}: show-all exclusion mismatch for config option '{var}'"
+            );
+            relevant_count += usize::from(vis.relevant);
+            checked += 1;
+        }
+
+        assert!(checked > 500, "{fixture}: only checked {checked} options");
+        // Guard against a regression that makes everything eligible again: a
+        // loaded build uses a small fraction of the ~1000 defined options.
+        assert!(
+            relevant_count < checked / 3,
+            "{fixture}: {relevant_count} of {checked} options eligible, expected far fewer"
+        );
+    }
+}
+
+/// An option whose predicates fail stays listed when its value is off-default,
+/// flagged invalid - upstream ConfigTab's `hideIfInvalid` wrapper.
+#[test]
+fn test_modified_ineligible_option_stays_visible() {
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Shrine buffs are gated on ifFlag/ifCond predicates this build does not meet.
+    let var = "buffDiamondShrine";
+    let before = pob_egui::data::config::extract_config_options(lua).expect("extract failed");
+    let vis = before
+        .iter()
+        .find(|o| o.var() == Some(var))
+        .expect("option not found")
+        .vis();
+    assert!(!vis.relevant, "{var} should be ineligible for this build");
+    assert!(!vis.shown(false), "{var} should be hidden while at default");
+
+    pob_egui::data::config::set_config_value(lua, var, LuaValue::Boolean(true))
+        .expect("failed to set config value");
+
+    let after = pob_egui::data::config::extract_config_options(lua).expect("extract failed");
+    let vis = after
+        .iter()
+        .find(|o| o.var() == Some(var))
+        .expect("option not found")
+        .vis();
+    assert!(vis.modified, "{var} should read as off-default");
+    assert!(
+        vis.shown(false),
+        "{var} should stay listed once set, even with 'show all' off"
+    );
+    assert!(
+        vis.invalid(false),
+        "{var} should be flagged invalid rather than shown as normal"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Custom modifier groups
+// ---------------------------------------------------------------------------
+
+/// Current maximum Life, the stat the custom-mod tests move.
+fn life(lua: &Lua) -> f64 {
+    pob_egui::data::CalcOutput::extract(lua)
+        .expect("calc extract failed")
+        .stats
+        .get("Life")
+        .copied()
+        .unwrap_or(0.0)
+}
+
+/// Groups round-trip through upstream's data model: adding, renaming,
+/// disabling and deleting each land in `customModsList`, and an enabled
+/// group's mods reach the calc output sourced as `Custom:<title>`.
+#[test]
+fn test_custom_mod_groups_roundtrip() {
+    use pob_egui::data::custom_mods::{self, CustomModGroup};
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // A build always starts with one empty group to type into.
+    let groups = custom_mods::list_groups(lua).expect("list failed");
+    assert_eq!(
+        groups,
+        vec![CustomModGroup {
+            title: "Default".to_string(),
+            enabled: true,
+            text: String::new(),
+        }],
+        "a fresh build has one empty Default group"
+    );
+
+    let life_before = life(lua);
+
+    custom_mods::set_title(lua, 0, "Testing").expect("rename failed");
+    custom_mods::set_text(lua, 0, "+100 to maximum Life").expect("set text failed");
+
+    let groups = custom_mods::list_groups(lua).expect("list failed");
+    assert_eq!(groups[0].title, "Testing");
+    assert_eq!(groups[0].text, "+100 to maximum Life");
+
+    // Not an exact +100: the flat life scales with the build's % life
+    // modifiers, which is the point - it goes through the real calc path.
+    let life_with = life(lua);
+    assert!(
+        life_with > life_before,
+        "an enabled group's mods reach the calc output ({life_before} -> {life_with})"
+    );
+
+    // The group title is the mod source.
+    let source_found: bool = lua
+        .load(
+            r#"
+            local ct = mainObject_ref.main.modes['BUILD'].configTab
+            for _, mod in ipairs(ct.modList) do
+                if mod.source == "Custom:Testing" then return true end
+            end
+            return false
+        "#,
+        )
+        .eval()
+        .expect("source query failed");
+    assert!(source_found, "mods are sourced as Custom:<title>");
+
+    // Disabling keeps the text but drops the mods.
+    custom_mods::set_enabled(lua, 0, false).expect("disable failed");
+    let groups = custom_mods::list_groups(lua).expect("list failed");
+    assert!(!groups[0].enabled);
+    assert_eq!(groups[0].text, "+100 to maximum Life", "text is kept");
+    assert_eq!(
+        life(lua),
+        life_before,
+        "a disabled group contributes nothing"
+    );
+    custom_mods::set_enabled(lua, 0, true).expect("enable failed");
+
+    // Adding, then deleting back down past empty.
+    custom_mods::add_group(lua).expect("add failed");
+    let groups = custom_mods::list_groups(lua).expect("list failed");
+    assert_eq!(groups.len(), 2);
+    assert_eq!(
+        groups[1].title, "Group 2",
+        "new groups are named by position"
+    );
+
+    custom_mods::delete_group(lua, 1).expect("delete failed");
+    assert_eq!(custom_mods::list_groups(lua).expect("list failed").len(), 1);
+
+    custom_mods::delete_group(lua, 0).expect("delete failed");
+    let groups = custom_mods::list_groups(lua).expect("list failed");
+    assert_eq!(
+        groups,
+        vec![CustomModGroup {
+            title: "Default".to_string(),
+            enabled: true,
+            text: String::new(),
+        }],
+        "deleting the last group leaves an empty Default behind"
+    );
+    assert_eq!(
+        life(lua),
+        life_before,
+        "deleting the group removes its mods"
+    );
+}
+
+/// Each edit records an undo state, and undo restores the group list - the
+/// shape upstream's `CreateUndoState` stores alongside `input`.
+#[test]
+fn test_custom_mod_groups_undo() {
+    use pob_egui::data::custom_mods;
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    custom_mods::set_text(lua, 0, "+100 to maximum Life").expect("set text failed");
+    let life_with = life(lua);
+
+    pob_egui::data::config::undo(lua).expect("undo failed");
+    let groups = custom_mods::list_groups(lua).expect("list failed");
+    assert_eq!(groups[0].text, "", "undo restores the group text");
+    assert!(
+        life(lua) < life_with,
+        "undo drops the group's mods from the calc"
+    );
+
+    pob_egui::data::config::redo(lua).expect("redo failed");
+    let groups = custom_mods::list_groups(lua).expect("list failed");
+    assert_eq!(groups[0].text, "+100 to maximum Life", "redo restores it");
+}
+
+/// Groups persist to the build XML as `<CustomModifierBlock>` and come back on
+/// load, including the disabled flag.
+#[test]
+fn test_custom_mod_groups_persist_to_xml() {
+    use pob_egui::data::custom_mods::{self, CustomModGroup};
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    custom_mods::set_title(lua, 0, "Kept").expect("rename failed");
+    custom_mods::set_text(lua, 0, "+100 to maximum Life").expect("set text failed");
+    custom_mods::add_group(lua).expect("add failed");
+    custom_mods::set_text(lua, 1, "10% increased Attack Speed").expect("set text failed");
+    custom_mods::set_enabled(lua, 1, false).expect("disable failed");
+
+    let xml: String = lua
+        .load("return mainObject_ref.main.modes['BUILD']:SaveDB('dummy')")
+        .eval()
+        .expect("SaveDB failed");
+    assert!(
+        xml.contains(r#"<CustomModifierBlock title="Kept" enabled="true">"#)
+            || xml.contains(r#"<CustomModifierBlock enabled="true" title="Kept">"#),
+        "groups are written as CustomModifierBlock elements:\n{}",
+        xml.lines()
+            .filter(|l| l.contains("CustomModifierBlock"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // Reload the saved XML into a fresh VM and read the groups back.
+    let reloaded = common::boot_and_load_test_build();
+    reloaded
+        .load_build_from_xml(&xml, "reloaded", None)
+        .expect("reload failed");
+    let groups = custom_mods::list_groups(reloaded.lua()).expect("list failed");
+    assert_eq!(
+        groups,
+        vec![
+            CustomModGroup {
+                title: "Kept".to_string(),
+                enabled: true,
+                text: "+100 to maximum Life".to_string(),
+            },
+            CustomModGroup {
+                title: "Group 2".to_string(),
+                enabled: false,
+                text: "10% increased Attack Speed".to_string(),
+            },
+        ],
+        "groups survive a save/load round trip"
+    );
+}
+
+/// Line classification comes from upstream's own modifier parser.
+#[test]
+fn test_custom_mod_line_status() {
+    use pob_egui::data::custom_mods::{self, LineStatus};
+
+    let bridge = common::boot_and_load_test_build();
+    let status = custom_mods::line_status(
+        bridge.lua(),
+        "+100 to maximum Life\n\nthis is not a modifier\n  10% increased Attack Speed  ",
+    )
+    .expect("line status failed");
+
+    assert_eq!(
+        status,
+        vec![
+            LineStatus::Parsed,
+            LineStatus::Blank,
+            LineStatus::Unsupported,
+            LineStatus::Parsed,
+        ],
+        "one status per line, indexed like the editor's lines"
+    );
+}
+
+/// Fallback weights for Glorious Vanity, the jewel whose replacements carry
+/// variable rolls: v2.67 rebuilt how those are scored (one mod list per stat,
+/// and a divisor only where a value was actually substituted), so this path
+/// needs its own coverage - the search test above uses Lethal Pride, whose
+/// nodes take the fixed-mod branch.
+#[test]
+fn test_timeless_fallback_weights_glorious_vanity() {
+    use pob_egui::data::timeless;
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let stats = timeless::timeless_stats(lua, "vaal").expect("stat list failed");
+    assert!(
+        stats.len() > 20,
+        "Glorious Vanity offers many replacements, got {}",
+        stats.len()
+    );
+    assert!(
+        !stats
+            .iter()
+            .any(|s| s.id.starts_with("abyss_special_ascendancy_notable_")),
+        "abyss ascendancy notables are excluded from the stat list"
+    );
+
+    // powerStatList is 1-based and its order is upstream data, so find the
+    // entry rather than hardcoding a position.
+    let stat_index: usize = lua
+        .load(
+            r#"
+            for i, entry in ipairs(data.powerStatList) do
+                if entry.stat == "FullDPS" then return i end
+            end
+            return 0
+        "#,
+        )
+        .eval()
+        .expect("power stat lookup failed");
+    assert!(stat_index > 0, "FullDPS is a selectable power stat");
+
+    let ids: Vec<String> = stats.iter().take(40).map(|s| s.id.clone()).collect();
+    let weights =
+        timeless::generate_fallback_weights(lua, &ids, stat_index).expect("weights failed");
+    assert!(
+        !weights.is_empty(),
+        "some Glorious Vanity replacements move the selected stat"
+    );
+    for w in &weights {
+        assert!(
+            w.weight1.is_finite() && w.weight2.is_finite(),
+            "weight for {} is not finite: {:?}",
+            w.id,
+            w
+        );
+        assert!(
+            w.weight1.abs() < 1.0e6 && w.weight2.abs() < 1.0e6,
+            "weight for {} is implausible, suggesting a bad divisor: {:?}",
+            w.id,
+            w
+        );
+    }
 }

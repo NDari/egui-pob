@@ -1978,6 +1978,19 @@ const MOD_CATALOG_LUA: &str = r#"
                 table.insert(sourceList, { label = "Suffix", sourceId = "SUFFIX" })
             end
         end
+        -- v2.67: a rare-like unique restricts which sources apply to it
+        if item.rareLikeUnique then
+            local applicableSourceIds = item.rareLikeUnique.supportsCustomModifiers
+            if applicableSourceIds then
+                local newSourceList = {}
+                for _, list in ipairs(sourceList) do
+                    if applicableSourceIds[list.sourceId] then
+                        table.insert(newSourceList, list)
+                    end
+                end
+                sourceList = newSourceList
+            end
+        end
         table.insert(sourceList, { label = "Custom", sourceId = "CUSTOM" })
         return sourceList
     end

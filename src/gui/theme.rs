@@ -23,7 +23,11 @@ impl Theme {
     pub const MAIN_SKILL: Color32 = Color32::from_rgb(255, 200, 50);
 
     // -- Item mod colors --
+    /// Upstream `colorCodes.MAGIC` (`^x8888FF`): a recognised modifier.
     pub const MOD_TEXT: Color32 = Color32::from_rgb(136, 136, 255);
+    /// Upstream `colorCodes.UNSUPPORTED` (`^xF05050`): a line upstream's
+    /// modifier parser does not recognise, so the calc engine ignores it.
+    pub const MOD_UNSUPPORTED: Color32 = Color32::from_rgb(240, 80, 80);
 
     // -- Stat sidebar colors --
     pub const STAT_FIRE: Color32 = Color32::from_rgb(210, 80, 60);
@@ -119,6 +123,28 @@ pub const LABEL_GAP: f32 = 8.0;
 /// Labels longer than this wrap onto a further line instead of widening the
 /// label column for every row.
 pub const WRAP_CHAR_THRESHOLD: usize = 30;
+
+/// Height [`right_aligned_row`] will take for `label` in a `label_width`
+/// column, without drawing it.
+///
+/// Kept next to the layout it predicts so the two cannot drift: both wrap at
+/// [`WRAP_CHAR_THRESHOLD`] and both floor the row at `interact_size.y`, the
+/// height of every control we put in the trailing slot. Callers that need to
+/// place a block of rows before drawing it (the config tab's box layout) size
+/// themselves from this.
+pub fn row_height(ui: &egui::Ui, label_width: f32, label: &str) -> f32 {
+    let mut job = egui::text::LayoutJob::simple(
+        label.to_string(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        Color32::WHITE,
+        f32::INFINITY,
+    );
+    if label.chars().count() > WRAP_CHAR_THRESHOLD {
+        job.wrap.max_width = label_width - LABEL_GAP;
+    }
+    let galley = ui.fonts(|f| f.layout_job(job));
+    galley.rect.height().max(ui.spacing().interact_size.y)
+}
 
 /// Lay out a row the way upstream does: `label_job` right-aligned inside a
 /// fixed-width column, the value or control immediately after it. Because the

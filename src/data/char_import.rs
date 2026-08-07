@@ -222,6 +222,11 @@ pub fn import_passive_tree_and_jewels(
         if not responseLua then
             return "^1Error parsing character data: " .. tostring(err)
         end
+        -- v2.67: account-name imports omit the quest choices, so keep whatever
+        -- the build already has rather than clearing them
+        responseLua.bandit_choice = responseLua.bandit_choice or build.configTab.input.bandit
+        responseLua.pantheon_major = responseLua.pantheon_major or build.configTab.input.pantheonMajorGod
+        responseLua.pantheon_minor = responseLua.pantheon_minor or build.configTab.input.pantheonMinorGod
         local charData = { name = name, league = league, class = class, level = level }
         charData.passives = responseLua
         charData.jewels = responseLua.items
@@ -280,6 +285,8 @@ pub fn import_items_and_skills(
         }
         charData.character = responseLua.character
         charData.equipment = responseLua.items or { }
+        -- v2.67: the guardian block travels with the equipment
+        charData.guardian = responseLua.guardian
         -- v2.66+ no longer sets a status message; report the outcome ourselves
         local ok, err = pcall(function()
             importTab:ImportItemsAndSkills(charData, clearItems, clearSkills, ignoreSwap)

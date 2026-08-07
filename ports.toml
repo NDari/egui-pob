@@ -26,16 +26,23 @@ name = "timeless-seed-search"
 ours = "src/data/timeless.rs::find_timeless_seeds"
 upstream = "src/Classes/TreeTab.lua"
 anchor = "local function searchSingleSocket"
-sha256 = "6f786231ee117aeea00243834706d2803cdd3dbaa2a5c1d1f847bfe88bd3fa21"
-status = "faithful"
-notes = "Seed loop, GV value weighting, Total-attribute pseudo-stat formulas. Protected nodes / socket filter not ported."
+sha256 = "cd398d13425bf60681890ac7effe44dc03438c4ba0ee66a5056d96b5848f0c91"
+status = "diverged"
+notes = """
+Seed loop, GV value weighting, Total-attribute pseudo-stat formulas. Protected \
+nodes / socket filter not ported. Re-synced to v2.67.0: its additions are all \
+Abyss timeless jewels (jewelType.id >= 7), which we do not offer - \
+TIMELESS_JEWEL_TYPES stops at 6 - so the abyss branches, readAbyssJewelLUT and \
+the Zorath class path are deliberately absent (see DIVERGENCES.md). The one \
+non-abyss change, gating the protected-node minimum weight on Militant Faith, \
+falls in the protected-nodes branch we never ported."""
 
 [[port]]
 name = "timeless-fallback-weights"
 ours = "src/data/timeless.rs::generate_fallback_weights"
 upstream = "src/Classes/TreeTab.lua"
 anchor = "local function generateFallbackWeights"
-sha256 = "56b6d4c4aa695bb2358390f6100d463fbfb625221103a3ed4b31bb5a34c922ad"
+sha256 = "c2b8e1383374cab5d41054cd300e2fca969868b1c771ccea405c069d2d32ec5b"
 status = "faithful"
 
 [[port]]
@@ -43,16 +50,22 @@ name = "timeless-fallback-node-building"
 ours = "src/data/timeless.rs::generate_fallback_weights"
 upstream = "src/Classes/TreeTab.lua"
 anchor = "local function setupFallbackWeights"
-sha256 = "b80b228b7bf8ad121e761a6ea9a761a72dc5f54ce9d55862fbdbd7381d149dea"
+sha256 = "d40ee87250ef6eadf78092e31089d81f2e34c7f62ab3652e1f3e6f72427bfded"
 status = "faithful"
-notes = "Node/modList construction incl. replaceHelperFunc vaal substitution."
+notes = """
+Node/modList construction incl. replaceHelperFunc vaal substitution. Re-synced \
+to v2.67.0: buildStatModLists (one mod list per stat, so stats sharing a display \
+line score separately), splitting on stat count rather than line count, and a \
+divisor of 100 only where a value was actually substituted. Upstream's \
+usesVariableRolls covers Glorious Vanity plus Abyss jewels; ours is Glorious \
+Vanity alone, since we do not offer Abyss types (see DIVERGENCES.md)."""
 
 [[port]]
 name = "timeless-stat-list"
 ours = "src/data/timeless.rs::timeless_stats"
 upstream = "src/Classes/TreeTab.lua"
 anchor = "local function buildMods()"
-sha256 = "304512556aa20a45c77ba920df2e8dcb539626e91f975f84d44543ba06411cfb"
+sha256 = "6243fa1edefa347d61b27ad69b8cfb0efe569068a3d3c93c72f856a9e8f5db1e"
 status = "faithful"
 notes = "Ignored-mod filter, total pseudo-stat, notable/small split."
 
@@ -141,7 +154,7 @@ ours = "src/data/char_import.rs::import_passive_tree_and_jewels"
 upstream = "src/Classes/ImportTab.lua"
 anchor = "function ImportTabClass:DownloadPassiveTree"
 end_anchor = "function ImportTabClass:DownloadItems"
-sha256 = "98f7ea7ba248a6cd4a85d0d7912dd41d38647077f234a1f85b4d9066baf6058d"
+sha256 = "74945fa18a25eb245f4f8243b64a57964e91f99d2cb51f4184214f8dbd759853"
 status = "faithful"
 notes = "charData shaping for the legacy site API (passives/jewels fields)."
 
@@ -151,7 +164,7 @@ ours = "src/data/char_import.rs::import_items_and_skills"
 upstream = "src/Classes/ImportTab.lua"
 anchor = "function ImportTabClass:DownloadItems"
 end_anchor = "function ImportTabClass:DownloadSiteCharacterList"
-sha256 = "8ef34d046712fda609fdc2ce598492a4c1e5544a491e29f41969ea4557718729"
+sha256 = "402b542b7b9e41e2d34b9cca027e42dfde735c7d5b478ffd5afddc37b74b649d"
 status = "faithful"
 notes = "charData shaping for the legacy site API (equipment field, top-level level)."
 
@@ -160,7 +173,7 @@ name = "add-modifier-popup"
 ours = "src/data/crafting.rs::MOD_CATALOG_LUA"
 upstream = "src/Classes/ItemsTab.lua"
 anchor = "function ItemsTabClass:AddCustomModifierToDisplayItem"
-sha256 = "23f13c9ac603ede066d6a3cc97780bb0c59de94b80381f112aab31e74faa6208"
+sha256 = "edaa0b8d2aa13d76856d3ed7bef35ad9b9579925d48a3d112dfd6dad6588a74a"
 status = "faithful"
 notes = "Source eligibility + per-source mod-list building/sorting + apply/sort-value semantics. Labels drop the ^8 color codes (egui styling instead)."
 
@@ -267,3 +280,45 @@ end_anchor = "local catalystTags = "
 sha256 = "adacf8d3a422dac48882d55d0ba85167c48189c2c8433d3fe0eee030174a065e"
 status = "faithful"
 notes = "1-based catalyst indices drive item scaling; order must match exactly."
+
+[[port]]
+name = "custom-mod-block-callbacks"
+ours = "src/data/custom_mods.rs::delete_group,set_title,set_enabled,set_text"
+upstream = "src/Classes/ConfigTab.lua"
+anchor = 'local CustomModBlockClass = newClass("CustomModBlockControl"'
+end_anchor = "function CustomModBlockClass:GetSize"
+sha256 = "9052d7ee23fa61936ebbfc8e98c0c4920c0c650e378ad42b18cd097a00b8d3c4"
+status = "faithful"
+notes = """
+The per-group edit callbacks are closures inside a Control constructor, so they \
+cannot be called; only their bodies are ported (mutate the block, record undo, \
+rebuild the mod list, mark the build dirty). UpdateCustomModsControls is \
+deliberately not called - it only rebuilds upstream's own controls, and appends \
+to configTab.controls on every call - so delete_group reproduces just its data \
+guarantee that the list is never left empty. Line colouring calls \
+modLib.parseMod directly rather than porting inactiveText.
+"""
+
+[[port]]
+name = "custom-mod-add-group"
+ours = "src/data/custom_mods.rs::add_group"
+upstream = "src/Classes/ConfigTab.lua"
+anchor = 'self.controls.customModsAddBlock = new("ButtonControl"'
+end_anchor = "self.customModsBlockControls = { }"
+sha256 = "956e351e6139799c2fcfbce42af52e64973869c6f6bbb51ed41286895603397d"
+status = "faithful"
+notes = "Group naming (\"Group \" .. #list + 1) and the commit sequence; the control rebuild is skipped as above."
+
+[[port]]
+name = "compare-entry-socket-groups"
+ours = "src/data/compare_helper.lua::patchCompareEntryRebuild"
+upstream = "src/Classes/CompareEntry.lua"
+anchor = "function CompareEntryClass:Rebuild"
+sha256 = "9c5a95da49c8592495573e63e0879849f551074092bc884ea697f2fd4f86cd6c"
+status = "diverged"
+notes = """
+Not a port - a decorator that prepends skillsTab:UpdateSocketGroups() to \
+CompareEntry:Rebuild, fixing an upstream bug (see DIVERGENCES.md, "Compare \
+entries reprocess their socket groups"). Registered so a pin bump surfaces it: \
+if upstream adds the call itself, drop the decorator and the DIVERGENCES entry.
+"""

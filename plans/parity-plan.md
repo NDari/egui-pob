@@ -620,13 +620,19 @@ radius, driven by a new lookup-table pipeline.
 
 ### Config Tab (custom modifiers reworked, stat previews added)
 
-- [ ] Custom modifier **groups** replace the single custom-mods text box: each
-  group has a title, enable checkbox, resizable mod text, and delete button,
-  with an "Add Mod Group" button. Mods are sourced as `Custom:<title>`
-- [ ] `<CustomModifierBlock title enabled>` XML persistence, plus migration of
-  the legacy `customMods` input on load (`input.customMods` is then cleared)
-- [ ] Config undo state changed shape: `{ input, customModsList }` instead of
-  a bare input copy (old states still restored via a fallback branch)
+- [x] Custom modifier **groups** replace the single custom-mods text box: each
+  group has a title, enable checkbox, mod text, and delete button, with an
+  "Add Mod Group" button. Mods are sourced as `Custom:<title>` (upstream's
+  `customModsList` model and `BuildModList`; our editor also colours each line
+  by `modLib.parseMod` the way upstream's `inactiveText` does. Ours commits on
+  blur rather than per keystroke - see DIVERGENCES.md. The box is not
+  drag-resizable; it grows with its content)
+- [x] `<CustomModifierBlock title enabled>` XML persistence, plus migration of
+  the legacy `customMods` input on load (`input.customMods` is then cleared) -
+  entirely upstream's `ConfigTab:Load`/`Save`, which we call
+- [x] Config undo state changed shape: `{ input, customModsList }` instead of
+  a bare input copy (old states still restored via a fallback branch) -
+  upstream's `CreateUndoState`/`RestoreUndoState`, which we call
 - [ ] "Add Mod" popup per group: catalog built from `masterMods`, `itemMods`,
   `veiledMods` and `beastCraft`, collapsed by numeric template, sorted
   ignoring values, with fuzzy multi-word search scoring
@@ -644,9 +650,8 @@ radius, driven by a new lookup-table pipeline.
 - [ ] "# of Brands attached to enemy (if not maximum)" is now gated by
   `ifSkillFlag = "brand"` instead of an enemy multiplier
 - [ ] New "# of Permanent Minions (if not maximum)" count option
-- Note: our config tab renders the `text` option type solely for `customMods`,
-  which upstream has now removed from `ConfigOptions`. That control disappears
-  unless the group UI above is built.
+- Note: the "Add Mod" popup above is the one piece of the custom-modifier
+  rework still outstanding; groups themselves are editable as free text.
 
 ### Items Tab
 

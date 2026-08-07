@@ -12,14 +12,14 @@ pub enum ConfigOption {
         label: String,
         value: bool,
         tooltip: Option<String>,
-        visible: bool,
+        vis: Visibility,
     },
     Count {
         var: String,
         label: String,
         value: String,
         tooltip: Option<String>,
-        visible: bool,
+        vis: Visibility,
     },
     List {
         var: String,
@@ -27,15 +27,52 @@ pub enum ConfigOption {
         options: Vec<ListEntry>,
         selected_index: usize,
         tooltip: Option<String>,
-        visible: bool,
+        vis: Visibility,
     },
     Text {
         var: String,
         label: String,
         value: String,
         tooltip: Option<String>,
-        visible: bool,
+        vis: Visibility,
     },
+}
+
+/// Per-option visibility state, mirroring upstream `ConfigTab`'s `control.shown`.
+///
+/// `relevant` and `show_all_excluded` come straight from upstream's shared
+/// `Modules/ConfigVisibility`; the rest reproduce the wrapper that ConfigTab
+/// layers on top of it (ConfigTab.lua `if not varData.hideIfInvalid then ...`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Visibility {
+    /// `ConfigVisibility.isRelevantForBuild`: every `ifX` predicate passes.
+    pub relevant: bool,
+    /// `ConfigVisibility.isShowAllExcluded`: stays hidden even under "show all".
+    pub show_all_excluded: bool,
+    /// The current value differs from the option's default.
+    pub modified: bool,
+    /// Upstream `hideIfInvalid`: never list this when irrelevant, modified or not.
+    pub hide_if_invalid: bool,
+}
+
+impl Visibility {
+    /// Upstream's inner `control.shown`: the predicates pass, or the "show all"
+    /// toggle overrides them for an option that is not on the exclusion list.
+    pub fn eligible(&self, show_all: bool) -> bool {
+        self.relevant || (show_all && !self.show_all_excluded)
+    }
+
+    /// Upstream's outer `control.shown`: an ineligible option stays listed when
+    /// the user has moved it off its default, unless it is `hideIfInvalid`.
+    pub fn shown(&self, show_all: bool) -> bool {
+        self.eligible(show_all) || (!self.hide_if_invalid && self.modified)
+    }
+
+    /// Listed only because it is modified. Upstream colours these red and adds
+    /// an "invalid" line to the tooltip.
+    pub fn invalid(&self, show_all: bool) -> bool {
+        !self.eligible(show_all) && !self.hide_if_invalid && self.modified
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -75,13 +112,18 @@ impl ConfigOption {
         }
     }
 
-    pub fn is_visible(&self) -> bool {
+    pub fn vis(&self) -> Visibility {
         match self {
-            ConfigOption::Section { .. } => true,
-            ConfigOption::Check { visible, .. }
-            | ConfigOption::Count { visible, .. }
-            | ConfigOption::List { visible, .. }
-            | ConfigOption::Text { visible, .. } => *visible,
+            // Sections are laid out by their children; upstream hides a section
+            // when none of its controls are shown (ConfigTab.lua UpdateControls).
+            ConfigOption::Section { .. } => Visibility {
+                relevant: true,
+                ..Default::default()
+            },
+            ConfigOption::Check { vis, .. }
+            | ConfigOption::Count { vis, .. }
+            | ConfigOption::List { vis, .. }
+            | ConfigOption::Text { vis, .. } => *vis,
         }
     }
 
@@ -111,114 +153,27 @@ pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Erro
         .load("return LoadModule('Modules/ConfigOptions')")
         .eval()?;
 
-    // Helper: evaluate visibility and tooltip for one entry in Lua.
+    // Visibility comes from upstream's shared ConfigVisibility module, the same
+    // one the Compare tab uses, so the two views cannot drift apart. The extra
+    // `modified` / `hideIfInvalid` state reproduces the wrapper ConfigTab layers
+    // on top of it (ConfigTab.lua, `if not varData.hideIfInvalid then ...`).
     let visibility_fn: LuaFunction = lua
         .load(
             r#"
             local build = mainObject_ref.main.modes['BUILD']
-            local env = build.calcsTab and build.calcsTab.mainEnv
-            local spec = build.spec
-            local input = build.configTab.input
-
-            local function anyMatch(v, check)
-                if type(v) == "table" then
-                    for _, entry in ipairs(v) do
-                        if check(entry) then return true end
-                    end
-                    return false
-                end
-                return check(v) and true or false
-            end
+            local configTab = build.configTab
+            local configVisibility = LoadModule("Modules/ConfigVisibility")
 
             return function(varData)
-                local shown = true
-                local function fail(check)
-                    return not anyMatch(check, function() return true end) or false
-                end
+                local relevant = configVisibility.isRelevantForBuild(varData, build) and true or false
+                local excluded = configVisibility.isShowAllExcluded(varData) and true or false
 
-                if varData.ifNode then
-                    shown = shown and anyMatch(varData.ifNode, function(nodeId)
-                        if spec.allocNodes[nodeId] then return true end
-                        local node = spec.nodes[nodeId]
-                        if node and node.type == "Keystone" and env
-                           and env.keystonesAdded and env.keystonesAdded[node.dn] then
-                            return true
-                        end
-                        return false
-                    end)
-                end
-                if shown and varData.ifOption then
-                    shown = shown and anyMatch(varData.ifOption, function(opt)
-                        return input[opt] and true or false
-                    end)
-                end
-                if shown and varData.ifCond then
-                    shown = shown and anyMatch(varData.ifCond, function(cond)
-                        return env and env.conditionsUsed and env.conditionsUsed[cond] and true or false
-                    end)
-                end
-                if shown and varData.ifMinionCond then
-                    shown = shown and anyMatch(varData.ifMinionCond, function(cond)
-                        return env and env.minionConditionsUsed and env.minionConditionsUsed[cond] and true or false
-                    end)
-                end
-                if shown and varData.ifEnemyCond then
-                    shown = shown and anyMatch(varData.ifEnemyCond, function(cond)
-                        return env and env.enemyConditionsUsed and env.enemyConditionsUsed[cond] and true or false
-                    end)
-                end
-                if shown and varData.ifCondTrue then
-                    shown = shown and anyMatch(varData.ifCondTrue, function(cond)
-                        return env and env.player and env.player.modDB
-                               and env.player.modDB.conditions[cond] and true or false
-                    end)
-                end
-                if shown and varData.ifMult then
-                    shown = shown and anyMatch(varData.ifMult, function(m)
-                        return env and env.multipliersUsed and env.multipliersUsed[m] and true or false
-                    end)
-                end
-                if shown and varData.ifEnemyMult then
-                    shown = shown and anyMatch(varData.ifEnemyMult, function(m)
-                        return env and env.enemyMultipliersUsed and env.enemyMultipliersUsed[m] and true or false
-                    end)
-                end
-                if shown and varData.ifStat then
-                    shown = shown and anyMatch(varData.ifStat, function(s)
-                        return env and ((env.perStatsUsed and env.perStatsUsed[s])
-                               or (env.enemyMultipliersUsed and env.enemyMultipliersUsed[s])) and true or false
-                    end)
-                end
-                if shown and varData.ifSkill then
-                    shown = shown and anyMatch(varData.ifSkill, function(name)
-                        if not env or not env.player or not env.player.activeSkillList then return false end
-                        for _, sk in ipairs(env.player.activeSkillList) do
-                            if sk.activeEffect and sk.activeEffect.grantedEffect
-                               and sk.activeEffect.grantedEffect.name == name then
-                                return true
-                            end
-                        end
-                        return false
-                    end)
-                end
-                if shown and varData.ifSkillFlag then
-                    shown = shown and anyMatch(varData.ifSkillFlag, function(flag)
-                        if not env or not env.player or not env.player.mainSkill then return false end
-                        local sk = env.player.mainSkill
-                        return sk.skillFlags and sk.skillFlags[flag] or false
-                    end)
-                end
-                if shown and varData.ifSkillData then
-                    shown = shown and anyMatch(varData.ifSkillData, function(key)
-                        if not env or not env.player or not env.player.mainSkill then return false end
-                        local sk = env.player.mainSkill
-                        return sk.skillData and sk.skillData[key] and true or false
-                    end)
-                end
+                local cur = configTab.input[varData.var]
+                local modified = cur ~= nil and cur ~= configTab:GetDefaultState(varData.var, type(cur))
 
                 -- tooltip: only the static string form (ignore tooltipFunc)
                 local tooltip = type(varData.tooltip) == "string" and varData.tooltip or nil
-                return shown, tooltip
+                return relevant, excluded, modified, varData.hideIfInvalid and true or false, tooltip
             end
             "#,
         )
@@ -246,9 +201,15 @@ pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Erro
         let opt_type: String = entry.get("type").unwrap_or_default();
         let label = strip_color_codes(&label);
 
-        let (visible, tooltip_raw) = visibility_fn
-            .call::<(bool, Option<String>)>(entry.clone())
-            .unwrap_or((true, None));
+        let (relevant, show_all_excluded, modified, hide_if_invalid, tooltip_raw) = visibility_fn
+            .call::<(bool, bool, bool, bool, Option<String>)>(entry.clone())
+            .unwrap_or((true, false, false, false, None));
+        let vis = Visibility {
+            relevant,
+            show_all_excluded,
+            modified,
+            hide_if_invalid,
+        };
         let tooltip = tooltip_raw.map(|s| strip_color_codes(&s));
 
         match opt_type.as_str() {
@@ -259,7 +220,7 @@ pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Erro
                     label,
                     value,
                     tooltip,
-                    visible,
+                    vis,
                 });
             }
             "count" | "countAllowZero" | "integer" | "float" => {
@@ -276,7 +237,7 @@ pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Erro
                     label,
                     value,
                     tooltip,
-                    visible,
+                    vis,
                 });
             }
             "list" => {
@@ -289,7 +250,7 @@ pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Erro
                     options: list_entries,
                     selected_index,
                     tooltip,
-                    visible,
+                    vis,
                 });
             }
             "text" => {
@@ -299,7 +260,7 @@ pub fn extract_config_options(lua: &Lua) -> Result<Vec<ConfigOption>, mlua::Erro
                     label,
                     value,
                     tooltip,
-                    visible,
+                    vis,
                 });
             }
             _ => {

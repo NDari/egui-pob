@@ -29,17 +29,68 @@ end
 
 pob_compare = {}
 
+-- Upstream bug fix (see DIVERGENCES.md): a CompareEntry never reprocesses its
+-- socket groups, so its gems never pick up the matching-socket quality bonus
+-- and every quality-derived stat reads low against the primary build.
+--
+-- Build.lua does this before every BuildOutput:
+--     -- reprocess socket groups as they might depend on items which don't
+--     -- necessarily load first.
+--     self.skillsTab:UpdateSocketGroups()
+-- but CompareEntry:LoadFromXML and CompareEntry:Rebuild both skip it, and
+-- CompareEntry loads its Skills section before its Items section, so the
+-- socket colours are simply not known yet when the gems are processed.
+--
+-- Decorating the class rather than porting the loader: the fix is one call in
+-- the right place, and wrapping keeps the rest of upstream's loading intact.
+--
+-- The class is registered lazily, on the first import, so this cannot run at
+-- load time - it is applied on demand and is idempotent.
+local function patchCompareEntryRebuild()
+    local entryClass = common.classes and common.classes["CompareEntry"]
+    if not entryClass or entryClass.pobEguiSocketGroupFix then
+        return
+    end
+    entryClass.pobEguiSocketGroupFix = true
+
+    local innerRebuild = entryClass.Rebuild
+    entryClass.Rebuild = function(self, ...)
+        if self.skillsTab and self.skillsTab.UpdateSocketGroups then
+            self.skillsTab:UpdateSocketGroups()
+        end
+        return innerRebuild(self, ...)
+    end
+end
+
+-- Re-run an entry's output now that its items are loaded. Needed after a fresh
+-- import: LoadFromXML does its own BuildOutput before the patch above can help
+-- it, since the class does not exist until that first load is under way.
+local function rebuildEntrySocketGroups(entry)
+    patchCompareEntryRebuild()
+    if entry and entry.Rebuild then
+        entry:Rebuild()
+    end
+end
+
 local function getBuild()
     return mainObject_ref.main.modes['BUILD']
 end
 
 function pob_compare.import(xml, label)
-    local ok = getBuild().compareTab:ImportBuild(xml, label)
+    local tab = getBuild().compareTab
+    local ok = tab:ImportBuild(xml, label)
+    if ok then
+        rebuildEntrySocketGroups(tab.compareEntries[#tab.compareEntries])
+    end
     return ok and true or false
 end
 
 function pob_compare.importCode(code)
-    local ok = getBuild().compareTab:ImportFromCode(code)
+    local tab = getBuild().compareTab
+    local ok = tab:ImportFromCode(code)
+    if ok then
+        rebuildEntrySocketGroups(tab.compareEntries[#tab.compareEntries])
+    end
     return ok and true or false
 end
 

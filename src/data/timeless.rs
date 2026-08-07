@@ -182,7 +182,10 @@ pub fn timeless_stats(lua: &Lua, type_name: &str) -> Result<Vec<TimelessStat>, m
         local smalls = {}
         local prefix = "^" .. typeName .. "_"
         for _, node in ipairs(treeData.legion.nodes) do
-            if node.id:match(prefix) and not ignored[node.dn] and not node.ks then
+            -- v2.67: abyss ascendancy notables are excluded from the stat list
+            if node.id:match(prefix)
+               and not node.id:match("^abyss_special_ascendancy_notable_")
+               and not ignored[node.dn] and not node.ks then
                 if node["not"] then
                     table.insert(out, { id = node.id, name = node.dn, notable = true })
                 else
@@ -542,6 +545,22 @@ pub fn generate_fallback_weights(
             return statToFix
         end
 
+        -- Upstream v2.67's buildStatModLists: give each stat its own mod list
+        -- even when several stats share a single display line, by describing
+        -- one stat at a time at a value of 100.
+        local function buildStatModLists(legionPassive)
+            local modLists = {}
+            for statIndex, statKey in ipairs(legionPassive.sortedStats) do
+                local statValues = {}
+                for key in pairs(legionPassive.stats) do
+                    statValues[key] = key == statKey and 100 or 0
+                end
+                local line = data.describeStats(statValues, "stat_descriptions")[1]
+                modLists[statIndex] = { modList = modLib.parseMod(line), divisor = 100 }
+            end
+            return modLists
+        end
+
         local nodes = {}
         for _, wantedId in ipairs(ids) do
             local newNode = nil
@@ -551,37 +570,40 @@ pub fn generate_fallback_weights(
                    or (totalModIDs[wantedId] and totalModIDs[wantedId][legionNode.id]) then
                     newNode = { id = wantedId, name = legionNode.dn }
                     if legionNode.id:match("^vaal_") then
-                        if #legionNode.sd == 2 then
+                        -- v2.67: split on the number of stats rather than the
+                        -- number of display lines, since several stats can
+                        -- share one line and one stat can span several
+                        if #legionNode.sortedStats > 1 then
                             newNode.calcMultiple = true
                             if legionNode.modListGenerated then
                                 newNode.node = copyTable(legionNode.modListGenerated)
                             else
-                                local modList1 = modLib.parseMod(replaceHelper(
-                                    legionNode.sd[1], legionNode.sortedStats[1],
-                                    legionNode.stats[legionNode.sortedStats[1]], 100))
-                                local modList2 = modLib.parseMod(replaceHelper(
-                                    legionNode.sd[2], legionNode.sortedStats[2],
-                                    legionNode.stats[legionNode.sortedStats[2]], 100))
-                                local modLists = {
-                                    { modList = modList1 }, { modList = modList2 },
-                                }
+                                local modLists = buildStatModLists(legionNode)
                                 legionNode.modListGenerated = copyTable(modLists)
                                 newNode.node = copyTable(modLists)
                             end
-                            newNode.node[1].id = legionNode.id
-                            newNode.node[2].id = legionNode.id
+                            for _, node in ipairs(newNode.node) do
+                                node.id = legionNode.id
+                            end
                         else
-                            if legionNode.modListGenerated then
+                            local originalLine = legionNode.sd[1]
+                            local line = replaceHelper(
+                                originalLine, legionNode.sortedStats[1],
+                                legionNode.stats[legionNode.sortedStats[1]], 100)
+                            if line == originalLine and #legionNode.sd > 1 then
+                                -- Some fixed game stats span several display
+                                -- lines; score the whole effect together.
+                                newNode.modList = legionNode.modList
+                            elseif legionNode.modListGenerated then
                                 newNode.modList = copyTable(legionNode.modListGenerated)
                             else
-                                local modList = modLib.parseMod(replaceHelper(
-                                    legionNode.sd[1], legionNode.sortedStats[1],
-                                    legionNode.stats[legionNode.sortedStats[1]], 100))
+                                local modList = modLib.parseMod(line)
                                 legionNode.modListGenerated = modList
                                 newNode.modList = modList
                             end
+                            -- Only a substituted line was scaled by 100
+                            newNode.divisor = line ~= originalLine and 100 or 1
                         end
-                        newNode.divisor = 100
                     else
                         newNode.modList = legionNode.modList
                         if totalModIDs[wantedId] then
@@ -599,12 +621,26 @@ pub fn generate_fallback_weights(
                     if legionAddition.id == wantedId
                        or (totalModIDs[wantedId] and totalModIDs[wantedId][legionAddition.id]) then
                         newNode = { id = wantedId, name = legionAddition.dn }
-                        if legionAddition.modList then
+                        -- v2.67: multi-stat additions score each stat separately
+                        if isVaal and #legionAddition.sortedStats > 1 then
+                            newNode.calcMultiple = true
+                            if legionAddition.modListGenerated then
+                                newNode.node = copyTable(legionAddition.modListGenerated)
+                            else
+                                local modLists = buildStatModLists(legionAddition)
+                                legionAddition.modListGenerated = copyTable(modLists)
+                                newNode.node = copyTable(modLists)
+                            end
+                            for _, node in ipairs(newNode.node) do
+                                node.id = legionAddition.id
+                            end
+                        elseif legionAddition.modList then
                             newNode.modList = legionAddition.modList
                         elseif legionAddition.modListGenerated then
                             newNode.modList = legionAddition.modListGenerated
                         else
-                            local line = legionAddition.sd[1]
+                            local originalLine = legionAddition.sd[1]
+                            local line = originalLine
                             if isVaal then
                                 for key, stat in pairs(legionAddition.stats) do
                                     line = replaceHelper(line, key, stat, 100)
@@ -613,10 +649,10 @@ pub fn generate_fallback_weights(
                             local modList = modLib.parseMod(line)
                             legionAddition.modListGenerated = modList
                             newNode.modList = modList
+                            -- v2.67: only a substituted line was scaled by 100
+                            newNode.divisor = line ~= originalLine and 100 or 1
                         end
-                        if isVaal then
-                            newNode.divisor = 100
-                        elseif totalModIDs[wantedId] then
+                        if not isVaal and totalModIDs[wantedId] then
                             newNode.divisor = newNode.modList[1].value
                         end
                         break
@@ -648,11 +684,14 @@ pub fn generate_fallback_weights(
             return math.floor(v * weightScalar * 1000 + 0.5) / 1000
         end
         for _, newNode in ipairs(nodes) do
+            -- v2.67: a multi-line node's individual lines may carry their own
+            -- divisor, which takes precedence over the entry's
+            -- (`node.divisor or newNode.divisor or 1`)
             local divisor = newNode.divisor or 1
             local weight1, weight2
             if newNode.calcMultiple then
-                weight1 = statGain(newNode.node[1]) / divisor
-                weight2 = statGain(newNode.node[2]) / divisor
+                weight1 = statGain(newNode.node[1]) / (newNode.node[1].divisor or divisor)
+                weight2 = statGain(newNode.node[2]) / (newNode.node[2].divisor or divisor)
             else
                 weight1 = statGain(newNode) / divisor
             end
