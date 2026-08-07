@@ -1434,6 +1434,26 @@ fn show_stat_lines(ui: &mut egui::Ui, stats: &SidebarStats) {
     use super::theme;
 
     ui.spacing_mut().item_spacing.y = 2.0;
+
+    // Width of the right-aligned label column, measured from the widest label
+    // that has a value beside it. Upstream hardcodes x=170 in a 300px control;
+    // our sidebar is resizable, so measure and cap at a share of the panel to
+    // leave room for the value.
+    let avail = ui.available_width();
+    let label_width = stats
+        .lines
+        .iter()
+        .filter(|l| !l.is_spacer() && !l.center && l.rhs.is_some())
+        .filter_map(|l| l.lhs.as_ref().map(|lhs| (lhs, l.height)))
+        .map(|(lhs, height)| {
+            let size = if height <= 14.0 { 11.0 } else { 13.0 };
+            let job = theme::pob_layout_job(lhs, size, egui::Color32::WHITE);
+            ui.fonts(|f| f.layout_job(job)).rect.width()
+        })
+        .fold(0.0_f32, f32::max)
+        + theme::LABEL_GAP;
+    let label_width = label_width.clamp(40.0, (avail * 0.7).max(40.0));
+
     for line in &stats.lines {
         if line.is_spacer() {
             // Section separator (upstream emits height-6 breaks between the
@@ -1455,31 +1475,33 @@ fn show_stat_lines(ui: &mut egui::Ui, stats: &SidebarStats) {
             }
             continue;
         }
-        ui.horizontal(|ui| {
-            if let Some(ref rhs) = line.rhs {
-                // Value flush right, label taking the remaining width
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(theme::pob_layout_job(rhs, size, egui::Color32::WHITE));
-                    if let Some(ref lhs) = line.lhs {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.add(
-                                egui::Label::new(theme::pob_layout_job(
-                                    lhs,
-                                    size,
-                                    egui::Color32::WHITE,
-                                ))
-                                .truncate(),
-                            );
-                        });
-                    }
+        match (&line.lhs, &line.rhs) {
+            // Label right-aligned in the shared column, value left-aligned
+            // just after it, matching upstream's TextListControl columns
+            // ({x=170, RIGHT_X} then {x=174, LEFT}).
+            (lhs, Some(rhs)) => {
+                let label_job = lhs
+                    .as_ref()
+                    .map(|l| theme::pob_layout_job(l, size, egui::Color32::WHITE))
+                    .unwrap_or_default();
+                theme::right_aligned_row(ui, label_width, label_job, None, |ui| {
+                    ui.add(
+                        egui::Label::new(theme::pob_layout_job(rhs, size, egui::Color32::WHITE))
+                            .truncate(),
+                    );
                 });
-            } else if let Some(ref lhs) = line.lhs {
-                ui.add(
-                    egui::Label::new(theme::pob_layout_job(lhs, size, egui::Color32::WHITE))
-                        .truncate(),
-                );
             }
-        });
+            // Label-only lines (headers, notes) keep the full panel width.
+            (Some(lhs), None) => {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(theme::pob_layout_job(lhs, size, egui::Color32::WHITE))
+                            .truncate(),
+                    );
+                });
+            }
+            (None, None) => {}
+        }
     }
 }
 

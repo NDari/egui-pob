@@ -74,13 +74,19 @@ impl ConfigPanel {
         }
     }
 
-    /// Width of the label column, measured once from the widest label so no
-    /// label is ever truncated and every control lands on the same x.
+    /// Width of the label column, measured once so every control lands on the
+    /// same x.
+    ///
+    /// Sized to the widest label that fits on one line (at most
+    /// [`WRAP_CHAR_THRESHOLD`] characters). Longer labels wrap to a second
+    /// line inside this same width rather than widening the column, which
+    /// keeps the gutter tight instead of letting one 50-character outlier set
+    /// it for all ~700 options.
     ///
     /// Upstream anchors every config control at a fixed x (234px from the
     /// section edge in `ConfigTab`) and right-aligns the label against it,
-    /// shrinking the font for labels wider than the column. We measure
-    /// instead, which keeps one font size and adapts to theme/DPI changes.
+    /// shrinking the font from 14pt to 12pt for labels wider than the column.
+    /// We wrap instead, keeping one font size and adapting to theme/DPI.
     fn label_column_width(&mut self, ui: &egui::Ui) -> f32 {
         if let Some(w) = self.label_col_width {
             return w;
@@ -90,17 +96,17 @@ impl ConfigPanel {
             .options
             .iter()
             .filter(|o| !matches!(o, ConfigOption::Section { .. }))
-            .map(|o| {
-                ui.fonts(|f| {
-                    f.layout_no_wrap(o.label().to_string(), font.clone(), egui::Color32::WHITE)
-                })
-                .rect
-                .width()
+            .map(ConfigOption::label)
+            .filter(|l| l.chars().count() <= super::theme::WRAP_CHAR_THRESHOLD)
+            .map(|l| {
+                ui.fonts(|f| f.layout_no_wrap(l.to_string(), font.clone(), egui::Color32::WHITE))
+                    .rect
+                    .width()
             })
             .fold(0.0_f32, f32::max);
         // Leave a gap before the control, and keep a pathological label from
         // pushing every control off the right edge.
-        let w = (widest + 8.0).clamp(80.0, 520.0);
+        let w = (widest + super::theme::LABEL_GAP).clamp(80.0, 520.0);
         self.label_col_width = Some(w);
         w
     }
@@ -559,14 +565,8 @@ impl ConfigPanel {
     }
 }
 
-/// Lay out one config row as upstream does: the label right-aligned in a
-/// fixed-width column, the control immediately after it. Because the column
-/// is the same width for every row, all the trailing "?" and ":" line up and
-/// every checkbox and input shares one vertical axis.
-///
-/// The column is allocated at an exact size, so a label that somehow exceeds
-/// it overhangs to the left (as upstream's right-anchored labels do) instead
-/// of pushing its control out of alignment.
+/// One config row: plain-text label right-aligned in the shared column, then
+/// the control. See [`super::theme::right_aligned_row`].
 fn labeled_row<R>(
     ui: &mut egui::Ui,
     label_width: f32,
@@ -574,31 +574,13 @@ fn labeled_row<R>(
     tooltip: Option<&str>,
     add_control: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
-    ui.horizontal(|ui| {
-        let height = ui.spacing().interact_size.y;
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(label_width, height), egui::Sense::hover());
-        let text_pos = egui::pos2(rect.right() - 4.0, rect.center().y);
-        let galley = ui.painter().layout_no_wrap(
-            label.to_string(),
-            egui::TextStyle::Body.resolve(ui.style()),
-            ui.visuals().text_color(),
-        );
-        ui.painter().galley(
-            egui::pos2(
-                text_pos.x - galley.rect.width(),
-                text_pos.y - galley.rect.height() / 2.0,
-            ),
-            galley,
-            ui.visuals().text_color(),
-        );
-        if let Some(t) = tooltip {
-            ui.interact(rect, ui.id().with(label), egui::Sense::hover())
-                .on_hover_text(t);
-        }
-        add_control(ui)
-    })
-    .inner
+    let job = egui::text::LayoutJob::simple(
+        label.to_string(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        ui.visuals().text_color(),
+        f32::INFINITY,
+    );
+    super::theme::right_aligned_row(ui, label_width, job, tooltip, add_control)
 }
 
 fn config_set_label(set: &ConfigSetInfo) -> String {

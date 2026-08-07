@@ -112,3 +112,75 @@ pub fn pob_layout_job(text: &str, size: f32, default: Color32) -> egui::text::La
     }
     job
 }
+
+/// Gap between the end of a right-aligned label and its value/control.
+pub const LABEL_GAP: f32 = 8.0;
+
+/// Labels longer than this wrap onto a further line instead of widening the
+/// label column for every row.
+pub const WRAP_CHAR_THRESHOLD: usize = 30;
+
+/// Lay out a row the way upstream does: `label_job` right-aligned inside a
+/// fixed-width column, the value or control immediately after it. Because the
+/// column is the same width for every row, trailing "?" / ":" line up and
+/// every control shares one vertical axis.
+///
+/// Upstream builds this from fixed pixel columns: `ConfigTab` anchors controls
+/// at x=234 with right-aligned labels, and the sidebar's `TextListControl` uses
+/// `{{x=170, align="RIGHT_X"}, {x=174, align="LEFT"}}`.
+///
+/// Labels over [`WRAP_CHAR_THRESHOLD`] characters wrap within the column, and
+/// the trailing content aligns with the *last* line so it stays attached to
+/// where the label ends. The column is allocated at an exact size, so a label
+/// that still overflows overhangs to the left (as upstream's right-anchored
+/// labels do) rather than pushing its control out of line.
+pub fn right_aligned_row<R>(
+    ui: &mut egui::Ui,
+    label_width: f32,
+    mut label_job: egui::text::LayoutJob,
+    tooltip: Option<&str>,
+    add_trailing: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    if label_job.text.chars().count() > WRAP_CHAR_THRESHOLD {
+        label_job.wrap.max_width = label_width - LABEL_GAP;
+    }
+    // Right-align every wrapped line against the column edge, so the trailing
+    // "?" / ":" of the last line sits directly beside the value.
+    label_job.halign = egui::Align::RIGHT;
+    let tooltip_id = ui.id().with(&label_job.text);
+    let galley = ui.fonts(|f| f.layout_job(label_job));
+
+    let trailing_h = ui.spacing().interact_size.y;
+    let line_h = galley
+        .rows
+        .last()
+        .map_or(trailing_h, |r| r.rect.height().max(1.0));
+    // Distance from the top of the text block to the centre of its last line.
+    let last_line_centre = galley.rect.height() - line_h / 2.0;
+
+    ui.horizontal_top(|ui| {
+        let row_h = galley.rect.height().max(trailing_h);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(label_width, row_h), egui::Sense::hover());
+        let color = ui.visuals().text_color();
+        ui.painter().galley(
+            egui::pos2(rect.right() - LABEL_GAP, rect.top()),
+            galley,
+            color,
+        );
+        if let Some(t) = tooltip {
+            ui.interact(rect, tooltip_id, egui::Sense::hover())
+                .on_hover_text(t);
+        }
+        ui.vertical(|ui| {
+            // Drop the trailing content so its centre matches the last line's.
+            let offset = last_line_centre - trailing_h / 2.0;
+            if offset > 0.0 {
+                ui.add_space(offset);
+            }
+            add_trailing(ui)
+        })
+        .inner
+    })
+    .inner
+}
