@@ -820,6 +820,70 @@ Implicit crash fix). No anchor went missing.
 
 ---
 
+## Upstream Delta: v2.67.0 - v2.67.2 (3.29 Allflame, August 2026)
+
+Two patch releases, 25 upstream commits, 13 files / ~121 insertions across
+`src/Classes/` and `src/Modules/`. Almost entirely fixes; the data side is a
+regenerated `ClusterJewels.lua` plus small `ModCache` / skill / stat-description
+touch-ups and a 3.29.2 export. Reviewed against the still-current v2.67.0 pin.
+
+**Ports:** no registered `ports.toml` anchor changed. Only `ItemsTab.lua` is
+touched among our port sources, and neither `add-modifier-popup` nor
+`check-line-for-allocates` falls in the changed region, so `ports_sync` stays
+green through this bump.
+
+**Stubs:** no new engine-level globals in the diff.
+
+### New work
+
+- [ ] Trade query generator supports pseudo stats in its **weights**
+  ([\#10085](https://github.com/PathOfBuildingCommunity/PathOfBuilding/pull/10085)).
+  Extends the already-tracked "Pseudo-stat and word-order-insensitive stat
+  search in `TradeQueryGenerator`" in the v2.67.0 delta's deferred-trade block
+  above; both land together whenever trade integration is taken on (§16). No
+  separate work item.
+
+Nothing else in these two releases is new work for us.
+
+### Free through the Lua VM (no work)
+
+- Calc fixes: Scornful Herald not counting buffs as affecting you (#10158),
+  The Unblinking Eye evasion not applying to Arcane Might attacks (#10155),
+  Chip Away not using a global limit and Foulgrasp not counting toward the
+  Brand limit (#10141), block-chance rounding with Mana-Infused Staff (#10142).
+- Crash when equipping a Quiver or Shield that grants a skill (#10144):
+  `CalcActiveSkill.lua` plus skill data.
+- `itemLib.applyRange` gains the `locations_to_metres` value format, so a 0.1m
+  weapon-range Harvest enchant no longer rounds to zero (#10133). We call
+  `applyRange` directly (`crafting.rs`), so this arrives with the pin.
+
+### Not applicable to us
+
+- **Double-click-then-drag fixes** in `ItemDBControl` / `ItemListControl`
+  (#10134, #10149) and the `ItemDBClass:GetRowValue` nil guard. These clear
+  `selDragging` inside upstream's own SimpleGraphic list controls, where a
+  double click could leave an item stuck to the cursor. Our item lists are
+  egui and hold no drag state across a double click.
+- **Missing modifier controls on imported items** (#10138). Upstream gates its
+  `displayItemSectionAffix` on `displayItem.crafted` and re-anchors the custom
+  modifier section so it still lays out when the affix section is hidden - a
+  fix to their single display-item editor. Ours is a rarity-gated
+  "Add modifier..." context-menu entry (`items_tab.rs`, MAGIC/RARE) that never
+  depended on `crafted`, so imported items already get it.
+- **Build list sort by relative path** (#10131) and **recursion stopping on a
+  file error** (#10130). Ours is a per-directory Rust scan
+  (`build_list::scan_builds`), not upstream's recursive `BuildListHelpers`: one
+  listing's entries all share a `subPath`, so prefixing it cannot reorder them,
+  and an unreadable entry or unparseable header is skipped rather than aborting
+  the scan. Both bugs are structurally absent.
+- **"Buy Similar" searches for punctuated unique names** (#10139): trade
+  integration, deferred (§16).
+- **`BreachIcon.png` renamed to `breachicon.png`** for case-sensitive
+  filesystems, fixing the Foulborn icon on Linux (#10160). We reference no
+  asset by that name.
+
+---
+
 ## Implementation Phases
 
 ### Phase 1 — Quick wins, high daily-use value
