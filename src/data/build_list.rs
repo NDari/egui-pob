@@ -1,5 +1,6 @@
 //! Build list data: scanning saved builds from the user's build directory.
 
+use mlua::prelude::*;
 use std::path::{Path, PathBuf};
 
 /// A saved build entry (either a build file or a folder).
@@ -300,6 +301,95 @@ fn entry_name(entry: &BuildEntry) -> &str {
         BuildEntry::Build(b) => &b.build_name,
         BuildEntry::Folder(f) => &f.folder_name,
     }
+}
+
+/// How the build list is ordered, mirroring upstream's `sortMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    /// Upstream "NAME".
+    Name,
+    /// Upstream "EDITED": newest first, ties broken by name.
+    Modified,
+}
+
+/// The string upstream sorts a row by: its path relative to the build root
+/// plus the file or folder name (`BuildListHelpers.SortList`). Builds sort by
+/// their *file* name, extension included, not the displayed build name.
+fn sort_key(entry: &BuildEntry) -> String {
+    match entry {
+        BuildEntry::Build(b) => format!("{}{}", b.sub_path, b.file_name),
+        BuildEntry::Folder(f) => format!("{}{}", f.sub_path, f.folder_name),
+    }
+}
+
+/// Order entries the way upstream's build list does: folders first, then by
+/// upstream's `naturalSortCompare`.
+///
+/// The comparator is called, not ported. It has enough subtleties to make a
+/// reimplementation a liability - it compares each chunk upper-cased first and
+/// only then case-sensitively, and compares a run of digits numerically before
+/// falling back to comparing the digits literally, so "01" sorts before "1".
+/// `naturalSortCompare` is a global in `Modules/Common.lua`, so one call sorts
+/// the whole list rather than one call per comparison.
+pub fn sort_entries(
+    lua: &Lua,
+    entries: &mut [BuildEntry],
+    sort_mode: SortMode,
+) -> Result<(), mlua::Error> {
+    if entries.len() < 2 {
+        return Ok(());
+    }
+
+    let names = lua.create_table()?;
+    let folders = lua.create_table()?;
+    let modified = lua.create_table()?;
+    for (i, entry) in entries.iter().enumerate() {
+        let key = i as i64 + 1;
+        names.set(key, sort_key(entry))?;
+        folders.set(key, matches!(entry, BuildEntry::Folder(_)))?;
+        modified.set(
+            key,
+            match entry {
+                BuildEntry::Build(b) => b.modified,
+                BuildEntry::Folder(f) => f.modified,
+            },
+        )?;
+    }
+
+    let order: LuaTable = lua
+        .load(
+            r#"
+        local names, folders, modified, byModified = ...
+        local idx = {}
+        for i = 1, #names do idx[i] = i end
+        table.sort(idx, function(x, y)
+            -- Folders first, in both sort modes (upstream SortList)
+            if folders[x] ~= folders[y] then return folders[x] end
+            if byModified and modified[x] ~= modified[y] then
+                return modified[x] > modified[y]
+            end
+            -- Keep equal names in scan order so the sort is deterministic
+            if names[x] == names[y] then return x < y end
+            return naturalSortCompare(names[x], names[y])
+        end)
+        return idx
+    "#,
+        )
+        .call((names, folders, modified, sort_mode == SortMode::Modified))?;
+
+    let mut permutation = Vec::with_capacity(entries.len());
+    for i in 1..=entries.len() {
+        let from: usize = order.get(i as i64)?;
+        permutation.push(from - 1);
+    }
+
+    let mut sorted: Vec<Option<BuildEntry>> = entries.iter().cloned().map(Some).collect();
+    for (to, &from) in permutation.iter().enumerate() {
+        entries[to] = sorted[from]
+            .take()
+            .expect("naturalSortCompare returned a permutation");
+    }
+    Ok(())
 }
 
 /// Parse the <Build> tag from the first few hundred bytes of a build XML

@@ -39,10 +39,6 @@ an anchor for each so the upgrade surfaces it.
 - **Gem reordering within a socket group** via drag handles. No upstream
   equivalent; upstream gem rows are fixed. `skills::move_gem`.
 
-- **Ctrl+C in the skills tab copies the main socket group.** Upstream copies
-  the list-selected group; our UI has no list selection, so the main group is
-  the nearest equivalent. Per-group Copy buttons cover the rest.
-
 - **PoEURL shrinking uses https.** Upstream requests `http://poeurl.com`;
   port 80 there is unreliable, https works. `tree_specs::shrink_tree_url`.
 
@@ -75,14 +71,6 @@ an anchor for each so the upgrade surfaces it.
   back to "All" when the account has no character there. The remembered
   league still wins when present. Bump the constant each league.
   `char_import::pick_league_index`.
-
-- **No Abyss timeless jewels.** v2.67.0 added jewel types 7-11 (Abyss
-  Tecrod / Ulaman / Kurgal / Amanamu / Zorath) to the seed search, with their
-  own lookup tables (`readAbyssJewelLUT`, `resolveAbyssJewelComponent`,
-  `getAbyssJewelComponentRoll`) and, for Zorath, a shortest-path-to-class-start
-  requirement. `TIMELESS_JEWEL_TYPES` stops at 6, so they are not offerable and
-  the abyss branches of both timeless ports are deliberately absent. Tracked in
-  `plans/parity-plan.md`.
 
 - **Timeless jewel search omissions:** no protected-nodes list, no
   socket-allocation filter, no devotion-variant trade dropdowns (we have no

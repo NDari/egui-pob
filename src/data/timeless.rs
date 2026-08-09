@@ -11,57 +11,105 @@ use mlua::prelude::*;
 pub const ALL_SOCKETS_ID: i64 = -1;
 
 /// (id, display label, internal name prefix) per jewel type.
-pub const TIMELESS_JEWEL_TYPES: [(i64, &str, &str); 6] = [
+///
+/// Ids 7-11 are the Abyss jewels, which conquer *allocated* nodes rather than
+/// nodes in the socket's radius and read a different lookup table.
+pub const TIMELESS_JEWEL_TYPES: [(i64, &str, &str); 11] = [
     (1, "Glorious Vanity", "vaal"),
     (2, "Lethal Pride", "karui"),
     (3, "Brutal Restraint", "maraketh"),
     (4, "Militant Faith", "templar"),
     (5, "Elegant Hubris", "eternal"),
     (6, "Heroic Tragedy", "kalguur"),
+    (7, "Festering Vengeance", "abyss_murderous"),
+    (8, "Extinguishing Grasp", "abyss_searching"),
+    (9, "Baleful Dominion", "abyss_hypnotic"),
+    (10, "Destructive Aspiration", "abyss_ghastly"),
+    (11, "Reclaimed Malevolence", "abyss_special"),
 ];
 
+/// The first Abyss jewel type id. Abyss jewels take a different search path
+/// (`data.readAbyssJewelLUT`) and are not radius-based.
+pub const FIRST_ABYSS_TYPE: i64 = 7;
+
+/// Reclaimed Malevolence (Zorath), the one type whose conquests depend on the
+/// allocated path from its socket back to the class start.
+pub const ZORATH_TYPE: i64 = 11;
+
+/// True for the Abyss jewel types.
+pub fn is_abyss(jewel_type_id: i64) -> bool {
+    jewel_type_id >= FIRST_ABYSS_TYPE
+}
+
 /// Conqueror labels per jewel type (upstream's lists minus "Any").
-pub const CONQUERORS: [[&str; 3]; 6] = [
-    [
+pub const CONQUERORS: [&[&str]; 11] = [
+    &[
         "Doryani (Corrupted Soul)",
         "Xibaqua (Divine Flesh)",
         "Ahuana (Immortal Ambition)",
     ],
-    [
+    &[
         "Kaom (Strength of Blood)",
         "Rakiata (Tempered by War)",
         "Akoya (Chainbreaker)",
     ],
-    [
+    &[
         "Asenath (Dance with Death)",
         "Nasima (Second Sight)",
         "Balbala (The Traitor)",
     ],
-    [
+    &[
         "Avarius (Power of Purpose)",
         "Dominus (Inner Conviction)",
         "Maxarius (Transcendence)",
     ],
-    [
+    &[
         "Cadiro (Supreme Decadence)",
         "Victario (Supreme Grandstanding)",
         "Caspiro (Supreme Ostentation)",
     ],
-    [
+    &[
         "Vorana (Black Scythe Training)",
         "Uhtred (Celestial Mathematics)",
         "Medved (The Unbreaking Circle)",
     ],
+    // The Abyss jewels each have a single conqueror.
+    &["Tecrod (Overwhelming Hate)"],
+    &["Ulaman (Weighted Exchange)"],
+    &["Kurgal (Reconstructed Essence)"],
+    &["Amanamu (The Loyal Few)"],
+    &["Zorath"],
 ];
 
-/// Jewel line format per type; `{}` takes the seed, then the conqueror.
-const JEWEL_LINES: [&str; 6] = [
+/// Jewel line format per type; `{seed}` takes the seed, `{conq}` the conqueror.
+const JEWEL_LINES: [&str; 11] = [
     "Bathed in the blood of {seed} sacrificed in the name of {conq}",
     "Commanded leadership over {seed} warriors under {conq}",
     "Denoted service of {seed} dekhara in the akhara of {conq}",
     "Carved to glorify {seed} new faithful converted by High Templar {conq}",
     "Commissioned {seed} coins to commemorate {conq}",
     "Struck to commemorate {seed} valorous exiles who spurned {conq}",
+    "Subjugating {seed} souls in the thrall of {conq}",
+    "Subjugating {seed} souls in the thrall of {conq}",
+    "Subjugating {seed} souls in the thrall of {conq}",
+    "Subjugating {seed} souls in the thrall of {conq}",
+    "Binding {seed} souls to phylacteries to sustain {conq}",
+];
+
+/// Base type per jewel type, needed because the Abyss jewels are eye jewels
+/// rather than "Timeless Jewel" (upstream `TimelessJewelListControl`).
+const JEWEL_BASES: [&str; 11] = [
+    "Timeless Jewel",
+    "Timeless Jewel",
+    "Timeless Jewel",
+    "Timeless Jewel",
+    "Timeless Jewel",
+    "Timeless Jewel",
+    "Murderous Eye Jewel",
+    "Searching Eye Jewel",
+    "Hypnotic Eye Jewel",
+    "Ghastly Eye Jewel",
+    "Assembled Eye Jewel",
 ];
 
 /// A jewel socket eligible for timeless search.
@@ -263,6 +311,7 @@ pub fn find_timeless_seeds(
         .load(
             r#"
         local jewelTypeId, socketId, desired, limit = ...
+        local isAbyss = jewelTypeId >= 7
         local build = mainObject_ref.main.modes['BUILD']
         local treeData = build.spec.tree
         local legionNodes = treeData.legion.nodes
@@ -301,9 +350,18 @@ pub fn find_timeless_seeds(
             if not socketNode or not socketNode.nodesInRadius then
                 return {}
             end
+            -- Zorath conquers along the allocated path back to the class start,
+            -- so the path is part of the lookup key. No path, no results.
+            local zorathPath = jewelTypeId == 11
+                and build.spec:GetShortestPathToClassStart(socketNodeId)
+            if jewelTypeId == 11 and not zorathPath then
+                return {}
+            end
             local targetNodes = {}
             local attributeSmalls, otherSmalls = 0, 0
-            for nodeId in pairs(socketNode.nodesInRadius[3]) do
+            -- Abyss jewels name the passives they affect directly, so there is
+            -- no radius to walk.
+            for nodeId in pairs(isAbyss and {} or socketNode.nodesInRadius[3]) do
                 local node = treeData.nodes[nodeId]
                 if node and not rootNodes[nodeId] and not node.isJewelSocket
                    and not node.isKeystone then
@@ -327,6 +385,37 @@ pub fn find_timeless_seeds(
                 local weight = 0
                 local totalStatWeight = 0
                 local matches = {}
+                if isAbyss then
+                    -- The LUT names each affected passive and the components
+                    -- applied to it; score those directly (upstream
+                    -- searchSingleSocket's abyss branch).
+                    for targetNode, modification in
+                        pairs(data.readAbyssJewelLUT(curSeed, socketNodeId, jewelTypeId,
+                                                     zorathPath,
+                                                     build.spec.curAscendClassName)) do
+                        local treeNode = treeData.nodes[targetNode]
+                        if treeNode and not rootNodes[targetNode]
+                           and not treeNode.isJewelSocket and not treeNode.isKeystone then
+                            for _, component in ipairs(modification) do
+                                local changedNode =
+                                    data.resolveAbyssJewelComponent(component, treeData.legion)
+                                local d = changedNode and desiredNodes[changedNode.id]
+                                if d then
+                                    local _, _, roll1 =
+                                        data.getAbyssJewelComponentRoll(component, changedNode, 1)
+                                    local _, statMod2, roll2 =
+                                        data.getAbyssJewelComponentRoll(component, changedNode, 2)
+                                    local w = d.nodeWeight * (roll1 or 1)
+                                    if statMod2 then
+                                        w = w + d.nodeWeight2 * (roll2 or 1)
+                                    end
+                                    weight = weight + w
+                                    matches[changedNode.dn] = (matches[changedNode.dn] or 0) + 1
+                                end
+                            end
+                        end
+                    end
+                end
                 for targetNode in pairs(targetNodes) do
                     local tbl = data.readLUT(curSeed, targetNode, jewelTypeId)
                     if next(tbl) then
@@ -748,6 +837,17 @@ pub fn create_timeless_jewel(
     let line = JEWEL_LINES[(jewel_type_id - 1) as usize]
         .replace("{seed}", &seed.to_string())
         .replace("{conq}", &conqueror);
-    let raw = format!("Rarity: UNIQUE\n{label}\nTimeless Jewel\nLimited to: 1 Historic\n{line}");
+    let base = JEWEL_BASES[(jewel_type_id - 1) as usize];
+    // Abyss jewels are Allflame-league eye jewels whose conquest line names the
+    // affected passives rather than a radius (upstream TimelessJewelListControl).
+    let raw = if is_abyss(jewel_type_id) {
+        format!(
+            "Rarity: UNIQUE\n{label}\n{base}\nLeague: Allflame\n\
+             Limited to: 1 Historic\nImplicits: 0\n{line}\n\
+             Passives affected are Conquered by the Abyssal\nHistoric"
+        )
+    } else {
+        format!("Rarity: UNIQUE\n{label}\n{base}\nLimited to: 1 Historic\n{line}")
+    };
     super::items::add_item_from_raw(lua, &raw)
 }

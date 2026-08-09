@@ -2,7 +2,7 @@
 
 This document tracks every feature needed to reach parity with upstream Path of Building Community. Items are grouped by area rather than priority — ordering and phasing will be decided separately.
 
-**Parity validated against upstream v2.67.0 (PoE 3.29).** Update this stamp on every submodule pin bump (see docs/upstream-upgrade.md).
+**Parity validated against upstream v2.67.2 (PoE 3.29).** Update this stamp on every submodule pin bump (see docs/upstream-upgrade.md).
 
 Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
@@ -20,7 +20,15 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Rename build (right-click menu; folders too)
 - [x] Move build to folder (right-click "Move to" submenu: subfolders + parent)
 - [x] Create new folder
-- [x] Sort builds (by name, date modified)
+- [x] Sort builds (by name, date modified) - ordering calls upstream's own
+  `naturalSortCompare`, keyed on `subPath + fileName` as upstream is, with
+  "date modified" ties broken by name
+- [ ] The compare tab's build picker (`compare_tab.rs`) and the folder list in
+  the Save As browser (`build_view.rs`) still use `scan_builds`' plain
+  lowercase ordering rather than the natural sort above. Neither is upstream's
+  build list, so this is our own inconsistency rather than a parity gap, but
+  "Build 10" sorting before "Build 9" looks the same to a user wherever it
+  happens
 - [x] Build search/filter by name
 - [x] Recent builds list (last 10 opened, shown above the list; persisted in the app data dir)
 - [x] Build preview tooltip on hover (class, level, DPS/Life/EHP parsed from the XML's PlayerStat elements)
@@ -139,7 +147,7 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 
 ### Timeless Jewels
 - [x] Find Timeless Jewel dialog (seed search over upstream readLUT; creates the jewel from a result)
-- [x] Jewel type selection (6 types)
+- [x] Jewel type selection (11 types: 6 Legion + 5 Abyss)
 - [x] Conqueror variant selection
 - [x] Socket selection (specific socket or "All Sockets" multi-search; results tagged with the socket found at)
 - [x] Devotion modifier selection (Total Strength/Dexterity/Devotion pseudo-stats with upstream's small-node bonus formulas; the upstream devotion-variant dropdowns only feed trade URLs, which we don't have)
@@ -591,32 +599,46 @@ Upstream added five timeless jewel types that work fundamentally differently
 from Legion jewels: they conquer **allocated** nodes rather than nodes in a
 radius, driven by a new lookup-table pipeline.
 
-- [ ] Five new jewel types in the Find Timeless Jewel dialog (ids 7-11):
+- [x] Five new jewel types in the Find Timeless Jewel dialog (ids 7-11):
   Festering Vengeance (`abyss_murderous`), Extinguishing Grasp
   (`abyss_searching`), Baleful Dominion (`abyss_hypnotic`), Destructive
   Aspiration (`abyss_ghastly`), Reclaimed Malevolence (`abyss_special`)
-- [ ] Their conqueror variants: Tecrod, Ulaman, Kurgal, Amanamu, Zorath
-- [ ] New LUT pipeline: `Modules/DataAbyssJewelLookUpTableHelper` exports
+- [x] Their conqueror variants: Tecrod, Ulaman, Kurgal, Amanamu, Zorath (one
+  each, unlike the three-per-type Legion jewels)
+- [x] New LUT pipeline: `Modules/DataAbyssJewelLookUpTableHelper` exports
   `readAbyssJewelLUT` / `resolveAbyssJewelComponent` /
-  `getAbyssJewelComponentRoll`; `Modules/DataJewelFileLoader` and
-  `Data/TimelessJewelData/AbyssNotableNames` are new. Our timeless search
-  reads `readLUT` directly, so the abyss path needs separate wiring
-- [ ] Allocated-node conquest model in `PassiveSpec:BuildAllDependsAndPaths`:
-  abyss conquests are read *before* the node reset, and radius-based
-  `conqueredBy` is suppressed for jewel types >= 7
-- [ ] Zorath (type 11) needs `GetShortestPathToClassStart(socketId)` fed into
-  the LUT read
+  `getAbyssJewelComponentRoll`. All three are callable headless as-is - the
+  zip-part loader, `Inflate` and the `.bin` cache all work through our existing
+  system functions (first read ~390ms, cached reads ~0ms), so the search calls
+  them rather than porting anything
+- [x] Allocated-node conquest model in `PassiveSpec:BuildAllDependsAndPaths`:
+  free, it is upstream Lua we call rather than port
+- [x] Zorath (type 11) needs `GetShortestPathToClassStart(socketId)` fed into
+  the LUT read (a socket with no path to the class start yields no results)
 - [ ] Zorath ascendancy-notable dropdown in the search dialog (built from
   `abyss_special_ascendancy_notable_*` nodes, alphabetical, with "Any");
-  those nodes are excluded from the normal notable list
-- [ ] "Protect allocated nodes" now applies to Zorath as well as Eternal
-- [ ] Item text generation for all five new jewel types
-  (`TimelessJewelListControl`, one template per type)
+  those nodes are already excluded from the normal notable list. The search
+  itself passes `spec.curAscendClassName` to the LUT as upstream does; this
+  dropdown is an extra search criterion on top
+- [ ] "Protect allocated nodes" now applies to Zorath as well as Eternal.
+  **Blocked on the protected-nodes feature itself**, which we have never
+  ported (see the timeless-search omissions in DIVERGENCES.md); upstream's
+  v2.67.0 change gating the minimum-weight insertion on Militant Faith lands
+  in the same branch. For Zorath the list is built from allocated notables in
+  the current ascendancy rather than from nodes in the socket radius
+- [x] Item text generation for all five new jewel types: eye-jewel bases,
+  `League: Allflame`, and the "Passives affected are Conquered by the Abyssal"
+  line, verified by round-tripping through the engine's item parser
 - [ ] Abyss tree art: connectors between two abyss-conquered nodes use
   `Abyss`-prefixed atlas assets with bounds-mapped UV quads; abyss
   notables/keystones/ascendancy notables get `Abyss*Frame*` overlays; abyss
-  jewels draw no radius ring
-- [ ] `PassiveSpec` root check relaxed (no longer requires `connectedToStart`)
+  jewels draw no radius ring. Asset-dependent, same blocker as the other art
+  items (see §16 and `docs/asset-extraction.md`); the search and the calc
+  effects work without it, an abyss-conquered node just renders as an ordinary
+  one
+- [x] `PassiveSpec` root check relaxed (no longer requires `connectedToStart`):
+  free, `connectedToStart` lives entirely in upstream's `PassiveSpec.lua`,
+  which we call and never touch
 
 ### Config Tab (custom modifiers reworked, stat previews added)
 

@@ -4,14 +4,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use pob_egui::data::build_list::{self, BuildEntry, BuildInfo, BuildPreview, FolderInfo};
-
-/// How the build list is sorted. Folders always sort before builds.
-#[derive(Clone, Copy, PartialEq)]
-enum SortMode {
-    Name,
-    Modified,
-}
+use pob_egui::data::build_list::{self, BuildEntry, BuildInfo, BuildPreview, FolderInfo, SortMode};
+use pob_egui::lua_bridge::LuaBridge;
 
 /// Modal popup state for build management actions.
 enum Popup {
@@ -59,6 +53,10 @@ pub struct BuildListPanel {
     pub sub_path: String,
     build_path: String,
     sort_mode: SortMode,
+    /// The mode `entries` is currently ordered by. Sorting calls into Lua for
+    /// upstream's comparator, so it runs when the list or mode changes rather
+    /// than every frame.
+    sorted_as: Option<SortMode>,
     filter: String,
     popup: Option<Popup>,
     /// Recently opened builds, most recent first.
@@ -74,6 +72,7 @@ impl BuildListPanel {
             sub_path: String::new(),
             build_path,
             sort_mode: SortMode::Name,
+            sorted_as: None,
             filter: String::new(),
             popup: None,
             recent: build_list::load_recent_builds()
@@ -88,6 +87,7 @@ impl BuildListPanel {
 
     pub fn refresh(&mut self) {
         self.entries = build_list::scan_builds(&self.build_path, &self.sub_path);
+        self.sorted_as = None;
         log::info!(
             "Scanned {} entries in {}{}",
             self.entries.len(),
@@ -122,7 +122,7 @@ impl BuildListPanel {
     }
 
     /// Returns the action the GUI should take, if any.
-    pub fn show(&mut self, ui: &mut egui::Ui) -> Option<BuildListAction> {
+    pub fn show(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) -> Option<BuildListAction> {
         let mut action = None;
 
         ui.heading("Builds");
@@ -201,8 +201,20 @@ impl BuildListPanel {
             self.current_dir().parent().map(Path::to_path_buf)
         };
 
+        // Order the whole list once per change, then filter it - a filtered
+        // subsequence of a sorted list is still sorted, so typing in the search
+        // box costs nothing.
+        if self.sorted_as != Some(self.sort_mode) {
+            if let Err(e) =
+                build_list::sort_entries(bridge.lua(), &mut self.entries, self.sort_mode)
+            {
+                log::error!("Failed to sort build list: {e}");
+            }
+            self.sorted_as = Some(self.sort_mode);
+        }
+
         let filter = self.filter.trim().to_lowercase();
-        let mut visible: Vec<usize> = (0..self.entries.len())
+        let visible: Vec<usize> = (0..self.entries.len())
             .filter(|&i| {
                 filter.is_empty()
                     || entry_name(&self.entries[i])
@@ -210,24 +222,6 @@ impl BuildListPanel {
                         .contains(&filter)
             })
             .collect();
-        let sort_mode = self.sort_mode;
-        visible.sort_by(|&a, &b| {
-            let (ea, eb) = (&self.entries[a], &self.entries[b]);
-            let a_is_folder = matches!(ea, BuildEntry::Folder(_));
-            let b_is_folder = matches!(eb, BuildEntry::Folder(_));
-            match (a_is_folder, b_is_folder) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => match sort_mode {
-                    SortMode::Name => entry_name(ea)
-                        .to_lowercase()
-                        .cmp(&entry_name(eb).to_lowercase()),
-                    SortMode::Modified => entry_modified(eb)
-                        .partial_cmp(&entry_modified(ea))
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                },
-            }
-        });
 
         let mut row_action = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -523,13 +517,6 @@ fn entry_name(entry: &BuildEntry) -> &str {
     match entry {
         BuildEntry::Build(b) => &b.build_name,
         BuildEntry::Folder(f) => &f.folder_name,
-    }
-}
-
-fn entry_modified(entry: &BuildEntry) -> f64 {
-    match entry {
-        BuildEntry::Build(b) => b.modified,
-        BuildEntry::Folder(f) => f.modified,
     }
 }
 

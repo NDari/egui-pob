@@ -161,7 +161,7 @@ impl eframe::App for PobApp {
 
                 match &mut screen {
                     Some(AppScreen::BuildList(panel)) => {
-                        if let Some(action) = panel.show(ui) {
+                        if let Some(action) = panel.show(ui, &self.bridge) {
                             match action {
                                 BuildListAction::OpenBuild(build_info) => {
                                     transition = Some(build_info);

@@ -1006,8 +1006,12 @@ impl BuildView {
                     if let Some(ref mut skills) = self.skills_panel
                         && skills.show(ui, bridge)
                     {
+                        // Rebuild the panel but keep the selected socket group
+                        let selected = skills.selection();
                         self.refresh_calc_output(bridge);
-                        self.skills_panel = Some(SkillsPanel::new(bridge.lua()));
+                        let mut panel = SkillsPanel::new(bridge.lua());
+                        panel.restore_selection(selected);
+                        self.skills_panel = Some(panel);
                     }
                 }
                 BuildTab::Items => {
