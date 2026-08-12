@@ -1437,7 +1437,12 @@ impl BuildView {
 fn show_stat_lines(ui: &mut egui::Ui, stats: &SidebarStats) {
     use super::theme;
 
-    ui.spacing_mut().item_spacing.y = 2.0;
+    // Tighten the list: rows are floored at `interact_size.y` (egui's default
+    // 18 leaves ~5px of air around ~15px of text), so the floor, not the gap,
+    // is what spreads the list out. At 14 the floor is below the text height
+    // of the larger lines, leaving effectively no padding around them.
+    ui.spacing_mut().item_spacing.y = 0.5;
+    ui.spacing_mut().interact_size.y = 14.0;
 
     // Width of the right-aligned label column, measured from the widest label
     // that has a value beside it. Upstream hardcodes x=170 in a 300px control;
@@ -1463,7 +1468,7 @@ fn show_stat_lines(ui: &mut egui::Ui, stats: &SidebarStats) {
             // Section separator (upstream emits height-6 breaks between the
             // DPS, cost, attribute, defence, resistance, ... blocks); render
             // it as a visible empty line.
-            ui.add_space(line.height * 1.5);
+            ui.add_space(line.height * 0.75);
             continue;
         }
         let size = if line.height <= 14.0 { 11.0 } else { 13.0 };

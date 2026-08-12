@@ -59,8 +59,6 @@ pub struct BuildListPanel {
     sorted_as: Option<SortMode>,
     filter: String,
     popup: Option<Popup>,
-    /// Recently opened builds, most recent first.
-    recent: Vec<BuildInfo>,
     /// Hover preview data, parsed from build XMLs on first hover.
     preview_cache: HashMap<PathBuf, BuildPreview>,
 }
@@ -75,10 +73,6 @@ impl BuildListPanel {
             sorted_as: None,
             filter: String::new(),
             popup: None,
-            recent: build_list::load_recent_builds()
-                .iter()
-                .filter_map(|p| build_list::build_info_from_path(p))
-                .collect(),
             preview_cache: HashMap::new(),
         };
         panel.refresh();
@@ -225,25 +219,17 @@ impl BuildListPanel {
 
         let mut row_action = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            // Recently opened builds (top level, no active search)
-            if self.sub_path.is_empty() && filter.is_empty() && !self.recent.is_empty() {
-                ui.strong("Recent");
-                let recent = self.recent.clone();
-                for build in &recent {
-                    let resp = show_build_row(ui, build);
-                    let resp = preview_tooltip(resp, &mut self.preview_cache, build);
-                    if resp.clicked() {
-                        row_action = Some(RowAction::Open(build.clone()));
-                    }
-                }
-                ui.separator();
-                ui.strong("All builds");
-            }
-
             for &i in &visible {
                 match &self.entries[i] {
                     BuildEntry::Folder(folder) => {
-                        let response = show_folder_row(ui, folder);
+                        let (response, delete) = show_folder_row(ui, folder);
+                        if delete {
+                            row_action = Some(RowAction::ConfirmDelete {
+                                path: folder.full_path.clone(),
+                                name: folder.folder_name.clone(),
+                                is_folder: true,
+                            });
+                        }
                         if response.clicked() {
                             row_action = Some(RowAction::Enter(folder.folder_name.clone()));
                         }
@@ -267,7 +253,14 @@ impl BuildListPanel {
                         });
                     }
                     BuildEntry::Build(build) => {
-                        let response = show_build_row(ui, build);
+                        let (response, delete) = show_build_row(ui, build);
+                        if delete {
+                            row_action = Some(RowAction::ConfirmDelete {
+                                path: build.full_path.clone(),
+                                name: build.build_name.clone(),
+                                is_folder: false,
+                            });
+                        }
                         let response = preview_tooltip(response, &mut self.preview_cache, build);
                         if response.clicked() {
                             row_action = Some(RowAction::Open(build.clone()));
@@ -520,11 +513,43 @@ fn entry_name(entry: &BuildEntry) -> &str {
     }
 }
 
-fn show_folder_row(ui: &mut egui::Ui, folder: &FolderInfo) -> egui::Response {
-    ui.add(
-        egui::Button::new(format!("📁 {}", folder.folder_name))
-            .min_size(egui::vec2(ui.available_width(), 24.0)),
-    )
+/// Rows are centered in the panel at this width rather than stretched across it.
+const ROW_WIDTH: f32 = 460.0;
+const ROW_HEIGHT: f32 = 24.0;
+const DELETE_WIDTH: f32 = 26.0;
+
+/// Lay out one centered row: the main button plus a trailing delete button.
+/// Returns the main button's response and whether delete was clicked.
+fn centered_row(ui: &mut egui::Ui, label: String) -> (egui::Response, bool) {
+    let width = ROW_WIDTH.min(ui.available_width());
+    let indent = ((ui.available_width() - width) * 0.5).max(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        // Right-to-left so the delete button claims its width first and the
+        // main button truncates into whatever is left.
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, ROW_HEIGHT),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                let delete = ui
+                    .add(egui::Button::new("🗑").min_size(egui::vec2(DELETE_WIDTH, ROW_HEIGHT)))
+                    .on_hover_text("Delete")
+                    .clicked();
+                let main = ui.add(
+                    egui::Button::new(label)
+                        .truncate()
+                        .min_size(egui::vec2(ui.available_width(), ROW_HEIGHT)),
+                );
+                (main, delete)
+            },
+        )
+        .inner
+    })
+    .inner
+}
+
+fn show_folder_row(ui: &mut egui::Ui, folder: &FolderInfo) -> (egui::Response, bool) {
+    centered_row(ui, format!("📁 {}", folder.folder_name))
 }
 
 /// Attach the build preview tooltip (class, level, headline stats) to a row,
@@ -586,9 +611,8 @@ fn format_stat(value: f64) -> String {
     }
 }
 
-fn show_build_row(ui: &mut egui::Ui, build: &BuildInfo) -> egui::Response {
-    let summary = build_summary(build);
-    ui.add(egui::Button::new(&summary).min_size(egui::vec2(ui.available_width(), 24.0)))
+fn show_build_row(ui: &mut egui::Ui, build: &BuildInfo) -> (egui::Response, bool) {
+    centered_row(ui, build_summary(build))
 }
 
 fn build_summary(build: &BuildInfo) -> String {
