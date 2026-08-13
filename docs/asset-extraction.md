@@ -155,6 +155,8 @@ Plus the Azmeri node frames: `AzmeriAscendancyFrameLargeNormal.png`, etc. (see `
 
 Upstream already has these PNGs committed under `upstream/src/TreeData/` (pre-extracted), so they're available at runtime through the submodule today.
 
+The 3.29 bloodline emblems (Trialmaster, Olroth, Catarina, ...) plus Reliquarian and Luminary are **not** loose PNGs: they ship as regions of `TreeData/3_29/bloodline-3.webp` and `ascendancy-3.webp`, indexed by `sprites.lua`. No extraction is needed for these either -- `tree_sprites::load_sprite_backgrounds` reads their UV rects out of upstream's `spriteMap`, the same place upstream gets them (`PassiveTree.lua:349-365`).
+
 To re-extract them ourselves:
 
 1. Parse `Bundles2/_.index.bin` (decompress with `oozextract`, then read the structured header: bundle list → file-hash table → path-rep table).
@@ -165,8 +167,8 @@ To re-extract them ourselves:
 
 ## Current State
 
-- Upstream PoB includes pre-extracted art files committed directly to the repo
-- New ascendancies (e.g. Scavenger) may not have art extracted yet -- the game itself falls back to the Ascendant background for these
+- Upstream PoB includes pre-extracted art files committed directly to the repo, as loose PNGs and as spritesheets (`skills-3.jpg`, `ascendancy-3.webp`, `bloodline-3.webp`, ...) with coordinates in `sprites.lua`
+- New ascendancies may still arrive without art -- a regular ascendancy falls back to the Ascendant background, a bloodline draws none
 - Our app (`egui-pob`) reads these files from the upstream submodule at runtime
 
 ## Future Work

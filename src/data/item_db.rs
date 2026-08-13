@@ -136,8 +136,10 @@ pub fn tooltip_from_raw(lua: &Lua, raw: &str) -> Result<Vec<TooltipLine>, mlua::
     let mut lines = Vec::new();
     for pair in lines_table.sequence_values::<LuaTable>() {
         let line = pair?;
+        let mut text: String = line.get("text").unwrap_or_default();
+        super::items::strip_items_tab_hint(&mut text);
         lines.push(TooltipLine {
-            text: line.get("text").unwrap_or_default(),
+            text,
             size: line.get("size").unwrap_or(16.0),
             is_separator: line.get("sep").unwrap_or(false),
         });

@@ -878,6 +878,182 @@ fn test_sprite_atlas_loads_backgrounds() {
         atlas.class_backgrounds.contains_key("Str"),
         "should have Str (Marauder) class background"
     );
+
+    // Every group background must stay inside its own rect in the sheet:
+    // linear filtering across the boundary drew the neighbouring sprite's edge
+    // as a faint line (the golden row above PSGroupBackground2).
+    for (label, region) in [
+        ("small", atlas.frames.group_background_small),
+        ("medium", atlas.frames.group_background_medium),
+        ("large", atlas.frames.group_background_large),
+    ] {
+        let region = region.unwrap_or_else(|| panic!("{label} group background should load"));
+        let sheet = &atlas.sheets[region.sheet_index];
+        let (sw, sh) = (sheet.image.width() as f32, sheet.image.height() as f32);
+        // The covered pixel span is the sprite minus the half-texel inset
+        let px_w = (region.u_max - region.u_min) * sw;
+        let px_h = (region.v_max - region.v_min) * sh;
+        assert!(
+            (px_w - (region.width - 1.0)).abs() < 0.01
+                && (px_h - (region.height - 1.0)).abs() < 0.01,
+            "{label} should cover its sprite inset by half a texel per side, \
+             got {px_w}x{px_h} for a {}x{} sprite",
+            region.width,
+            region.height
+        );
+    }
+}
+
+/// The 3.29 bloodline emblems (plus Reliquarian / Luminary) ship only as
+/// regions of bloodline-3.webp / ascendancy-3.webp, not as loose Classes*.png
+/// files, so they have to come out of the spritesheet with a UV sub-rect.
+#[test]
+fn test_sprite_atlas_loads_bloodline_backgrounds() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_build(common::ALLFLAME_FIXTURE);
+
+    let version: String = bridge
+        .lua()
+        .load("return mainObject_ref.main.modes['BUILD'].spec.treeVersion")
+        .eval()
+        .expect("failed to get tree version");
+    assert_eq!(version, "3_29", "fixture should be on the bloodline tree");
+
+    let tree_data_dir = common::find_repo_root()
+        .join("upstream")
+        .join("src")
+        .join("TreeData")
+        .join(&version);
+    let atlas =
+        TreeSpriteAtlas::load(bridge.lua(), &tree_data_dir).expect("failed to load sprite atlas");
+
+    let sheet_backed = [
+        "Trialmaster",
+        "Oshabi",
+        "Olroth",
+        "Lycia",
+        "KingInTheMists",
+        "Farrul",
+        "Delirious",
+        "Catarina",
+        "Breachlord",
+        "Aul",
+        "Necromantic",
+        "Brinerot",
+        "Abyssal",
+        // Not bloodlines, but likewise sheet-only
+        "Reliquarian",
+        "Luminary",
+    ];
+    for name in sheet_backed {
+        let bg = atlas
+            .ascendancy_backgrounds
+            .get(name)
+            .unwrap_or_else(|| panic!("missing background art for {name}"));
+        let uv = bg.uv;
+        assert!(
+            uv.min.x >= 0.0 && uv.min.y >= 0.0 && uv.max.x <= 1.0 && uv.max.y <= 1.0,
+            "{name} uv out of range: {uv:?}"
+        );
+        assert!(
+            uv.width() > 0.0 && uv.height() > 0.0,
+            "{name} uv is empty: {uv:?}"
+        );
+        assert!(
+            uv.width() < 1.0 || uv.height() < 1.0,
+            "{name} should be a sheet region, not a whole image"
+        );
+        assert!(
+            bg.width > 1.0 && bg.height > 1.0,
+            "{name} should carry its sprite size, got {}x{}",
+            bg.width,
+            bg.height
+        );
+    }
+
+    // Ascendancies with a loose PNG keep it, as upstream does for the three
+    // legacy alternate ascendancies (PassiveTree.lua legacyClasses).
+    for name in ["Berserker", "Ascendant", "Warden", "Warlock", "Primalist"] {
+        let bg = atlas
+            .ascendancy_backgrounds
+            .get(name)
+            .unwrap_or_else(|| panic!("missing background art for {name}"));
+        assert_eq!(
+            bg.uv,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            "{name} should still come from its own PNG"
+        );
+    }
+}
+
+/// The Items tab's Ctrl+D drives upstream's own ItemsTab.showStatDifferences,
+/// so item tooltips gain and lose their comparison sections with it, and the
+/// tip never points the reader at another tab.
+#[test]
+fn test_item_tooltip_stat_difference_toggle() {
+    use pob_egui::data::items;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    assert!(
+        items::stat_differences_enabled(lua).expect("read flag failed"),
+        "stat differences default to on, as upstream does"
+    );
+
+    let equipped = items::extract_equipped_items(lua).expect("failed to extract equipped");
+    let slot = equipped
+        .iter()
+        .find(|s| s.sel_item_id > 0)
+        .expect("an equipped slot");
+
+    let tooltip = |lua: &mlua::Lua| {
+        items::item_tooltip_lines(lua, slot.sel_item_id, Some(&slot.slot_name))
+            .expect("tooltip generation failed")
+    };
+    let has =
+        |lines: &[items::TooltipLine], needle: &str| lines.iter().any(|l| l.text.contains(needle));
+
+    let on = tooltip(lua);
+    assert!(has(&on, "Ctrl+D"), "tooltip should carry the Ctrl+D tip");
+    assert!(
+        !has(&on, "Items tab"),
+        "the tip should not point at the tab the reader is already in"
+    );
+    assert!(
+        has(&on, "Removing this item"),
+        "an equipped item should preview its removal"
+    );
+
+    // Ctrl+D off
+    assert!(
+        !items::toggle_stat_differences(lua).expect("toggle failed"),
+        "toggling from on should return off"
+    );
+    assert!(!items::stat_differences_enabled(lua).expect("read flag failed"));
+    let off = tooltip(lua);
+    assert!(
+        !has(&off, "Removing this item"),
+        "no comparison sections while stat differences are off"
+    );
+    assert!(
+        has(&off, "Ctrl+D") && !has(&off, "Items tab"),
+        "the enable-variant tip should show, without a tab qualifier"
+    );
+    assert!(
+        off.len() < on.len(),
+        "the off tooltip should be the shorter one ({} vs {})",
+        off.len(),
+        on.len()
+    );
+
+    // ...and back on
+    assert!(
+        items::toggle_stat_differences(lua).expect("toggle failed"),
+        "toggling from off should return on"
+    );
+    assert!(has(&tooltip(lua), "Removing this item"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2315,7 +2491,8 @@ fn test_socket_jewel_tooltip() {
     let bridge = common::boot_and_load_test_build();
     let lua = bridge.lua();
 
-    let raw = "Rarity: RARE\nHover Test Jewel\nCobalt Jewel\nAdds 1 to 2 Cold Damage to Spells";
+    // A life roll so the removal comparison is guaranteed a changed stat
+    let raw = "Rarity: RARE\nHover Test Jewel\nCobalt Jewel\n+20 to maximum Life";
     let err = items::add_item_from_raw(lua, raw).expect("add failed");
     assert!(err.is_none(), "jewel should parse: {err:?}");
     let jewel_id = items::extract_item_list(lua)
@@ -2340,17 +2517,71 @@ fn test_socket_jewel_tooltip() {
         .iter()
         .find(|s| s.has_jewel && s.jewel_title.contains("Hover Test Jewel"))
         .expect("filled socket");
-    let lines = jewels::socket_jewel_tooltip(lua, filled.node_id).expect("tooltip failed");
+    let lines = jewels::socket_jewel_tooltip(lua, filled.node_id, true).expect("tooltip failed");
     assert!(
         lines.iter().any(|l| l.text.contains("Hover Test Jewel")),
         "tooltip should show the jewel name, got {} lines",
         lines.len()
     );
 
+    // Hovering a socketed jewel previews removing it, the way hovering an
+    // allocated passive previews unallocating it.
+    let texts = || {
+        lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    assert!(
+        lines.iter().any(|l| l.text.contains("Removing this item")),
+        "tooltip should show the removal stat diff, got: {}",
+        texts()
+    );
+    assert!(
+        lines.iter().any(|l| l.text.contains("Life")),
+        "removal diff should list the changed Life stat, got: {}",
+        texts()
+    );
+
+    // The stat-difference tip is driven by the tree's own Ctrl+D here, so it
+    // must not send the reader to the Items tab (which has no such binding).
+    let tip = lines
+        .iter()
+        .find(|l| l.text.contains("Ctrl+D"))
+        .unwrap_or_else(|| panic!("tooltip should carry the Ctrl+D tip, got: {}", texts()));
+    assert!(
+        !tip.text.contains("Items tab"),
+        "tip should not point at the Items tab: {}",
+        tip.text
+    );
+    println!("stat-diff tip: {}", tip.text);
+
+    // ...and honours the stat-difference toggle
+    let no_diffs =
+        jewels::socket_jewel_tooltip(lua, filled.node_id, false).expect("tooltip failed");
+    assert!(
+        no_diffs.iter().any(|l| l.text.contains("Hover Test Jewel")),
+        "jewel name should still show with diffs off"
+    );
+    assert!(
+        !no_diffs
+            .iter()
+            .any(|l| l.text.contains("Removing this item")),
+        "no removal diff when stat differences are off"
+    );
+    // The "press Ctrl+D to enable" variant is retargeted the same way
+    assert!(
+        no_diffs
+            .iter()
+            .any(|l| l.text.contains("Ctrl+D") && !l.text.contains("Items tab")),
+        "the enable-variant tip should not point at the Items tab"
+    );
+
     // An empty socket yields no tooltip lines
     let empty = sockets.iter().find(|s| !s.has_jewel);
     if let Some(empty) = empty {
-        let lines = jewels::socket_jewel_tooltip(lua, empty.node_id).expect("tooltip failed");
+        let lines = jewels::socket_jewel_tooltip(lua, empty.node_id, true).expect("tooltip failed");
         assert!(
             lines.is_empty(),
             "empty socket should have no jewel tooltip"

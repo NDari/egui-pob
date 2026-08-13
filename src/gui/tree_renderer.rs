@@ -1186,8 +1186,7 @@ fn draw_class_start_background(
     let Some(tex) = atlas.texture_id(bg.sheet_index) else {
         return;
     };
-    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    painter.image(tex, img_rect, uv, egui::Color32::WHITE);
+    painter.image(tex, img_rect, bg.uv, egui::Color32::WHITE);
 }
 
 /// Draw group backgrounds behind all nodes.
@@ -1203,8 +1202,9 @@ fn draw_group_backgrounds(
         // Draw ascendancy class background art
         if group.is_ascendancy_start {
             if let Some(name) = &group.ascendancy_name {
-                // Fall back to Ascendant art for regular ascendancies without their own image;
-                // bloodlines have no background art.
+                // Fall back to Ascendant art for regular ascendancies without
+                // their own image; a bloodline draws nothing rather than
+                // borrowing Ascendant's emblem.
                 let bg = atlas.ascendancy_backgrounds.get(name.as_str()).or_else(|| {
                     if group.is_bloodline {
                         None
@@ -1221,16 +1221,14 @@ fn draw_group_backgrounds(
                     if img_rect.intersects(*visible_rect)
                         && let Some(tex) = atlas.texture_id(bg.sheet_index)
                     {
-                        let uv =
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                        // Dim non-selected ascendancies (upstream uses alpha 0.25)
+                        // Dim non-selected ascendancies (upstream uses alpha 0.50)
                         let is_selected = tree.ascendancy_name.as_deref() == Some(name.as_str());
                         let tint = if is_selected {
                             egui::Color32::WHITE
                         } else {
                             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 64)
                         };
-                        painter.image(tex, img_rect, uv, tint);
+                        painter.image(tex, img_rect, bg.uv, tint);
                     }
                 }
             }

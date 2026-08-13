@@ -330,6 +330,19 @@ impl ItemsPanel {
         // Undo/redo (Ctrl+Z / Ctrl+Y), only when no widget (e.g. a search or
         // edit field) has keyboard focus
         if ui.ctx().memory(|m| m.focused().is_none()) {
+            // Ctrl+D: show or hide the stat-difference sections in item
+            // tooltips, as upstream's own Items tab binding does
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::D)) {
+                match items::toggle_stat_differences(bridge.lua()) {
+                    Ok(on) => {
+                        log::debug!("Item tooltip stat differences: {on}");
+                        // Cached tooltips were built with the old setting
+                        self.tooltip_cache.clear();
+                        self.item_db.tooltip_cache.clear();
+                    }
+                    Err(e) => log::error!("Failed to toggle item stat differences: {e}"),
+                }
+            }
             let undo_pressed =
                 ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
             let redo_pressed =

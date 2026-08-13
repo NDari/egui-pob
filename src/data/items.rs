@@ -52,6 +52,49 @@ pub struct TooltipLine {
     pub is_separator: bool,
 }
 
+/// Drop the "in the Items tab" qualifier from upstream's stat-difference tip.
+///
+/// Upstream appends it whenever an item tooltip is drawn outside that tab
+/// (`ItemsTab.lua:4796` / `:5057`), since that is where its Ctrl+D lives. Every
+/// surface that shows these tooltips here has a Ctrl+D of its own - the Items
+/// tab's own binding, or the tree view's for a socketed jewel - so the reader
+/// never has to go anywhere else, and naming a tab would misdirect them.
+/// Upstream's wording is otherwise untouched, including the enable/disable
+/// variants and colour codes.
+pub(crate) fn strip_items_tab_hint(text: &mut String) {
+    const QUALIFIER: &str = " in the Items tab";
+    if text.contains("Ctrl+D")
+        && let Some(pos) = text.find(QUALIFIER)
+    {
+        text.replace_range(pos..pos + QUALIFIER.len(), "");
+    }
+}
+
+/// Whether upstream is adding stat-difference sections to item tooltips.
+pub fn stat_differences_enabled(lua: &Lua) -> Result<bool, mlua::Error> {
+    lua.load("return mainObject_ref.main.modes['BUILD'].itemsTab.showStatDifferences == true")
+        .eval()
+}
+
+/// Flip the stat-difference sections on item tooltips, returning the new state.
+///
+/// Upstream owns this flag on ItemsTab and toggles it from the Items tab's
+/// Ctrl+D handler (`ItemsTab.lua:1481-1483`), which sits inside the UI input
+/// loop and cannot be called headless, so we set the same field. Upstream also
+/// raises `buildFlag` there to force a redraw; we drop cached tooltips instead,
+/// which is what actually needs to happen, and avoid a recalc that no stat
+/// depends on.
+pub fn toggle_stat_differences(lua: &Lua) -> Result<bool, mlua::Error> {
+    lua.load(
+        r#"
+        local itemsTab = mainObject_ref.main.modes['BUILD'].itemsTab
+        itemsTab.showStatDifferences = not itemsTab.showStatDifferences
+        return itemsTab.showStatDifferences
+    "#,
+    )
+    .eval()
+}
+
 /// Item details.
 #[derive(Debug, Clone)]
 pub struct ItemInfo {
@@ -711,8 +754,10 @@ pub fn item_tooltip_lines(
     let mut lines = Vec::new();
     for pair in lines_table.sequence_values::<LuaTable>() {
         let line = pair?;
+        let mut text: String = line.get("text").unwrap_or_default();
+        strip_items_tab_hint(&mut text);
         lines.push(TooltipLine {
-            text: line.get("text").unwrap_or_default(),
+            text,
             size: line.get("size").unwrap_or(16.0),
             is_separator: line.get("sep").unwrap_or(false),
         });

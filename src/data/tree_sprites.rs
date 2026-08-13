@@ -56,11 +56,21 @@ pub struct FrameSprites {
     pub group_background_large: Option<SpriteRegion>,
 }
 
-/// A standalone background image (ascendancy class art or class start art).
+/// A background image (ascendancy class art or class start art). Most are a
+/// whole file, but the newer ascendancy emblems only ship as a region of a
+/// spritesheet, so the UV rect is carried alongside.
 pub struct BackgroundImage {
     pub sheet_index: usize,
     pub width: f32,
     pub height: f32,
+    /// Normalized region of `sheet_index` to draw; the full image for
+    /// standalone files.
+    pub uv: egui::Rect,
+}
+
+/// UV rect covering a whole image.
+fn full_uv() -> egui::Rect {
+    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
 }
 
 /// All loaded sprite atlas data.
@@ -156,10 +166,20 @@ impl TreeSpriteAtlas {
 
         // Load standalone background images from the parent TreeData/ directory
         let tree_data_root = tree_data_dir.parent();
-        let ascendancy_backgrounds =
+        let mut ascendancy_backgrounds =
             load_prefixed_backgrounds(&mut sheets, tree_data_root, "Classes");
         let class_backgrounds =
             load_prefixed_backgrounds(&mut sheets, tree_data_root, "Background");
+
+        // Emblems that only exist inside a spritesheet (the 3.29 bloodlines,
+        // Reliquarian, Luminary) - added on top of the loose PNGs above.
+        load_sprite_backgrounds(
+            lua,
+            &mut sheets,
+            &mut sheet_map,
+            tree_data_dir,
+            &mut ascendancy_backgrounds,
+        )?;
 
         // Load class start node art — keyed by full asset name to match node.startArt
         let mut class_start_art = HashMap::new();
@@ -185,6 +205,7 @@ impl TreeSpriteAtlas {
                             sheet_index: idx,
                             width: w,
                             height: h,
+                            uv: full_uv(),
                         },
                     );
                 }
@@ -292,12 +313,128 @@ fn load_prefixed_backgrounds(
                     sheet_index: idx,
                     width: w,
                     height: h,
+                    uv: full_uv(),
                 },
             );
         }
     }
 
     backgrounds
+}
+
+/// One `Classes*` emblem as it appears in a spritesheet, straight from Lua.
+struct SpriteBackground {
+    /// Ascendancy name with the "Classes" prefix stripped (e.g. "Trialmaster").
+    name: String,
+    /// Spritesheet file this region lives in (e.g. "bloodline-3.webp").
+    file: String,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    width: f32,
+    height: f32,
+}
+
+/// Add ascendancy backgrounds that only exist as spritesheet regions.
+///
+/// The 3.29 bloodline emblems (and Reliquarian / Luminary) ship inside
+/// `bloodline-3.webp` / `ascendancy-3.webp` rather than as loose `Classes*.png`
+/// files, which is why they had no art here. Upstream pulls them out of its
+/// spriteMap in `PassiveTree.lua:349-365`, keeping the loose PNG whenever one
+/// exists; entries already loaded by [`load_prefixed_backgrounds`] are likewise
+/// left alone, which covers upstream's Primalist / Warlock / Warden carve-out.
+fn load_sprite_backgrounds(
+    lua: &Lua,
+    sheets: &mut Vec<SpriteSheet>,
+    sheet_map: &mut HashMap<String, usize>,
+    tree_data_dir: &Path,
+    backgrounds: &mut HashMap<String, BackgroundImage>,
+) -> Result<(), mlua::Error> {
+    let entries: LuaTable = lua
+        .load(
+            r#"
+            local tree = mainObject_ref.main.modes['BUILD'].spec.tree
+            local result = {}
+            if not (tree and tree.spriteMap and tree.skillSprites) then
+                return result
+            end
+            for name, spriteSet in pairs(tree.spriteMap) do
+                if name:match("^Classes") then
+                    -- One sheet per emblem; upstream takes the first entry too
+                    local spriteType, sprite = next(spriteSet)
+                    local sheet = spriteType and tree.skillSprites[spriteType]
+                    if sprite and sprite[1] and sheet and sheet.filename then
+                        -- "https://.../bloodline-3.webp?c89491a1" -> "bloodline-3.webp"
+                        local file = sheet.filename:gsub("%?%x+$", ""):gsub(".*/", "")
+                        table.insert(result, {
+                            name = name:sub(#"Classes" + 1),
+                            file = file,
+                            x0 = sprite[1], y0 = sprite[2],
+                            x1 = sprite[3], y1 = sprite[4],
+                            w = sprite.width, h = sprite.height,
+                        })
+                    end
+                end
+            end
+            return result
+        "#,
+        )
+        .eval()?;
+
+    let mut parsed = Vec::new();
+    for entry in entries.sequence_values::<LuaTable>() {
+        let e = entry?;
+        parsed.push(SpriteBackground {
+            name: e.get("name")?,
+            file: e.get("file")?,
+            x0: e.get("x0")?,
+            y0: e.get("y0")?,
+            x1: e.get("x1")?,
+            y1: e.get("y1")?,
+            width: e.get("w")?,
+            height: e.get("h")?,
+        });
+    }
+    // Deterministic order so the log line and any sheet loading are stable
+    parsed.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut added = 0;
+    for bg in parsed {
+        if bg.name.is_empty() || backgrounds.contains_key(&bg.name) {
+            continue;
+        }
+        let sheet_index = match sheet_map.get(&bg.file).copied() {
+            Some(idx) => idx,
+            None => {
+                let path = tree_data_dir.join(&bg.file);
+                let Some(idx) = load_sheet(sheets, &path) else {
+                    continue;
+                };
+                sheet_map.insert(bg.file.clone(), idx);
+                idx
+            }
+        };
+        let Some(sheet) = sheets.get(sheet_index) else {
+            continue;
+        };
+        // Lua's coords stay in pixels because our ImageSize() stub reports 1x1
+        let sw = sheet.image.width() as f32;
+        let sh = sheet.image.height() as f32;
+        let (u_min, v_min, u_max, v_max) = normalize_uv(bg.x0, bg.y0, bg.x1, bg.y1, sw, sh);
+        backgrounds.insert(
+            bg.name,
+            BackgroundImage {
+                sheet_index,
+                width: bg.width,
+                height: bg.height,
+                uv: egui::Rect::from_min_max(egui::pos2(u_min, v_min), egui::pos2(u_max, v_max)),
+            },
+        );
+        added += 1;
+    }
+    log::info!("Loaded {added} ascendancy backgrounds from spritesheets");
+    Ok(())
 }
 
 /// Extract jewel socket art (the "jewel" sprite section: JewelSocketActive*
@@ -344,10 +481,14 @@ fn extract_jewel_art(
     for pair in entries.pairs::<String, LuaTable>() {
         let (name, coords) = pair?;
         let mut region = parse_sprite_region(&coords, jewel_idx)?;
-        region.u_min /= sw;
-        region.v_min /= sh;
-        region.u_max /= sw;
-        region.v_max /= sh;
+        (region.u_min, region.v_min, region.u_max, region.v_max) = normalize_uv(
+            region.u_min,
+            region.v_min,
+            region.u_max,
+            region.v_max,
+            sw,
+            sh,
+        );
         jewel_art.insert(name, region);
     }
     Ok(jewel_art)
@@ -426,10 +567,14 @@ fn extract_node_sprites(
 
             let mut region = parse_sprite_region(&coords, sheet_index)?;
             // Normalize pixel coordinates to 0-1 UV range
-            region.u_min /= sw;
-            region.v_min /= sh;
-            region.u_max /= sw;
-            region.v_max /= sh;
+            (region.u_min, region.v_min, region.u_max, region.v_max) = normalize_uv(
+                region.u_min,
+                region.v_min,
+                region.u_max,
+                region.v_max,
+                sw,
+                sh,
+            );
             match sprite_type.as_str() {
                 "normalActive" => ns.normal_active = Some(region),
                 "normalInactive" => ns.normal_inactive = Some(region),
@@ -532,13 +677,72 @@ fn parse_sprite_region(coords: &LuaTable, sheet_index: usize) -> Result<SpriteRe
 }
 
 fn region_from_px(x: u32, y: u32, w: u32, h: u32, sw: f32, sh: f32, idx: usize) -> SpriteRegion {
+    let (u_min, v_min, u_max, v_max) =
+        normalize_uv(x as f32, y as f32, (x + w) as f32, (y + h) as f32, sw, sh);
     SpriteRegion {
-        u_min: x as f32 / sw,
-        v_min: y as f32 / sh,
-        u_max: (x + w) as f32 / sw,
-        v_max: (y + h) as f32 / sh,
+        u_min,
+        v_min,
+        u_max,
+        v_max,
         width: w as f32,
         height: h as f32,
         sheet_index: idx,
+    }
+}
+
+/// Convert a pixel rect in a spritesheet to UV coordinates, inset by half a
+/// texel on every side.
+///
+/// Sprites are packed edge to edge, and the sheets are uploaded with linear
+/// filtering, so a UV rect landing exactly on the texel boundary lets bilinear
+/// sampling reach into the neighbouring sprite along that edge. That is what
+/// drew a faint golden line above every medium group background: the row above
+/// `PSGroupBackground2` in group-background-3.png is the opaque bottom edge of
+/// `GroupBackgroundLargeHalfAlt`. Sampling texel centres instead keeps every
+/// sprite inside its own rect. Rects thinner than one texel collapse to their
+/// centre rather than inverting.
+fn normalize_uv(x0: f32, y0: f32, x1: f32, y1: f32, sw: f32, sh: f32) -> (f32, f32, f32, f32) {
+    let inset = |min: f32, max: f32, size: f32| -> (f32, f32) {
+        if max - min <= 1.0 {
+            let mid = (min + max) * 0.5 / size;
+            return (mid, mid);
+        }
+        ((min + 0.5) / size, (max - 0.5) / size)
+    };
+    let (u_min, u_max) = inset(x0, x1, sw);
+    let (v_min, v_max) = inset(y0, y1, sh);
+    (u_min, v_min, u_max, v_max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_uv;
+
+    #[test]
+    fn uv_is_inset_by_half_a_texel() {
+        // PSGroupBackground2 in group-background-3.png (1006x666). Row 285,
+        // just above it, is the opaque bottom edge of GroupBackgroundLargeHalfAlt.
+        let (u_min, v_min, u_max, v_max) = normalize_uv(723.0, 286.0, 901.0, 464.0, 1006.0, 666.0);
+        assert!(
+            v_min * 666.0 > 286.0,
+            "top edge must sit inside the sprite, got row {}",
+            v_min * 666.0
+        );
+        assert!(
+            v_max * 666.0 < 464.0,
+            "bottom edge must sit inside the sprite, got row {}",
+            v_max * 666.0
+        );
+        assert!((u_min * 1006.0 - 723.5).abs() < 1e-3);
+        assert!((u_max * 1006.0 - 900.5).abs() < 1e-3);
+        // ...while still covering all but half a texel of the sprite
+        assert!((v_max - v_min) * 666.0 > 176.0);
+    }
+
+    #[test]
+    fn thin_regions_collapse_instead_of_inverting() {
+        let (u_min, _, u_max, _) = normalize_uv(10.0, 0.0, 11.0, 4.0, 100.0, 100.0);
+        assert_eq!(u_min, u_max, "a one-texel column samples its centre");
+        assert!((u_min * 100.0 - 10.5).abs() < 1e-3);
     }
 }

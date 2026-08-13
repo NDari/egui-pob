@@ -9,11 +9,21 @@ use super::items::TooltipLine;
 /// Full item tooltip for the jewel socketed in a tree socket node, with the
 /// socket as slot context (radius stats etc.). Empty when the socket has no
 /// jewel. Mirrors upstream's socket-hover special case in AddNodeTooltip.
-pub fn socket_jewel_tooltip(lua: &Lua, node_id: u32) -> Result<Vec<TooltipLine>, mlua::Error> {
+///
+/// `with_diffs` mirrors the tree view's Ctrl+D toggle onto the ItemsTab flag
+/// that gates the "Removing this item from Socket #N will give you:" compare,
+/// so a socketed jewel previews its removal the way a passive previews its
+/// unallocation. The flag is restored afterwards so the Items tab keeps its
+/// own setting.
+pub fn socket_jewel_tooltip(
+    lua: &Lua,
+    node_id: u32,
+    with_diffs: bool,
+) -> Result<Vec<TooltipLine>, mlua::Error> {
     let result: LuaTable = lua
         .load(
             r#"
-            local nodeId = ...
+            local nodeId, withDiffs = ...
             local build = mainObject_ref.main.modes['BUILD']
             local itemsTab = build.itemsTab
             local socket, jewel = itemsTab:GetSocketAndJewelForNodeID(nodeId)
@@ -21,9 +31,15 @@ pub fn socket_jewel_tooltip(lua: &Lua, node_id: u32) -> Result<Vec<TooltipLine>,
                 return { lines = {} }
             end
             local tt = new("Tooltip")
+            local prevDiffs = itemsTab.showStatDifferences
+            itemsTab.showStatDifferences = withDiffs
             local ok, err = pcall(function()
-                itemsTab:AddItemTooltip(tt, jewel, { nodeId = nodeId })
+                -- The real socket slot, as upstream's AddNodeTooltip passes it:
+                -- the removal compare needs the slot's selected item and label,
+                -- which a synthetic { nodeId = ... } table cannot supply.
+                itemsTab:AddItemTooltip(tt, jewel, socket)
             end)
+            itemsTab.showStatDifferences = prevDiffs
             local lines = {}
             for _, line in ipairs(tt.lines) do
                 table.insert(lines, {
@@ -35,7 +51,7 @@ pub fn socket_jewel_tooltip(lua: &Lua, node_id: u32) -> Result<Vec<TooltipLine>,
             return { lines = lines, err = not ok and tostring(err) or nil }
         "#,
         )
-        .call(node_id)?;
+        .call((node_id, with_diffs))?;
 
     if let Ok(err) = result.get::<String>("err") {
         log::warn!("Socket jewel tooltip failed for node {node_id}: {err}");
@@ -45,8 +61,11 @@ pub fn socket_jewel_tooltip(lua: &Lua, node_id: u32) -> Result<Vec<TooltipLine>,
     let mut lines = Vec::new();
     for pair in lines_table.sequence_values::<LuaTable>() {
         let line = pair?;
+        let mut text: String = line.get("text").unwrap_or_default();
+        // The tip here refers to the tree view's Ctrl+D, not the Items tab's
+        super::items::strip_items_tab_hint(&mut text);
         lines.push(TooltipLine {
-            text: line.get("text").unwrap_or_default(),
+            text,
             size: line.get("size").unwrap_or(16.0),
             is_separator: line.get("sep").unwrap_or(false),
         });

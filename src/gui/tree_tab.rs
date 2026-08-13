@@ -1105,7 +1105,7 @@ impl TreePanel {
                 if !is_filled_socket {
                     return None;
                 }
-                match jewels::socket_jewel_tooltip(bridge.lua(), id) {
+                match jewels::socket_jewel_tooltip(bridge.lua(), id, self.show_stat_diffs) {
                     Ok(lines) if !lines.is_empty() => Some((id, lines)),
                     Ok(_) => None,
                     Err(e) => {

@@ -95,6 +95,19 @@ an anchor for each so the upgrade surfaces it.
 - Undo/redo hotkeys only fire when no text widget has focus (egui text
   fields own Ctrl+Z internally).
 
+- **Ctrl+D follows the surface you are on.** Upstream keeps two flags:
+  `PassiveTreeView.showStatDifferences` gates node diffs, `ItemsTab.
+  showStatDifferences` gates the item/jewel compare, each toggled by Ctrl+D in
+  its own tab - so upstream's tree Ctrl+D leaves a socketed jewel's "Removing
+  this item..." section on. We keep both flags and both bindings, but the tree's
+  Ctrl+D also governs jewel tooltips hovered in the tree:
+  `jewels::socket_jewel_tooltip` applies the tree's setting to the ItemsTab flag
+  for the duration of the call and restores it, leaving the Items tab's own
+  Ctrl+D (`items::toggle_stat_differences`) in charge there. For the same
+  reason, `items::strip_items_tab_hint` drops the "in the Items tab" qualifier
+  upstream appends to the tip (`ItemsTab.lua:4796` / `:5057`): whichever surface
+  shows the tooltip has a Ctrl+D that works.
+
 - **No sub-script system (LaunchSubScript).** Upstream runs HTTP and other
   background work on Lua worker threads via LaunchSubScript; we do all
   networking in Rust (reqwest, blocking) and stub LaunchSubScript. Any
