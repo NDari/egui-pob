@@ -32,6 +32,147 @@ pub struct FolderInfo {
     pub modified: f64,
 }
 
+/// Which cached recursive index a call refers to.
+///
+/// The build list panel and the compare tab's picker browse independently, so
+/// each keeps its own index rather than fighting over one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexKey {
+    BuildList,
+    ComparePicker,
+}
+
+impl IndexKey {
+    fn as_str(self) -> &'static str {
+        match self {
+            IndexKey::BuildList => "buildList",
+            IndexKey::ComparePicker => "comparePicker",
+        }
+    }
+}
+
+/// Build the recursive index of everything under `sub_path`, caching it in Lua.
+///
+/// Calls upstream's `BuildListHelpers.ScanFolder`, which walks subfolders and
+/// reads the first 2KB of each build to pattern-match its `<Build>` tag - far
+/// cheaper than parsing whole files, and the reason a search can afford to
+/// cover nested folders at all. Rescanning is filesystem work, so it happens
+/// on navigation and refresh; `filter_index` then runs off the cached index on
+/// every keystroke, the same split upstream makes.
+pub fn refresh_index(lua: &Lua, key: IndexKey, sub_path: &str) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local key, subPath = ...
+        local blh = LoadModule("Modules/BuildListHelpers")
+        pob_build_index = pob_build_index or {}
+        pob_build_index[key] = blh.ScanFolder(subPath)
+    "#,
+    )
+    .call((key.as_str(), sub_path))
+}
+
+/// Filter and order the cached index.
+///
+/// Both steps are upstream's: `FilterList` (which shows just `sub_path`'s own
+/// contents when the search box is empty, and matches the whole indexed subtree
+/// when it is not, including the `class:` term) and `SortList`. Returns an
+/// empty list if `refresh_index` has not run for this key.
+pub fn filter_index(
+    lua: &Lua,
+    key: IndexKey,
+    sub_path: &str,
+    filter: &str,
+    sort_mode: SortMode,
+) -> Result<Vec<BuildEntry>, mlua::Error> {
+    let sort_mode = match sort_mode {
+        SortMode::Name => "NAME",
+        SortMode::Modified => "EDITED",
+    };
+    let list: LuaTable = lua
+        .load(
+            r#"
+        local key, subPath, filterText, sortMode = ...
+        local index = pob_build_index and pob_build_index[key]
+        if not index then return {} end
+        local blh = LoadModule("Modules/BuildListHelpers")
+        local list = blh.FilterList(index, subPath, filterText)
+        blh.SortList(list, sortMode)
+        return list
+    "#,
+        )
+        .call((key.as_str(), sub_path, filter, sort_mode))?;
+
+    let mut entries = Vec::new();
+    for row in list.sequence_values::<LuaTable>() {
+        let row = row?;
+        let sub_path: String = row.get("subPath").unwrap_or_default();
+        let full_path = PathBuf::from(row.get::<String>("fullFileName").unwrap_or_default());
+        let modified: f64 = row.get("modified").unwrap_or(0.0);
+        if let Ok(folder_name) = row.get::<String>("folderName") {
+            entries.push(BuildEntry::Folder(FolderInfo {
+                folder_name,
+                full_path,
+                sub_path,
+                modified,
+            }));
+        } else {
+            entries.push(BuildEntry::Build(BuildInfo {
+                file_name: row.get("fileName").unwrap_or_default(),
+                build_name: row.get("buildName").unwrap_or_default(),
+                full_path,
+                sub_path,
+                level: row.get::<Option<u32>>("level").unwrap_or(None),
+                class_name: row.get::<Option<String>>("className").unwrap_or(None),
+                ascend_class_name: row.get::<Option<String>>("ascendClassName").unwrap_or(None),
+                modified,
+            }));
+        }
+    }
+    Ok(entries)
+}
+
+/// Whether `entry` may be moved or copied into `target_sub_path`.
+///
+/// Upstream's `CanMoveToSubPath`. False when the entry is already there, and -
+/// the case worth having this for - false when a folder's destination lies
+/// inside itself, which the recursive move and copy would otherwise follow
+/// forever. `folder_name` is `None` for builds, which can always move to a
+/// different folder.
+pub fn can_move_to_sub_path(
+    lua: &Lua,
+    entry_sub_path: &str,
+    folder_name: Option<&str>,
+    target_sub_path: &str,
+) -> Result<bool, mlua::Error> {
+    lua.load(
+        r#"
+        local subPath, folderName, target = ...
+        local blh = LoadModule("Modules/BuildListHelpers")
+        return blh.CanMoveToSubPath({ subPath = subPath, folderName = folderName }, target) == true
+    "#,
+    )
+    .call((entry_sub_path, folder_name, target_sub_path))
+}
+
+/// The full path a build should land on inside `sub_path`, sidestepping any
+/// name already taken.
+///
+/// Upstream's `listMode:GetDestName`: on a collision it appends `[2]`, `[3]`,
+/// ... *before* the extension, so the result stays a loadable `.xml` rather
+/// than an extensionless `name[2]`.
+pub fn dest_name(lua: &Lua, sub_path: &str, file_name: &str) -> Result<PathBuf, mlua::Error> {
+    let path: String = lua
+        .load(
+            r#"
+        local subPath, fileName = ...
+        local listMode = LoadModule("Modules/BuildList")
+        return listMode:GetDestName(subPath, fileName)
+    "#,
+        )
+        .call((sub_path, file_name))?;
+    Ok(PathBuf::from(path))
+}
+
 /// Scan a build directory for .xml build files and subfolders.
 pub fn scan_builds(build_path: &str, sub_path: &str) -> Vec<BuildEntry> {
     let dir = Path::new(build_path).join(sub_path);
@@ -280,20 +421,19 @@ pub fn create_folder(build_path: &str, sub_path: &str, name: &str) -> Result<(),
     std::fs::create_dir(&target).map_err(|e| format!("Failed to create folder: {e}"))
 }
 
-/// Move a build file into another directory. Fails if a file with the same
-/// name already exists there.
-pub fn move_build(path: &Path, dest_dir: &Path) -> Result<(), String> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| "Invalid build path".to_string())?;
-    let target = dest_dir.join(file_name);
+/// Move a build file to an exact target path.
+///
+/// The target is expected to come from [`dest_name`], which has already
+/// stepped around any name collision, so an existing file here means something
+/// changed underfoot and is reported rather than overwritten.
+pub fn move_build_to(path: &Path, target: &Path) -> Result<(), String> {
     if target.exists() {
         return Err(format!(
             "\"{}\" already exists in the target folder",
-            file_name.to_string_lossy()
+            target.file_name().unwrap_or_default().to_string_lossy()
         ));
     }
-    std::fs::rename(path, &target).map_err(|e| format!("Failed to move build: {e}"))
+    std::fs::rename(path, target).map_err(|e| format!("Failed to move build: {e}"))
 }
 
 fn entry_name(entry: &BuildEntry) -> &str {
@@ -390,6 +530,20 @@ pub fn sort_entries(
             .expect("naturalSortCompare returned a permutation");
     }
     Ok(())
+}
+
+/// Scan a directory and order it by name the way the build list panel does.
+///
+/// For the secondary browsers - the compare tab's build picker and the Save As
+/// folder list - which show the same directories but have no sort mode of their
+/// own. Without this they would fall back to `scan_builds`' plain lowercase
+/// ordering, where "Build 10" sorts before "Build 9".
+pub fn scan_builds_sorted(lua: &Lua, build_path: &str, sub_path: &str) -> Vec<BuildEntry> {
+    let mut entries = scan_builds(build_path, sub_path);
+    if let Err(e) = sort_entries(lua, &mut entries, SortMode::Name) {
+        log::error!("Failed to sort build list: {e}");
+    }
+    entries
 }
 
 /// Parse the <Build> tag from the first few hundred bytes of a build XML
@@ -523,20 +677,23 @@ mod tests {
         std::fs::create_dir(&sub).unwrap();
         let file = dir.path().join("a.xml");
         touch(&file);
-        move_build(&file, &sub).unwrap();
+        move_build_to(&file, &sub.join("a.xml")).unwrap();
         assert!(sub.join("a.xml").exists());
         assert!(!file.exists());
     }
 
     #[test]
-    fn move_build_refuses_existing_target() {
+    fn move_build_refuses_occupied_target() {
+        // Callers resolve collisions with dest_name first, so a target that is
+        // still occupied means the tree changed underneath us: report it rather
+        // than overwrite someone's build.
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
         let file = dir.path().join("a.xml");
         touch(&file);
         touch(&sub.join("a.xml"));
-        assert!(move_build(&file, &sub).is_err());
+        assert!(move_build_to(&file, &sub.join("a.xml")).is_err());
         assert!(file.exists());
     }
 

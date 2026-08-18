@@ -139,18 +139,19 @@ impl SaveAsDialog {
             folders: Vec::new(),
             new_folder: None,
         };
-        dialog.refresh_folders();
+        dialog.refresh_folders(bridge);
         dialog
     }
 
-    fn refresh_folders(&mut self) {
-        self.folders = build_list::scan_builds(&self.build_path, &self.sub_path)
-            .into_iter()
-            .filter_map(|entry| match entry {
-                BuildEntry::Folder(f) => Some(f.folder_name),
-                BuildEntry::Build(_) => None,
-            })
-            .collect();
+    fn refresh_folders(&mut self, bridge: &LuaBridge) {
+        self.folders =
+            build_list::scan_builds_sorted(bridge.lua(), &self.build_path, &self.sub_path)
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    BuildEntry::Folder(f) => Some(f.folder_name),
+                    BuildEntry::Build(_) => None,
+                })
+                .collect();
     }
 
     /// Target file for the current name, with illegal filename characters
@@ -296,7 +297,7 @@ impl BuildView {
                         .show(ui, |ui| {
                             for (i, (id, name)) in lib.dest.iter().enumerate() {
                                 ui.horizontal(|ui| {
-                                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                                    if ui.small_button("✖").on_hover_text("Remove").clicked() {
                                         remove = Some(i);
                                     }
                                     let resp = ui.label(name);
@@ -604,11 +605,11 @@ impl BuildView {
             }
             if let Some(sub_path) = nav_to {
                 dialog.sub_path = sub_path;
-                dialog.refresh_folders();
+                dialog.refresh_folders(bridge);
             }
             if let Some(folder) = enter_folder {
                 dialog.sub_path = format!("{}{folder}/", dialog.sub_path);
-                dialog.refresh_folders();
+                dialog.refresh_folders(bridge);
             }
             if do_create_folder && let Some((folder_name, _)) = dialog.new_folder.clone() {
                 let folder_name = folder_name.trim().to_string();
@@ -618,7 +619,7 @@ impl BuildView {
                         // Navigate into the new folder like upstream
                         dialog.sub_path = format!("{}{folder_name}/", dialog.sub_path);
                         dialog.new_folder = None;
-                        dialog.refresh_folders();
+                        dialog.refresh_folders(bridge);
                     }
                     Err(e) => dialog.new_folder = Some((folder_name, Some(e))),
                 }
@@ -1415,21 +1416,28 @@ impl BuildView {
             ui.separator();
         }
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            match self.sidebar_stats {
-                Some(ref stats) if !stats.lines.is_empty() => {
-                    show_stat_lines(ui, stats);
-                }
-                // Fallback: hardcoded key-stat table from raw calc output
-                _ => {
-                    if let Some(ref output) = self.calc_output {
-                        super::show_stat_table(ui, output);
-                    } else {
-                        ui.label("No calc output available.");
+        // Do not shrink horizontally to the content. The stat rows are only as
+        // wide as their text, so with egui's default auto-shrink the scroll
+        // area collapses to that width and draws the scrollbar at the end of
+        // the text rather than at the panel edge - where it then sits still
+        // while the panel is resized around it.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                match self.sidebar_stats {
+                    Some(ref stats) if !stats.lines.is_empty() => {
+                        show_stat_lines(ui, stats);
+                    }
+                    // Fallback: hardcoded key-stat table from raw calc output
+                    _ => {
+                        if let Some(ref output) = self.calc_output {
+                            super::show_stat_table(ui, output);
+                        } else {
+                            ui.label("No calc output available.");
+                        }
                     }
                 }
-            }
-        });
+            });
     }
 }
 

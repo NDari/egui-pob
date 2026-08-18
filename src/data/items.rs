@@ -13,6 +13,11 @@ pub struct EquippedItem {
     pub item: Option<ItemInfo>,
     /// Items from the build's item list that can be equipped in this slot.
     pub valid_items: Vec<SlotChoice>,
+    /// True for flask slots, which upstream gives an activation checkbox.
+    /// Tinctures share these slots, so the flag covers both.
+    pub can_activate: bool,
+    /// Whether the flask or tincture here is active, i.e. counted by the calcs.
+    pub active: bool,
 }
 
 /// An item that can be selected in a slot's dropdown.
@@ -35,6 +40,11 @@ pub struct ItemListEntry {
     pub crafted: bool,
     /// Base type ("Amulet", "Body Armour", ...).
     pub item_type: String,
+    /// True when the item may be anointed (upstream's `isAnointable`). Not the
+    /// same as `item_type == "Amulet"`: legacy Talisman bases and bases flagged
+    /// `cannotBeAnointed` are excluded, while non-amulets carrying
+    /// `canBeAnointed` are included.
+    pub anointable: bool,
     /// True when the base has an enchantment catalog (helmet/boots/gloves...).
     pub has_enchantments: bool,
     /// Influence keys present on the item (upstream itemLib.influenceInfo
@@ -193,6 +203,11 @@ pub fn extract_equipped_items(lua: &Lua) -> Result<Vec<EquippedItem>, mlua::Erro
                     selItemId = slot.selItemId
                 end
                 entry.selItemId = selItemId
+                -- Flask slots carry an activation toggle (upstream gates the
+                -- checkbox on slotName matching "Flask"). Tinctures equip into
+                -- these same slots, so both are covered.
+                entry.canActivate = slotName:match("Flask") ~= nil
+                entry.active = slot.active == true
                 -- Items that could be equipped in this slot
                 entry.validItems = {}
                 for _, id in ipairs(itemsTab.itemOrderList) do
@@ -279,6 +294,8 @@ pub fn extract_equipped_items(lua: &Lua) -> Result<Vec<EquippedItem>, mlua::Erro
                     sel_item_id: entry.get("selItemId").unwrap_or(0),
                     item,
                     valid_items,
+                    can_activate: entry.get("canActivate").unwrap_or(false),
+                    active: entry.get("active").unwrap_or(false),
                 });
             }
             Ok(items)
@@ -323,6 +340,14 @@ pub fn extract_item_list(lua: &Lua) -> Result<Vec<ItemListEntry>, mlua::Error> {
                         slot = equipped[id],
                         crafted = item.crafted == true,
                         itemType = item.type or "",
+                        -- Port of ItemsTab.lua's local isAnointable (see
+                        -- ports.toml). Talismans share the Amulet type, so a
+                        -- plain type check offers anointing on bases the game
+                        -- does not allow it for.
+                        anointable = (item and item.base
+                            and not item.base.cannotBeAnointed
+                            and item.base.subType ~= "Talisman"
+                            and (item.canBeAnointed or item.base.type == "Amulet")) == true,
                         hasEnchantments = item.enchantments ~= nil,
                         influences = influences,
                     })
@@ -343,6 +368,7 @@ pub fn extract_item_list(lua: &Lua) -> Result<Vec<ItemListEntry>, mlua::Error> {
             equipped_slot: entry.get("slot").ok(),
             crafted: entry.get("crafted").unwrap_or(false),
             item_type: entry.get("itemType").unwrap_or_default(),
+            anointable: entry.get("anointable").unwrap_or(false),
             has_enchantments: entry.get("hasEnchantments").unwrap_or(false),
             influences: entry
                 .get::<LuaTable>("influences")
@@ -372,6 +398,33 @@ pub fn equip_item(lua: &Lua, slot_name: &str, item_id: i64) -> Result<(), mlua::
     "#,
     )
     .call((slot_name, item_id))
+}
+
+/// Activate or deactivate the flask or tincture in a slot.
+///
+/// Mirrors the body of upstream's activation checkbox callback
+/// (`ItemSlotControl.lua`): the state lives in two places, on the slot itself
+/// (which `CalcSetup` reads to populate `env.flasks` / `env.tinctures`) and on
+/// the active item set (which `ItemsTab:Save` persists as `active="true"` and
+/// `SetActiveItemSet` restores), so both are written together.
+pub fn set_slot_active(lua: &Lua, slot_name: &str, active: bool) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local slotName, active = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local itemsTab = build.itemsTab
+        local slot = itemsTab.slots[slotName]
+        if not slot then return end
+        slot.active = active
+        if itemsTab.activeItemSet and itemsTab.activeItemSet[slotName] then
+            itemsTab.activeItemSet[slotName].active = active
+        end
+        itemsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+    "#,
+    )
+    .call((slot_name, active))
 }
 
 /// Move an equipped item from one slot to another (drag between slots).

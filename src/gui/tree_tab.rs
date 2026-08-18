@@ -517,7 +517,7 @@ impl TreePanel {
                 } else {
                     ui.label("0 matches");
                 }
-                if ui.small_button("✕").clicked() {
+                if ui.small_button("✖").clicked() {
                     self.search.clear();
                     self.search_matches.clear();
                     self.search_cycle = None;
@@ -1262,7 +1262,7 @@ impl TreePanel {
                     let mut remove: Option<usize> = None;
                     for (i, (_, name, w1, w2)) in popup.desired.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button("✖").clicked() {
                                 remove = Some(i);
                             }
                             ui.label(name.as_str());
@@ -1342,7 +1342,7 @@ impl TreePanel {
                                 let mut remove: Option<usize> = None;
                                 for (i, row) in popup.fallback.iter_mut().enumerate() {
                                     ui.horizontal(|ui| {
-                                        if ui.small_button("✕").clicked() {
+                                        if ui.small_button("✖").clicked() {
                                             remove = Some(i);
                                         }
                                         ui.label(row.name.as_str());

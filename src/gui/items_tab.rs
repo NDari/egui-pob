@@ -114,6 +114,10 @@ pub struct CraftUi {
 const CRAFT_RARITIES: [(&str, &str); 3] =
     [("Normal", "NORMAL"), ("Magic", "MAGIC"), ("Rare", "RARE")];
 
+/// Width reserved at the head of every slot row for the flask activation
+/// checkbox, so rows without one still line up.
+const ACTIVATE_WIDTH: f32 = 20.0;
+
 /// Enchant catalog cache: (item id, skill filter, sources with their lines).
 type EnchantCatalogCache = (i64, Option<String>, Vec<(EnchantSource, Vec<String>)>);
 
@@ -188,8 +192,6 @@ pub struct ItemsPanel {
     mod_ranges_cache: Option<(i64, Vec<crafting::ModRangeLine>)>,
     /// Influence icon textures (upstream Assets pngs), loaded on first use.
     influence_icons: Option<HashMap<String, egui::TextureHandle>>,
-    /// Cached socket layout per item for the inline socket display.
-    socket_display_cache: HashMap<i64, Vec<(String, i64)>>,
 }
 
 /// Influence key → asset file (upstream itemLib.influenceInfo order).
@@ -283,7 +285,6 @@ impl ItemsPanel {
             corrupt_rolls_cache: None,
             mod_ranges_cache: None,
             influence_icons: None,
-            socket_display_cache: HashMap::new(),
         }
     }
 
@@ -2679,13 +2680,45 @@ impl ItemsPanel {
         let mut pending_equip: Option<(String, i64)> = None;
         // (target slot, dragged item, source slot if dragged from a slot)
         let mut pending_drop: Option<(String, i64, Option<String>)> = None;
+        // (slot_name, new active state) toggled this frame
+        let mut pending_activate: Option<(String, bool)> = None;
 
         egui::Grid::new("slot_grid")
             .num_columns(2)
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
                 for slot in &self.equipped {
-                    ui.label(egui::RichText::new(&slot.label).color(Theme::TEXT_MUTED));
+                    // Flask slots trail with an activation checkbox, as upstream
+                    // does. Every other row reserves the same width so the
+                    // labels and dropdowns stay on one line.
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&slot.label).color(Theme::TEXT_MUTED));
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ACTIVATE_WIDTH, ui.spacing().interact_size.y),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                if !slot.can_activate {
+                                    return;
+                                }
+                                let mut active = slot.active;
+                                // Nothing to activate in an empty slot.
+                                let resp = ui.add_enabled(
+                                    slot.sel_item_id > 0,
+                                    egui::Checkbox::without_text(&mut active),
+                                );
+                                if resp.changed() {
+                                    pending_activate = Some((slot.slot_name.clone(), active));
+                                }
+                                let what = match slot.item.as_ref().map(|i| i.item_type.as_str()) {
+                                    Some("Tincture") => "tincture",
+                                    _ => "flask",
+                                };
+                                resp.on_hover_text(format!(
+                                    "Activate this {what}, so its effects count towards your stats."
+                                ));
+                            },
+                        );
+                    });
 
                     let selected_text = match &slot.item {
                         Some(item) => egui::RichText::new(&item.name).color(item.rarity_color()),
@@ -2783,25 +2816,6 @@ impl ItemsPanel {
                                         .on_hover_text("Drag to move to another slot");
                                 },
                             );
-                            // Inline socket display + influence icons
-                            let sockets = self
-                                .socket_display_cache
-                                .entry(slot.sel_item_id)
-                                .or_insert_with(|| {
-                                    crafting::item_sockets(bridge.lua(), slot.sel_item_id)
-                                        .ok()
-                                        .flatten()
-                                        .map(|s| s.sockets)
-                                        .unwrap_or_default()
-                                });
-                            if !sockets.is_empty() {
-                                ui.label(socket_display_job(sockets));
-                            }
-                            if let Some(entry) =
-                                self.item_list.iter().find(|e| e.id == slot.sel_item_id)
-                            {
-                                show_influence_icons(ui, &self.influence_icons, &entry.influences);
-                            }
                         }
                     });
 
@@ -2809,6 +2823,13 @@ impl ItemsPanel {
                 }
             });
 
+        if let Some((slot_name, active)) = pending_activate {
+            if let Err(e) = items::set_slot_active(bridge.lua(), &slot_name, active) {
+                log::error!("Failed to set {slot_name} active={active}: {e}");
+                return false;
+            }
+            return true;
+        }
         if let Some((slot_name, item_id)) = pending_equip {
             if let Err(e) = items::equip_item(bridge.lua(), &slot_name, item_id) {
                 log::error!("Failed to equip item {item_id} in {slot_name}: {e}");
@@ -2912,7 +2933,7 @@ impl ItemsPanel {
                         self.craft_ui.edit_item = Some(entry.id);
                         ui.close_menu();
                     }
-                    if entry.item_type == "Amulet" && ui.button("Anoint...").clicked() {
+                    if entry.anointable && ui.button("Anoint...").clicked() {
                         self.craft_ui.anoint_item = Some(entry.id);
                         self.craft_ui.anoint_selected = None;
                         self.craft_ui.anoint_slot = 1;
@@ -3527,29 +3548,3 @@ fn show_influence_icons(
     }
 }
 
-/// Colored socket circles with link separators ("R=G=B  W" as colored dots).
-fn socket_display_job(sockets: &[(String, i64)]) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob::default();
-    let format = |color: egui::Color32| egui::TextFormat {
-        font_id: egui::FontId::proportional(11.0),
-        color,
-        ..Default::default()
-    };
-    let mut prev_group: Option<i64> = None;
-    for (color, group) in sockets {
-        if let Some(prev) = prev_group {
-            let linked = *group == prev && color != "A";
-            job.append(if linked { "=" } else { " " }, 0.0, format(Theme::TEXT_DIM));
-        }
-        let dot_color = match color.as_str() {
-            "R" => egui::Color32::from_rgb(224, 80, 48),
-            "G" => egui::Color32::from_rgb(112, 255, 112),
-            "B" => egui::Color32::from_rgb(112, 112, 255),
-            "A" => egui::Color32::from_rgb(120, 220, 120),
-            _ => egui::Color32::WHITE,
-        };
-        job.append("●", 0.0, format(dot_color));
-        prev_group = Some(*group);
-    }
-    job
-}

@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use pob_egui::data::build_list::{self, BuildEntry, BuildInfo, BuildPreview, FolderInfo, SortMode};
+use pob_egui::data::build_list::{
+    self, BuildEntry, BuildInfo, BuildPreview, FolderInfo, IndexKey, SortMode,
+};
 use pob_egui::lua_bridge::LuaBridge;
 
 /// Modal popup state for build management actions.
@@ -30,7 +32,10 @@ enum Popup {
 /// Deferred row interaction, resolved after the entry loop.
 enum RowAction {
     Open(BuildInfo),
-    Enter(String),
+    Enter {
+        sub_path: String,
+        name: String,
+    },
     ConfirmDelete {
         path: PathBuf,
         name: String,
@@ -43,8 +48,22 @@ enum RowAction {
     },
     Move {
         path: PathBuf,
-        dest: PathBuf,
+        file_name: String,
+        from_sub_path: String,
+        to_sub_path: String,
     },
+}
+
+/// The sub path one level above `sub_path`, or `None` at the build root.
+fn parent_of(sub_path: &str) -> Option<String> {
+    let trimmed = sub_path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(match trimmed.rfind('/') {
+        Some(pos) => format!("{}/", &trimmed[..pos]),
+        None => String::new(),
+    })
 }
 
 /// State for the build list panel.
@@ -53,51 +72,52 @@ pub struct BuildListPanel {
     pub sub_path: String,
     build_path: String,
     sort_mode: SortMode,
-    /// The mode `entries` is currently ordered by. Sorting calls into Lua for
-    /// upstream's comparator, so it runs when the list or mode changes rather
-    /// than every frame.
-    sorted_as: Option<SortMode>,
     filter: String,
+    /// The (sub path, filter, sort mode) `entries` was produced for. Filtering
+    /// and ordering both run in Lua against the cached index, so they repeat
+    /// only when one of the three changes rather than every frame.
+    filtered_as: Option<(String, String, SortMode)>,
     popup: Option<Popup>,
     /// Hover preview data, parsed from build XMLs on first hover.
     preview_cache: HashMap<PathBuf, BuildPreview>,
 }
 
 impl BuildListPanel {
-    pub fn new(build_path: String) -> Self {
+    pub fn new(build_path: String, bridge: &LuaBridge) -> Self {
         let mut panel = Self {
             entries: Vec::new(),
             sub_path: String::new(),
             build_path,
             sort_mode: SortMode::Name,
-            sorted_as: None,
             filter: String::new(),
+            filtered_as: None,
             popup: None,
             preview_cache: HashMap::new(),
         };
-        panel.refresh();
+        panel.refresh(bridge);
         panel
     }
 
-    pub fn refresh(&mut self) {
-        self.entries = build_list::scan_builds(&self.build_path, &self.sub_path);
-        self.sorted_as = None;
-        log::info!(
-            "Scanned {} entries in {}{}",
-            self.entries.len(),
-            self.build_path,
-            self.sub_path
-        );
+    /// Re-index the build tree from disk. Filtering runs off the cached index,
+    /// so this is the only step that touches the filesystem.
+    pub fn refresh(&mut self, bridge: &LuaBridge) {
+        if let Err(e) = build_list::refresh_index(bridge.lua(), IndexKey::BuildList, &self.sub_path)
+        {
+            log::error!("Failed to index builds: {e}");
+        }
+        self.filtered_as = None;
     }
 
-    /// Navigate into a subfolder.
-    pub fn enter_folder(&mut self, folder_name: &str) {
-        self.sub_path = format!("{}{folder_name}/", self.sub_path);
-        self.refresh();
+    /// Navigate into a subfolder. `sub_path` is the folder's own location,
+    /// which is not necessarily the directory on screen: a search result can
+    /// sit several levels down.
+    pub fn enter_folder(&mut self, sub_path: &str, folder_name: &str, bridge: &LuaBridge) {
+        self.sub_path = format!("{sub_path}{folder_name}/");
+        self.refresh(bridge);
     }
 
     /// Navigate up one folder level.
-    pub fn go_up(&mut self) {
+    pub fn go_up(&mut self, bridge: &LuaBridge) {
         if self.sub_path.is_empty() {
             return;
         }
@@ -107,12 +127,7 @@ impl BuildListPanel {
             Some(pos) => format!("{}/", &trimmed[..pos]),
             None => String::new(),
         };
-        self.refresh();
-    }
-
-    /// The directory currently being displayed.
-    fn current_dir(&self) -> PathBuf {
-        Path::new(&self.build_path).join(&self.sub_path)
+        self.refresh(bridge);
     }
 
     /// Returns the action the GUI should take, if any.
@@ -135,12 +150,12 @@ impl BuildListPanel {
             ui.separator();
             if !self.sub_path.is_empty() {
                 if ui.button("⬆ Up").clicked() {
-                    self.go_up();
+                    self.go_up(bridge);
                 }
                 ui.label(format!("📁 {}", self.sub_path));
             }
             if ui.button("🔄 Refresh").clicked() {
-                self.refresh();
+                self.refresh(bridge);
             }
         });
 
@@ -159,8 +174,13 @@ impl BuildListPanel {
             ui.label("Search:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text("filter by name")
-                    .desired_width(180.0),
+                    .hint_text("e.g. class:assassin myfilename")
+                    .desired_width(220.0),
+            )
+            .on_hover_text(
+                "Searches every folder below this one. Terms match the build \
+                 name, folder, class or path; a class:<name> term matches only \
+                 the class or ascendancy.",
             );
             if !self.filter.is_empty() && ui.button("✖").clicked() {
                 self.filter.clear();
@@ -169,60 +189,66 @@ impl BuildListPanel {
 
         ui.separator();
 
-        self.show_popup(ui);
+        self.show_popup(ui, bridge);
+
+        // Re-filter only when the inputs change; the index itself is cached.
+        let filter_key = (
+            self.sub_path.clone(),
+            self.filter.trim().to_string(),
+            self.sort_mode,
+        );
+        if self.filtered_as.as_ref() != Some(&filter_key) {
+            match build_list::filter_index(
+                bridge.lua(),
+                IndexKey::BuildList,
+                &filter_key.0,
+                &filter_key.1,
+                self.sort_mode,
+            ) {
+                Ok(entries) => self.entries = entries,
+                Err(e) => log::error!("Failed to filter build list: {e}"),
+            }
+            self.filtered_as = Some(filter_key);
+        }
 
         if self.entries.is_empty() {
-            ui.label("No builds found.");
-            ui.label(format!(
-                "Build directory: {}{}",
-                self.build_path, self.sub_path
-            ));
+            if self.filter.trim().is_empty() {
+                ui.label("No builds found.");
+                ui.label(format!(
+                    "Build directory: {}{}",
+                    self.build_path, self.sub_path
+                ));
+            } else {
+                ui.label("No builds match that search.");
+            }
             return action;
         }
 
-        // Folders available as move targets (collected before the row loop)
-        let move_targets: Vec<(String, PathBuf)> = self
+        // Folders available as move targets, as sub paths - the form upstream's
+        // move guard and destination-name helper both work in.
+        let move_targets: Vec<(String, String)> = self
             .entries
             .iter()
             .filter_map(|e| match e {
-                BuildEntry::Folder(f) => Some((f.folder_name.clone(), f.full_path.clone())),
+                BuildEntry::Folder(f) => Some((
+                    f.folder_name.clone(),
+                    format!("{}{}/", f.sub_path, f.folder_name),
+                )),
                 BuildEntry::Build(_) => None,
             })
             .collect();
-        let parent_dir = if self.sub_path.is_empty() {
-            None
-        } else {
-            self.current_dir().parent().map(Path::to_path_buf)
-        };
+        let parent_sub_path = parent_of(&self.sub_path);
 
-        // Order the whole list once per change, then filter it - a filtered
-        // subsequence of a sorted list is still sorted, so typing in the search
-        // box costs nothing.
-        if self.sorted_as != Some(self.sort_mode) {
-            if let Err(e) =
-                build_list::sort_entries(bridge.lua(), &mut self.entries, self.sort_mode)
-            {
-                log::error!("Failed to sort build list: {e}");
-            }
-            self.sorted_as = Some(self.sort_mode);
-        }
-
-        let filter = self.filter.trim().to_lowercase();
-        let visible: Vec<usize> = (0..self.entries.len())
-            .filter(|&i| {
-                filter.is_empty()
-                    || entry_name(&self.entries[i])
-                        .to_lowercase()
-                        .contains(&filter)
-            })
-            .collect();
+        // Search results can come from anywhere below the current folder, so
+        // rows carry their location when it is not the folder on screen.
+        let here = self.sub_path.clone();
 
         let mut row_action = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for &i in &visible {
+            for i in 0..self.entries.len() {
                 match &self.entries[i] {
                     BuildEntry::Folder(folder) => {
-                        let (response, delete) = show_folder_row(ui, folder);
+                        let (response, delete) = show_folder_row(ui, folder, &here);
                         if delete {
                             row_action = Some(RowAction::ConfirmDelete {
                                 path: folder.full_path.clone(),
@@ -231,7 +257,10 @@ impl BuildListPanel {
                             });
                         }
                         if response.clicked() {
-                            row_action = Some(RowAction::Enter(folder.folder_name.clone()));
+                            row_action = Some(RowAction::Enter {
+                                sub_path: folder.sub_path.clone(),
+                                name: folder.folder_name.clone(),
+                            });
                         }
                         response.context_menu(|ui| {
                             if ui.button("Rename").clicked() {
@@ -253,7 +282,7 @@ impl BuildListPanel {
                         });
                     }
                     BuildEntry::Build(build) => {
-                        let (response, delete) = show_build_row(ui, build);
+                        let (response, delete) = show_build_row(ui, build, &here);
                         if delete {
                             row_action = Some(RowAction::ConfirmDelete {
                                 path: build.full_path.clone(),
@@ -274,23 +303,27 @@ impl BuildListPanel {
                                 });
                                 ui.close_menu();
                             }
-                            let has_targets = parent_dir.is_some() || !move_targets.is_empty();
+                            let has_targets = parent_sub_path.is_some() || !move_targets.is_empty();
                             if has_targets {
                                 ui.menu_button("Move to", |ui| {
-                                    if let Some(ref parent) = parent_dir
+                                    if let Some(ref parent) = parent_sub_path
                                         && ui.button("⬆ (parent folder)").clicked()
                                     {
                                         row_action = Some(RowAction::Move {
                                             path: build.full_path.clone(),
-                                            dest: parent.clone(),
+                                            file_name: build.file_name.clone(),
+                                            from_sub_path: build.sub_path.clone(),
+                                            to_sub_path: parent.clone(),
                                         });
                                         ui.close_menu();
                                     }
-                                    for (name, path) in &move_targets {
+                                    for (name, target) in &move_targets {
                                         if ui.button(format!("📁 {name}")).clicked() {
                                             row_action = Some(RowAction::Move {
                                                 path: build.full_path.clone(),
-                                                dest: path.clone(),
+                                                file_name: build.file_name.clone(),
+                                                from_sub_path: build.sub_path.clone(),
+                                                to_sub_path: target.clone(),
                                             });
                                             ui.close_menu();
                                         }
@@ -313,8 +346,8 @@ impl BuildListPanel {
 
         match row_action {
             Some(RowAction::Open(build)) => action = Some(BuildListAction::OpenBuild(build)),
-            Some(RowAction::Enter(name)) => {
-                self.enter_folder(&name);
+            Some(RowAction::Enter { sub_path, name }) => {
+                self.enter_folder(&sub_path, &name, bridge);
                 action = Some(BuildListAction::EnterFolder);
             }
             Some(RowAction::ConfirmDelete {
@@ -340,8 +373,13 @@ impl BuildListPanel {
                     error: None,
                 });
             }
-            Some(RowAction::Move { path, dest }) => match build_list::move_build(&path, &dest) {
-                Ok(()) => self.refresh(),
+            Some(RowAction::Move {
+                path,
+                file_name,
+                from_sub_path,
+                to_sub_path,
+            }) => match self.move_entry(bridge, &path, &file_name, &from_sub_path, &to_sub_path) {
+                Ok(()) => self.refresh(bridge),
                 Err(e) => self.popup = Some(Popup::Error(e)),
             },
             None => {}
@@ -350,8 +388,34 @@ impl BuildListPanel {
         action
     }
 
+    /// Move a build into another folder, upstream's way.
+    ///
+    /// `CanMoveToSubPath` rejects a move that goes nowhere (and, once folders
+    /// can be moved too, one whose destination lies inside the folder being
+    /// moved). `GetDestName` then picks the landing name, appending `[2]`,
+    /// `[3]`, ... ahead of the extension when the plain one is taken, so a
+    /// collision renames rather than failing.
+    fn move_entry(
+        &self,
+        bridge: &LuaBridge,
+        path: &Path,
+        file_name: &str,
+        from_sub_path: &str,
+        to_sub_path: &str,
+    ) -> Result<(), String> {
+        let lua = bridge.lua();
+        let allowed = build_list::can_move_to_sub_path(lua, from_sub_path, None, to_sub_path)
+            .map_err(|e| format!("Failed to check the move target: {e}"))?;
+        if !allowed {
+            return Err("That build is already in this folder.".to_string());
+        }
+        let target = build_list::dest_name(lua, to_sub_path, file_name)
+            .map_err(|e| format!("Failed to resolve the destination name: {e}"))?;
+        build_list::move_build_to(path, &target)
+    }
+
     /// Render the active management popup, if any.
-    fn show_popup(&mut self, ui: &mut egui::Ui) {
+    fn show_popup(&mut self, ui: &mut egui::Ui, bridge: &LuaBridge) {
         let Some(mut popup) = self.popup.take() else {
             return;
         };
@@ -494,7 +558,7 @@ impl BuildListPanel {
             self.popup = Some(popup);
         }
         if refresh {
-            self.refresh();
+            self.refresh(bridge);
         }
     }
 }
@@ -504,13 +568,6 @@ pub enum BuildListAction {
     EnterFolder,
     OpenBuild(BuildInfo),
     NewBuild,
-}
-
-fn entry_name(entry: &BuildEntry) -> &str {
-    match entry {
-        BuildEntry::Build(b) => &b.build_name,
-        BuildEntry::Folder(f) => &f.folder_name,
-    }
 }
 
 /// Rows are centered in the panel at this width rather than stretched across it.
@@ -548,8 +605,21 @@ fn centered_row(ui: &mut egui::Ui, label: String) -> (egui::Response, bool) {
     .inner
 }
 
-fn show_folder_row(ui: &mut egui::Ui, folder: &FolderInfo) -> (egui::Response, bool) {
-    centered_row(ui, format!("📁 {}", folder.folder_name))
+/// The part of an entry's location that lies below the folder on screen.
+///
+/// Empty for entries in that folder, so ordinary browsing looks unchanged;
+/// search results reaching into subfolders show where they came from, the way
+/// upstream prefixes a hit with its relative subpath.
+pub(crate) fn relative_prefix(entry_sub_path: &str, here: &str) -> String {
+    match entry_sub_path.strip_prefix(here) {
+        Some("") | None => String::new(),
+        Some(rest) => rest.to_string(),
+    }
+}
+
+fn show_folder_row(ui: &mut egui::Ui, folder: &FolderInfo, here: &str) -> (egui::Response, bool) {
+    let prefix = relative_prefix(&folder.sub_path, here);
+    centered_row(ui, format!("📁 {prefix}{}", folder.folder_name))
 }
 
 /// Attach the build preview tooltip (class, level, headline stats) to a row,
@@ -611,12 +681,13 @@ fn format_stat(value: f64) -> String {
     }
 }
 
-fn show_build_row(ui: &mut egui::Ui, build: &BuildInfo) -> (egui::Response, bool) {
-    centered_row(ui, build_summary(build))
+fn show_build_row(ui: &mut egui::Ui, build: &BuildInfo, here: &str) -> (egui::Response, bool) {
+    centered_row(ui, build_summary(build, here))
 }
 
-fn build_summary(build: &BuildInfo) -> String {
-    let mut parts = vec![build.build_name.clone()];
+fn build_summary(build: &BuildInfo, here: &str) -> String {
+    let prefix = relative_prefix(&build.sub_path, here);
+    let mut parts = vec![format!("{prefix}{}", build.build_name)];
     if let Some(ref class) = build.ascend_class_name {
         if class != "None" && !class.is_empty() {
             parts.push(class.clone());

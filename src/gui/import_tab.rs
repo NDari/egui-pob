@@ -304,7 +304,7 @@ impl ImportPanel {
                                     self.account_name = name.clone();
                                 }
                                 if ui
-                                    .small_button("✕")
+                                    .small_button("✖")
                                     .on_hover_text("Remove from history")
                                     .clicked()
                                 {

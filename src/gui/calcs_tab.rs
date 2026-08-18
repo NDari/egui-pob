@@ -350,7 +350,7 @@ impl CalcsPanel {
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
                 response.request_focus();
             }
-            if !self.search.is_empty() && ui.small_button("✕").clicked() {
+            if !self.search.is_empty() && ui.small_button("✖").clicked() {
                 self.search.clear();
             }
         });
@@ -367,7 +367,7 @@ impl CalcsPanel {
         ui.horizontal(|ui| {
             ui.heading(&open.title);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("✕").clicked() {
+                if ui.small_button("✖").clicked() {
                     close = true;
                 }
                 if ui

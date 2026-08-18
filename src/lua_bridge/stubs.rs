@@ -72,6 +72,16 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|_, text: String| Ok(strip_escapes(&text)))?,
     )?;
 
+    // GetDrawColor - added upstream in v2.67.0, read at Tooltip.lua:609 to save
+    // the draw colour before painting a mod-line background. We read
+    // `tooltip.lines` instead of calling Tooltip:Draw, so nothing should reach
+    // it, but a nil global here would be a hard error rather than a no-op.
+    // White matches SetDrawColor's documented default.
+    g.set(
+        "GetDrawColor",
+        lua.create_function(|_, ()| Ok((1.0f64, 1.0f64, 1.0f64, 1.0f64)))?,
+    )?;
+
     g.set("GetAsyncCount", lua.create_function(|_, ()| Ok(0i32))?)?;
 
     // -- Input stubs --

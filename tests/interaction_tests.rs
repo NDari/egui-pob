@@ -5920,6 +5920,426 @@ fn test_build_list_natural_sort_matches_upstream() {
     );
 }
 
+/// Flask slots carry an activation toggle, and an inactive flask contributes
+/// nothing to the calcs. The state has to reach two places to work: the slot
+/// (read by `CalcSetup` into `env.flasks`) and the active item set (persisted
+/// by `ItemsTab:Save`), so this checks both plus the calc effect.
+#[test]
+fn test_flask_activation() {
+    use pob_egui::data::items;
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // Find a flask slot with something equipped in the fixture.
+    let equipped = items::extract_equipped_items(lua).expect("equipped failed");
+    let flask = equipped
+        .iter()
+        .find(|s| s.can_activate && s.sel_item_id > 0)
+        .expect("the fixture has at least one flask equipped");
+    assert!(
+        flask.slot_name.contains("Flask"),
+        "activation is offered on flask slots: {}",
+        flask.slot_name
+    );
+    let slot_name = flask.slot_name.clone();
+
+    // Non-flask slots offer no toggle.
+    assert!(
+        equipped
+            .iter()
+            .any(|s| !s.can_activate && !s.slot_name.contains("Flask")),
+        "ordinary gear slots have no activation checkbox"
+    );
+
+    // Reads the live state back, from the slot and the item set both.
+    let state = |lua: &mlua::Lua| -> (bool, bool, bool) {
+        lua.load(
+            r#"
+            local slotName = ...
+            local build = mainObject_ref.main.modes['BUILD']
+            local itemsTab = build.itemsTab
+            local slot = itemsTab.slots[slotName]
+            local set = itemsTab.activeItemSet and itemsTab.activeItemSet[slotName]
+            local item = itemsTab.items[slot.selItemId]
+            local counted = false
+            local env = build.calcsTab.mainEnv
+            if env and env.flasks and item then counted = env.flasks[item] == true end
+            return slot.active == true, set and set.active == true, counted
+        "#,
+        )
+        .call(slot_name.as_str())
+        .expect("state read failed")
+    };
+
+    items::set_slot_active(lua, &slot_name, true).expect("activate failed");
+    assert_eq!(
+        state(lua),
+        (true, true, true),
+        "activating sets the slot, the item set, and puts the flask in env.flasks"
+    );
+    assert!(
+        items::extract_equipped_items(lua)
+            .expect("equipped failed")
+            .iter()
+            .any(|s| s.slot_name == slot_name && s.active),
+        "the new state reads back through extract_equipped_items"
+    );
+
+    // Activation is worthless if it does not survive a save, and it rides on
+    // the item set rather than the item, so check the XML carries it.
+    //
+    // Upstream builds each element's attributes as a Lua hash map and writes
+    // them with `pairs()`, so their order varies run to run. Pull out the one
+    // <Slot> element by name and test its contents rather than matching a
+    // sequence of attributes.
+    let save = || -> String {
+        lua.load(r#"return mainObject_ref.main.modes['BUILD']:SaveDB("flaskactive")"#)
+            .eval()
+            .expect("SaveDB failed")
+    };
+    let slot_elem = |xml: &str| -> String {
+        xml.lines()
+            .find(|l| {
+                l.trim_start().starts_with("<Slot ")
+                    && l.contains(&format!(r#"name="{slot_name}""#))
+            })
+            .unwrap_or_else(|| panic!("no <Slot> element for {slot_name}"))
+            .to_string()
+    };
+
+    items::set_slot_active(lua, &slot_name, true).expect("activate failed");
+    assert!(
+        slot_elem(&save()).contains(r#"active="true""#),
+        "the active flag is written into the item set's slot element"
+    );
+
+    items::set_slot_active(lua, &slot_name, false).expect("deactivate failed");
+    assert_eq!(
+        state(lua),
+        (false, false, false),
+        "deactivating clears all three"
+    );
+    assert!(
+        !slot_elem(&save()).contains(r#"active="#),
+        "and drops the flag again when deactivated"
+    );
+}
+
+/// Tinctures equip into flask slots and share their activation toggle, but the
+/// calcs track them in `env.tinctures` rather than `env.flasks`, so they need
+/// their own coverage.
+#[test]
+fn test_tincture_activation() {
+    use pob_egui::data::items;
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    let raw = "Rarity: UNIQUE\n\
+               The Battle Within\n\
+               Oakbranch Tincture\n\
+               Requires Level 18\n\
+               Implicits: 0\n\
+               Melee Weapon Attacks have Culling Strike\n";
+    assert!(
+        items::add_item_from_raw(lua, raw)
+            .expect("add failed")
+            .is_none(),
+        "the tincture parses"
+    );
+    let id = items::extract_item_list(lua)
+        .expect("list failed")
+        .into_iter()
+        .find(|e| e.name.contains("The Battle Within"))
+        .expect("tincture in the item list")
+        .id;
+
+    // A tincture is valid for a flask slot, which is what gives it the toggle.
+    let slot = items::extract_equipped_items(lua)
+        .expect("equipped failed")
+        .into_iter()
+        .find(|s| s.can_activate && s.valid_items.iter().any(|c| c.id == id))
+        .expect("a flask slot accepts the tincture");
+    items::equip_item(lua, &slot.slot_name, id).expect("equip failed");
+
+    let counted = |lua: &mlua::Lua| -> (bool, bool) {
+        lua.load(
+            r#"
+            local id = ...
+            local build = mainObject_ref.main.modes['BUILD']
+            local item = build.itemsTab.items[id]
+            local env = build.calcsTab.mainEnv
+            return env.tinctures ~= nil and env.tinctures[item] == true,
+                   env.flasks ~= nil and env.flasks[item] == true
+        "#,
+        )
+        .call(id)
+        .expect("read failed")
+    };
+
+    items::set_slot_active(lua, &slot.slot_name, true).expect("activate failed");
+    assert_eq!(
+        counted(lua),
+        (true, false),
+        "an active tincture lands in env.tinctures, not env.flasks"
+    );
+
+    items::set_slot_active(lua, &slot.slot_name, false).expect("deactivate failed");
+    assert_eq!(counted(lua), (false, false), "deactivating removes it");
+}
+
+/// Build a small nested build tree and point `main.buildPath` at it, so the
+/// build-list tests exercise upstream's scanner against real directories.
+/// Returns the temp dir (kept alive by the caller) and the previous build path.
+fn with_build_tree(lua: &mlua::Lua) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("Nested/Deep")).unwrap();
+    let build = |level: &str, class: &str, ascend: &str| {
+        format!(
+            "<PathOfBuilding><Build level=\"{level}\" className=\"{class}\" \
+             ascendClassName=\"{ascend}\"/></PathOfBuilding>"
+        )
+    };
+    std::fs::write(root.join("Top.xml"), build("93", "Ranger", "Deadeye")).unwrap();
+    std::fs::write(
+        root.join("Nested/Inner.xml"),
+        build("42", "Witch", "Occultist"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Nested/Deep/Buried.xml"),
+        build("7", "Marauder", "Juggernaut"),
+    )
+    .unwrap();
+
+    let old: String = lua
+        .load("local p = ... local old = main.buildPath main.buildPath = p return old")
+        .call(format!("{}/", root.to_str().unwrap()))
+        .expect("set buildPath");
+    (dir, old)
+}
+
+fn restore_build_path(lua: &mlua::Lua, old: &str) {
+    lua.load("main.buildPath = ...")
+        .call::<()>(old)
+        .expect("restore buildPath");
+}
+
+/// Searching the build list reaches into subfolders instead of only the folder
+/// on screen, and understands upstream's `class:` term. Both come from calling
+/// `BuildListHelpers.ScanFolder`/`FilterList` rather than filtering the current
+/// directory listing ourselves.
+#[test]
+fn test_build_list_recursive_search() {
+    use pob_egui::data::build_list::{self, BuildEntry, IndexKey, SortMode};
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+    let (_dir, old_path) = with_build_tree(lua);
+
+    build_list::refresh_index(lua, IndexKey::BuildList, "").expect("index failed");
+    let names = |filter: &str| -> Vec<String> {
+        build_list::filter_index(lua, IndexKey::BuildList, "", filter, SortMode::Name)
+            .expect("filter failed")
+            .into_iter()
+            .map(|e| match e {
+                BuildEntry::Build(b) => format!("{}{}", b.sub_path, b.file_name),
+                BuildEntry::Folder(f) => format!("[dir]{}{}", f.sub_path, f.folder_name),
+            })
+            .collect()
+    };
+
+    // No search: just this folder's own contents, folders first.
+    assert_eq!(names(""), vec!["[dir]Nested", "Top.xml"]);
+
+    // A search reaches all the way down.
+    assert_eq!(names("buried"), vec!["Nested/Deep/Buried.xml"]);
+    assert_eq!(names("inner"), vec!["Nested/Inner.xml"]);
+
+    // class: matches the class or ascendancy, not the file name.
+    assert_eq!(names("class:occultist"), vec!["Nested/Inner.xml"]);
+    assert_eq!(names("class:witch"), vec!["Nested/Inner.xml"]);
+    assert!(
+        names("class:top").is_empty(),
+        "class: does not fall back to matching the build name"
+    );
+
+    // Terms combine, as upstream requires all of them to match.
+    assert_eq!(
+        names("class:juggernaut buried"),
+        vec!["Nested/Deep/Buried.xml"]
+    );
+    assert!(names("class:juggernaut inner").is_empty());
+
+    // The header fields the 2KB read pulls out reach us intact.
+    let hit = build_list::filter_index(lua, IndexKey::BuildList, "", "buried", SortMode::Name)
+        .expect("filter failed");
+    let BuildEntry::Build(b) = &hit[0] else {
+        panic!("expected a build")
+    };
+    assert_eq!(
+        (
+            b.level,
+            b.class_name.as_deref(),
+            b.ascend_class_name.as_deref()
+        ),
+        (Some(7), Some("Marauder"), Some("Juggernaut"))
+    );
+
+    restore_build_path(lua, &old_path);
+}
+
+/// A folder cannot be moved or copied into itself: the recursive move and copy
+/// would otherwise walk into the destination they are still creating.
+#[test]
+fn test_folder_move_guard() {
+    use pob_egui::data::build_list;
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // "Nested" lives at the root; "Nested/Deep/" is inside it.
+    assert!(
+        !build_list::can_move_to_sub_path(lua, "", Some("Nested"), "Nested/Deep/").unwrap(),
+        "a folder cannot move inside itself"
+    );
+    assert!(
+        !build_list::can_move_to_sub_path(lua, "", Some("Nested"), "Nested/").unwrap(),
+        "nor directly into itself"
+    );
+    assert!(
+        build_list::can_move_to_sub_path(lua, "", Some("Nested"), "Other/").unwrap(),
+        "an unrelated folder is a fine destination"
+    );
+    // Builds carry no folder name and only need the destination to differ.
+    assert!(build_list::can_move_to_sub_path(lua, "", None, "Nested/").unwrap());
+    assert!(
+        !build_list::can_move_to_sub_path(lua, "Nested/", None, "Nested/").unwrap(),
+        "moving to where it already is does nothing"
+    );
+}
+
+/// A name collision when moving appends `[2]`, `[3]`, ... *before* the
+/// extension, so the moved build stays a loadable `.xml`.
+#[test]
+fn test_dest_name_keeps_xml_extension() {
+    use pob_egui::data::build_list;
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+    let (dir, old_path) = with_build_tree(lua);
+
+    let taken = build_list::dest_name(lua, "", "Top.xml").expect("dest_name failed");
+    assert_eq!(taken, dir.path().join("Top[2].xml"));
+
+    // A second collision keeps counting rather than reusing [2].
+    std::fs::write(dir.path().join("Top[2].xml"), "<PathOfBuilding/>").unwrap();
+    let taken2 = build_list::dest_name(lua, "", "Top.xml").expect("dest_name failed");
+    assert_eq!(taken2, dir.path().join("Top[3].xml"));
+
+    // A free name is returned untouched.
+    let free = build_list::dest_name(lua, "", "Fresh.xml").expect("dest_name failed");
+    assert_eq!(free, dir.path().join("Fresh.xml"));
+
+    restore_build_path(lua, &old_path);
+}
+
+/// Upstream's `isAnointable` is a file-local function in `ItemsTab.lua`, so the
+/// eligibility rule is ported (`ports.toml: item-is-anointable`) rather than
+/// called. The case that motivated it: Talismans carry `base.type == "Amulet"`,
+/// so gating on the type alone offers anointing on bases the game disallows.
+#[test]
+fn test_anointable_excludes_talismans() {
+    use pob_egui::data::items;
+
+    let bridge = common::boot_and_load_test_build();
+    let lua = bridge.lua();
+
+    // A legacy Talisman and an ordinary amulet, both base.type == "Amulet".
+    let talisman = lua
+        .load(
+            r#"
+            for name, base in pairs(data.itemBases) do
+                if base.subType == "Talisman" then return name end
+            end
+        "#,
+        )
+        .eval::<String>()
+        .expect("a Talisman base exists in 3.29 data");
+
+    for (raw_name, expected) in [(talisman.as_str(), false), ("Amber Amulet", true)] {
+        let raw = format!("Rarity: NORMAL\n{raw_name}\n{raw_name}\n");
+        items::add_item_from_raw(lua, &raw).expect("add failed");
+        let entry = items::extract_item_list(lua)
+            .expect("list failed")
+            .into_iter()
+            .find(|e| e.name == raw_name)
+            .unwrap_or_else(|| panic!("{raw_name} in the item list"));
+        assert_eq!(
+            entry.anointable, expected,
+            "{raw_name} (type {}) anointable should be {expected}",
+            entry.item_type
+        );
+    }
+}
+
+/// `GetDrawColor` arrived upstream in v2.67.0 and is read inside
+/// `Tooltip:Draw`. We read `tooltip.lines` instead of calling Draw, so nothing
+/// should reach it - but a missing global would be a hard error rather than a
+/// no-op, so the stub must exist and return four channels.
+#[test]
+fn test_get_draw_color_stub_present() {
+    let bridge = common::boot_and_load_test_build();
+    let (r, g, b, a): (f64, f64, f64, f64) = bridge
+        .lua()
+        .load("return GetDrawColor()")
+        .eval()
+        .expect("GetDrawColor is registered");
+    assert_eq!((r, g, b, a), (1.0, 1.0, 1.0, 1.0));
+}
+
+/// The secondary build browsers - the compare tab's picker and the Save As
+/// folder list - go through `scan_builds_sorted` rather than sorting for
+/// themselves, so a real directory read through it must come back in the same
+/// natural order the build list panel shows, not `scan_builds`' plain
+/// lowercase ordering.
+#[test]
+fn test_scan_builds_sorted_orders_naturally() {
+    use pob_egui::data::build_list::{self, BuildEntry};
+
+    let bridge = common::boot_and_load_test_build();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    for name in ["Build 10.xml", "Build 9.xml", "Build 2.xml", "apple.xml"] {
+        std::fs::write(root.join(name), "<PathOfBuilding></PathOfBuilding>").unwrap();
+    }
+    std::fs::create_dir(root.join("Zulu")).unwrap();
+
+    let entries = build_list::scan_builds_sorted(bridge.lua(), root.to_str().unwrap(), "");
+    let names: Vec<String> = entries
+        .iter()
+        .map(|e| match e {
+            BuildEntry::Build(b) => b.file_name.clone(),
+            BuildEntry::Folder(f) => f.folder_name.clone(),
+        })
+        .collect();
+
+    assert_eq!(
+        names,
+        vec![
+            "Zulu".to_string(),
+            "apple.xml".to_string(),
+            "Build 2.xml".to_string(),
+            "Build 9.xml".to_string(),
+            "Build 10.xml".to_string(),
+        ],
+        "folders first, then upstream's naturalSortCompare order"
+    );
+}
+
 /// Abyss timeless jewels (types 7-11) search through a different lookup table
 /// and conquer allocated nodes rather than a radius, so they need their own
 /// coverage: the Legion tests above never touch `readAbyssJewelLUT`.

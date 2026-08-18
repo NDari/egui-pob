@@ -10,6 +10,11 @@ use pob_egui::lua_bridge::LuaBridge;
 
 use super::items_tab::show_tooltip_lines;
 
+/// Width of the gem name column in a socket group's gem rows, so the level
+/// and quality controls line up across every gem and group. Names wider than
+/// this truncate; the hover tooltip still names the gem in full.
+const GEM_NAME_WIDTH: f32 = 230.0;
+
 /// Pending name prompt in the skill set manager.
 enum SetAction {
     New,
@@ -958,7 +963,7 @@ fn show_socket_group(
                         .color(super::theme::Theme::GEM_SUPPORT),
                 );
                 if ui
-                    .small_button("✕")
+                    .small_button("✖")
                     .on_hover_text("Remove the imbued support")
                     .clicked()
                 {
@@ -1024,8 +1029,7 @@ fn show_socket_group(
         if group.from_item {
             ui.label("Count:");
             let mut count = group.group_count;
-            let resp = ui.add(egui::DragValue::new(&mut count).range(1..=99));
-            if drag_value_committed(&resp) {
+            if stepped_drag_value(ui, &mut count, 1, 99, |d| d) {
                 actions.push(SkillAction::SetGroupCount(group.index, count));
             }
         }
@@ -1063,7 +1067,19 @@ fn show_socket_group(
             } else {
                 super::theme::Theme::GEM_ACTIVE
             };
-            let name_resp = ui.colored_label(color, &gem.name);
+            // Fixed-width name column: keeps the level/quality controls of
+            // every row aligned regardless of how long the gem's name is.
+            let (name_rect, _) = ui.allocate_exact_size(
+                egui::vec2(GEM_NAME_WIDTH, ui.spacing().interact_size.y),
+                egui::Sense::hover(),
+            );
+            let name_resp = ui
+                .new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(name_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                )
+                .add(egui::Label::new(egui::RichText::new(&gem.name).color(color)).truncate());
             // Upstream gem tooltip (GemTooltip.lua) on hover; F1 on
             // the hovered gem opens its wiki page
             if name_resp.hovered() {
@@ -1082,12 +1098,7 @@ fn show_socket_group(
                 }
             }
 
-            let level_response = ui.add(
-                egui::DragValue::new(&mut gem.level)
-                    .range(1..=40)
-                    .prefix("Lv "),
-            );
-            if drag_value_committed(&level_response) {
+            if stepped_drag_value(ui, &mut gem.level, 1, 40, |d| d.prefix("Lv ")) {
                 actions.push(SkillAction::SetGem(
                     group_index,
                     gem_index,
@@ -1095,13 +1106,7 @@ fn show_socket_group(
                 ));
             }
 
-            let quality_response = ui.add(
-                egui::DragValue::new(&mut gem.quality)
-                    .range(0..=23)
-                    .prefix("Q ")
-                    .suffix("%"),
-            );
-            if drag_value_committed(&quality_response) {
+            if stepped_drag_value(ui, &mut gem.quality, 0, 23, |d| d.prefix("Q ").suffix("%")) {
                 actions.push(SkillAction::SetGem(
                     group_index,
                     gem_index,
@@ -1111,12 +1116,7 @@ fn show_socket_group(
 
             // Skill copy count (totems, mirages, item-triggered copies)
             if gem.has_count {
-                let count_response = ui.add(
-                    egui::DragValue::new(&mut gem.count)
-                        .range(1..=99)
-                        .prefix("x "),
-                );
-                if drag_value_committed(&count_response) {
+                if stepped_drag_value(ui, &mut gem.count, 1, 99, |d| d.prefix("x ")) {
                     actions.push(SkillAction::SetGem(
                         group_index,
                         gem_index,
@@ -1155,7 +1155,11 @@ fn show_socket_group(
                 }
             }
 
-            if ui.small_button("✕").clicked() {
+            if ui
+                .small_button("🗑")
+                .on_hover_text("Remove this gem from the group")
+                .clicked()
+            {
                 actions.push(SkillAction::RemoveGem(group_index, gem_index));
             }
         });
@@ -1344,6 +1348,42 @@ fn default_selection(groups: &[SocketGroup]) -> Option<usize> {
 /// change made without dragging (typed edit / arrow buttons).
 fn drag_value_committed(response: &egui::Response) -> bool {
     response.drag_stopped() || (response.changed() && !response.dragged())
+}
+
+/// An integer DragValue that, while it has keyboard focus (i.e. the user has
+/// clicked in to type a value), shows "-"/"+" buttons beside it to step the
+/// value by 1.
+fn stepped_drag_value(
+    ui: &mut egui::Ui,
+    value: &mut i64,
+    min: i64,
+    max: i64,
+    configure: impl FnOnce(egui::DragValue<'_>) -> egui::DragValue<'_>,
+) -> bool {
+    // Wrapped in its own horizontal group (rather than relying on the
+    // caller's layout direction) so the "-"/"+" buttons always land beside
+    // the value, tightly spaced, instead of stacking underneath it. They are
+    // always visible (not just while editing) so repeated clicks work
+    // without the row jumping around. Returns whether the value changed
+    // (from a typed/dragged edit or a button click) and should be committed;
+    // a plain bool avoids leaning on egui::Response state across the button
+    // click, which isn't the widget that produced it.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let response = ui.add(configure(egui::DragValue::new(value).range(min..=max)));
+        let mut committed = drag_value_committed(&response);
+        let (minus, plus) = super::theme::step_buttons(ui);
+        if minus {
+            *value = (*value - 1).clamp(min, max);
+            committed = true;
+        }
+        if plus {
+            *value = (*value + 1).clamp(min, max);
+            committed = true;
+        }
+        committed
+    })
+    .inner
 }
 
 fn set_label(set: &SkillSetInfo) -> String {

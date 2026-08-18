@@ -42,8 +42,9 @@ enum AppStatus {
 impl PobApp {
     pub fn new(
         bridge: Result<LuaBridge, anyhow::Error>,
-        _cc: &eframe::CreationContext<'_>,
+        cc: &eframe::CreationContext<'_>,
     ) -> Self {
+        theme::install_fonts(&cc.egui_ctx);
         match bridge {
             Ok(b) => {
                 if let Err(e) = b.verify_boot() {
@@ -58,7 +59,9 @@ impl PobApp {
                     let screen = match b.build_path() {
                         Ok(path) => {
                             log::info!("Build path: {path}");
-                            Some(AppScreen::BuildList(Box::new(BuildListPanel::new(path))))
+                            Some(AppScreen::BuildList(Box::new(BuildListPanel::new(
+                                path, &b,
+                            ))))
                         }
                         Err(e) => {
                             log::error!("Failed to get build path: {e}");
@@ -125,7 +128,10 @@ impl PobApp {
     fn go_to_build_list(&mut self) {
         match self.bridge.build_path() {
             Ok(path) => {
-                self.screen = Some(AppScreen::BuildList(Box::new(BuildListPanel::new(path))));
+                self.screen = Some(AppScreen::BuildList(Box::new(BuildListPanel::new(
+                    path,
+                    &self.bridge,
+                ))));
             }
             Err(e) => {
                 log::error!("Failed to get build path: {e}");

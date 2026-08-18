@@ -3,11 +3,12 @@
 //! config sub-views with copy-to-primary actions, the calcs view with the
 //! "only show differences" filter, and the compare power report.
 
-use pob_egui::data::build_list::{self, BuildEntry};
+use pob_egui::data::build_list::{self, BuildEntry, IndexKey, SortMode};
 use pob_egui::data::compare::{self, CompareStatRow};
 use pob_egui::data::node_power::{self, PowerStat};
 use pob_egui::lua_bridge::LuaBridge;
 
+use super::build_list::relative_prefix;
 use super::theme::{self, Theme};
 
 const BETTER: egui::Color32 = egui::Color32::from_rgb(120, 220, 120);
@@ -60,27 +61,57 @@ pub struct ComparePanel {
 }
 
 struct ImportDialog {
-    build_path: String,
+    /// Sub path relative to the build root; the root itself comes from
+    /// `main.buildPath`, which upstream's scanner reads for itself.
     sub_path: String,
     entries: Vec<BuildEntry>,
     code: String,
+    filter: String,
+    /// The (sub path, filter) `entries` was produced for, so the cached index
+    /// is re-filtered on change rather than every frame.
+    filtered_as: Option<(String, String)>,
 }
 
 impl ImportDialog {
     fn new(bridge: &LuaBridge) -> Self {
-        let build_path = bridge.build_path().unwrap_or_default();
         let mut dialog = Self {
-            build_path,
             sub_path: String::new(),
             entries: Vec::new(),
             code: String::new(),
+            filter: String::new(),
+            filtered_as: None,
         };
-        dialog.refresh();
+        dialog.refresh(bridge);
         dialog
     }
 
-    fn refresh(&mut self) {
-        self.entries = build_list::scan_builds(&self.build_path, &self.sub_path);
+    /// Re-index from disk. Same split as the build list panel: this is the only
+    /// filesystem step, and `apply_filter` runs off the cached index.
+    fn refresh(&mut self, bridge: &LuaBridge) {
+        if let Err(e) =
+            build_list::refresh_index(bridge.lua(), IndexKey::ComparePicker, &self.sub_path)
+        {
+            log::error!("Failed to index builds: {e}");
+        }
+        self.filtered_as = None;
+    }
+
+    fn apply_filter(&mut self, bridge: &LuaBridge) {
+        let key = (self.sub_path.clone(), self.filter.trim().to_string());
+        if self.filtered_as.as_ref() == Some(&key) {
+            return;
+        }
+        match build_list::filter_index(
+            bridge.lua(),
+            IndexKey::ComparePicker,
+            &key.0,
+            &key.1,
+            SortMode::Name,
+        ) {
+            Ok(entries) => self.entries = entries,
+            Err(e) => log::error!("Failed to filter the build picker: {e}"),
+        }
+        self.filtered_as = Some(key);
     }
 }
 
@@ -715,6 +746,8 @@ impl ComparePanel {
         let mut enter_folder: Option<String> = None;
         let mut import_file: Option<std::path::PathBuf> = None;
         let mut import_code = false;
+        dialog.apply_filter(bridge);
+        let here = dialog.sub_path.clone();
 
         egui::Window::new("Import Comparison Build")
             .collapsible(false)
@@ -754,6 +787,17 @@ impl ComparePanel {
                         }
                     }
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Search:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut dialog.filter)
+                            .hint_text("e.g. class:assassin myfilename")
+                            .desired_width(240.0),
+                    );
+                    if !dialog.filter.is_empty() && ui.button("✖").clicked() {
+                        dialog.filter.clear();
+                    }
+                });
                 egui::ScrollArea::vertical()
                     .id_salt("compare_import_list")
                     .max_height(260.0)
@@ -761,19 +805,29 @@ impl ComparePanel {
                         for entry in &dialog.entries {
                             match entry {
                                 BuildEntry::Folder(f) => {
-                                    if ui.button(format!("📁 {}", f.folder_name)).clicked() {
-                                        enter_folder = Some(f.folder_name.clone());
+                                    let prefix = relative_prefix(&f.sub_path, &here);
+                                    if ui.button(format!("📁 {prefix}{}", f.folder_name)).clicked()
+                                    {
+                                        // A search hit can sit below the folder
+                                        // on screen, so navigate to where it is.
+                                        enter_folder =
+                                            Some(format!("{}{}", f.sub_path, f.folder_name));
                                     }
                                 }
                                 BuildEntry::Build(b) => {
-                                    if ui.button(&b.build_name).clicked() {
+                                    let prefix = relative_prefix(&b.sub_path, &here);
+                                    if ui.button(format!("{prefix}{}", b.build_name)).clicked() {
                                         import_file = Some(b.full_path.clone());
                                     }
                                 }
                             }
                         }
                         if dialog.entries.is_empty() {
-                            ui.weak("(empty folder)");
+                            if dialog.filter.trim().is_empty() {
+                                ui.weak("(empty folder)");
+                            } else {
+                                ui.weak("(no matches)");
+                            }
                         }
                     });
                 if ui.button("Cancel").clicked() {
@@ -783,11 +837,11 @@ impl ComparePanel {
 
         if let Some(sub_path) = nav_to {
             dialog.sub_path = sub_path;
-            dialog.refresh();
+            dialog.refresh(bridge);
         }
         if let Some(folder) = enter_folder {
-            dialog.sub_path = format!("{}{folder}/", dialog.sub_path);
-            dialog.refresh();
+            dialog.sub_path = format!("{folder}/");
+            dialog.refresh(bridge);
         }
         let mut imported = false;
         if let Some(path) = import_file {

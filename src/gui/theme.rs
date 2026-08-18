@@ -120,6 +120,23 @@ pub fn pob_layout_job(text: &str, size: f32, default: Color32) -> egui::text::La
 /// Gap between the end of a right-aligned label and its value/control.
 pub const LABEL_GAP: f32 = 8.0;
 
+/// Side length of a stepper button drawn by [`step_buttons`].
+const STEP_BUTTON_SIZE: f32 = 20.0;
+
+/// Draws a "-" and a "+" button of equal, fixed size (small_button sizes to
+/// its glyph, and "-" is narrower than "+" in most fonts, making a
+/// mismatched pair) and returns `(minus_clicked, plus_clicked)`.
+pub fn step_buttons(ui: &mut egui::Ui) -> (bool, bool) {
+    let size = egui::vec2(STEP_BUTTON_SIZE, ui.spacing().interact_size.y.min(STEP_BUTTON_SIZE));
+    let minus = ui
+        .add_sized(size, egui::Button::new("-").small())
+        .clicked();
+    let plus = ui
+        .add_sized(size, egui::Button::new("+").small())
+        .clicked();
+    (minus, plus)
+}
+
 /// Labels longer than this wrap onto a further line instead of widening the
 /// label column for every row.
 pub const WRAP_CHAR_THRESHOLD: usize = 30;
@@ -209,4 +226,29 @@ pub fn right_aligned_row<R>(
         .inner
     })
     .inner
+}
+
+/// Register the font families the UI draws with.
+///
+/// egui's default `Proportional` family is Ubuntu-Light plus the two emoji
+/// faces. None of those carry the geometric symbols the UI uses (socket dots
+/// `●`, drag handles `≡`, sort arrows `▲`/`▼`, `⚠`/`✏`/`✔`/`✖`, ...), so they
+/// render as missing-glyph boxes. DejaVu Sans (`assets/fonts/DejaVuSans.ttf`,
+/// Bitstream Vera License - see `DejaVuSans-LICENSE.txt` next to it) covers
+/// all of them, so it is appended as a last-resort fallback: it is only
+/// consulted for codepoints the earlier faces lack, leaving ordinary text -
+/// still set in Ubuntu-Light, whose metrics the fixed-width layout columns
+/// throughout the GUI are tuned against - untouched.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "DejaVuSans".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../assets/fonts/DejaVuSans.ttf"
+        ))),
+    );
+    if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        proportional.push("DejaVuSans".to_owned());
+    }
+    ctx.set_fonts(fonts);
 }

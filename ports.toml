@@ -320,3 +320,17 @@ CompareEntry:Rebuild, fixing an upstream bug (see DIVERGENCES.md, "Compare \
 entries reprocess their socket groups"). Registered so a pin bump surfaces it: \
 if upstream adds the call itself, drop the decorator and the DIVERGENCES entry.
 """
+
+[[port]]
+name = "item-is-anointable"
+ours = "src/data/items.rs::list_items"
+upstream = "src/Classes/ItemsTab.lua"
+anchor = "local function isAnointable(item)"
+sha256 = "a055495d1e4a06b4a9f0c30035f7d2c4cf1f0896fd220befe9bc65046b7af1e8"
+status = "faithful"
+notes = """
+Four-line eligibility predicate, ported because upstream's is a file-local \
+function with no callable handle. Gates the "Anoint..." context-menu entry. \
+Ported at v2.67.0, which added the Talisman exclusion: Talismans carry \
+base.type == "Amulet", so the plain type check this replaced offered anointing \
+on bases the game disallows."""

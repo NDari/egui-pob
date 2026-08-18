@@ -23,12 +23,11 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Sort builds (by name, date modified) - ordering calls upstream's own
   `naturalSortCompare`, keyed on `subPath + fileName` as upstream is, with
   "date modified" ties broken by name
-- [ ] The compare tab's build picker (`compare_tab.rs`) and the folder list in
-  the Save As browser (`build_view.rs`) still use `scan_builds`' plain
-  lowercase ordering rather than the natural sort above. Neither is upstream's
-  build list, so this is our own inconsistency rather than a parity gap, but
-  "Build 10" sorting before "Build 9" looks the same to a user wherever it
-  happens
+- [x] The compare tab's build picker (`compare_tab.rs`) and the folder list in
+  the Save As browser (`build_view.rs`) share that ordering. Both go through
+  `build_list::scan_builds_sorted`, which scans and then applies the same
+  `naturalSortCompare` pass, so "Build 9" precedes "Build 10" everywhere a
+  build directory is listed
 - [x] Build search/filter by name
 - [x] Recent builds list (last 10 opened, shown above the list; persisted in the app data dir)
 - [x] Build preview tooltip on hover (class, level, DPS/Life/EHP parsed from the XML's PlayerStat elements)
@@ -217,6 +216,15 @@ Status key: `[x]` done, `[~]` partial, `[ ]` not started
 - [x] Socket and link display (inline colored socket/link dots on equipped slots + the Sockets & Catalyst dialog; text line in tooltips)
 - [x] Influence icons display (upstream Assets pngs loaded as textures; shown on equipped slots and the item list)
 - [x] Flask display with charges/duration (via the item tooltip; presentation choice, no dedicated flask widget)
+- [x] Flask/tincture activation checkbox per flask slot (upstream's
+  `ItemSlotControl` activate box, shown on slots whose name matches "Flask" and
+  disabled while the slot is empty). Tinctures equip into the same slots and
+  share the toggle. `set_slot_active` writes both places upstream's callback
+  does - `slot.active`, which `CalcSetup` reads into `env.flasks` /
+  `env.tinctures`, and `activeItemSet[slot].active`, which `ItemsTab:Save`
+  persists as `active="true"` - then adds an undo state and flags a rebuild.
+  **This was missing from the tracker rather than deferred**: without it every
+  flask read as inactive and no flask or tincture mod reached the calcs
 - [x] Weapon DPS breakdown in tooltip (Physical, Elemental, Chaos, Total)
 - [x] Armor stats breakdown (Armour, Evasion, Energy Shield, Ward)
 
@@ -665,13 +673,20 @@ radius, driven by a new lookup-table pipeline.
   `configTab.calcFunc` / `calcBase` on every rebuild
 - [ ] Stat-difference tooltip on each custom-mod group's enable checkbox
   ("Enabling/Disabling this group will give you:")
-- [ ] `countAllowZero` inputs accept negative and zero values; Enemy Fire /
+- [x] `countAllowZero` inputs accept negative and zero values; Enemy Fire /
   Cold / Lightning / Chaos Resistance moved from `integer` to
-  `countAllowZero` (previously they could not be set to 0)
-- [ ] New "Pact calc mode" list option (Average / Max Hit), gated on Pact skills
-- [ ] "# of Brands attached to enemy (if not maximum)" is now gated by
-  `ifSkillFlag = "brand"` instead of an enemy multiplier
-- [ ] New "# of Permanent Minions (if not maximum)" count option
+  `countAllowZero` (previously they could not be set to 0). Free: the type
+  change is data-side in upstream's `varList`, and our count widget is a
+  free-text field parsed as `f64` (`config_tab.rs`), so it never rejected
+  negatives or zero in the first place
+- [x] New "Pact calc mode" list option (Average / Max Hit), gated on Pact
+  skills. Free: a plain `list` entry in `varList`, which `config.rs` renders
+  generically
+- [x] "# of Brands attached to enemy (if not maximum)" is now gated by
+  `ifSkillFlag = "brand"` instead of an enemy multiplier. Free: the gate is a
+  `varList` field consumed by upstream's `ConfigVisibility`, which we call
+- [x] New "# of Permanent Minions (if not maximum)" count option. Free: a
+  plain `count` entry in `varList`
 - Note: the "Add Mod" popup above is the one piece of the custom-modifier
   rework still outstanding; groups themselves are editable as free text.
 
@@ -715,10 +730,23 @@ radius, driven by a new lookup-table pipeline.
   and their tooltip icons
 - [ ] Attribute requirements on socketed items derived from base + local mods
   rather than the imported total
-- [ ] Crucible passive lines auto-tagged `{crucible}` on parse
-- [ ] Flask in-game state lines ("Lasts N Seconds", "Consumes N of N Charges
-  on use", "Currently has N Charges") no longer parsed as modifiers
-- [ ] Legacy Talisman bases excluded from anointing (`isAnointable`)
+- [x] Crucible passive lines auto-tagged `{crucible}` on parse. Free: the tag
+  is applied in `Item:ParseRaw`'s advanced-copy branch, which we call.
+  Verified end to end - an advanced-format `{ Allocated Crucible Passive
+  Skill }` header lands the mod in `crucibleModLines`, `BuildRaw` writes
+  `{crucible}`, and a re-parse of that raw text preserves it
+- [x] Flask in-game state lines ("Lasts N Seconds", "Consumes N of N Charges
+  on use", "Currently has N Charges") no longer parsed as modifiers. Free:
+  filtered inside `Item:ParseRaw` (`Item.lua:546-548`). Verified - a flask
+  carrying all three lines plus one real mod parses to exactly one explicit
+- [x] Legacy Talisman bases excluded from anointing (`isAnointable`). **Real
+  work, done.** Upstream's `isAnointable` is a file-local function, so the
+  predicate is ported (`ports.toml: item-is-anointable`) and surfaces as
+  `ItemListEntry::anointable`. Our gate was `item_type == "Amulet"`, and
+  Talismans carry `base.type == "Amulet"`, so the "Anoint..." entry was
+  offered on them; the port also picks up `cannotBeAnointed` bases and
+  non-amulets flagged `canBeAnointed`, neither of which the type check handled.
+  Covered by `test_anointable_excludes_talismans`
 - [ ] Enchantments no longer copied when editing an item
 - [ ] Tooltip lines can carry a background image (gem mod lines, desecrated mods)
 - [ ] Add Implicit crash fix (affects the popup we ported)
@@ -732,7 +760,12 @@ radius, driven by a new lookup-table pipeline.
   (`data.MatchingSocketQualityBonus = 10`); `CalcSetup` now tracks quality by
   source and the gem tooltip breaks it down (Item / Support / Global
   Modifiers / Socket Colour) instead of one combined line
-- [ ] "Light Radius" added to the stat sort list
+- [x] "Light Radius" added to the stat sort list. Free: the entry is
+  `{ stat="LightRadiusMod", label="Light Radius" }` in `data.powerStatList`
+  (`Data.lua:169`), flagged for neither `ignoreForNodes` nor `ignoreForItems`,
+  and every stat-sort dropdown we build reads that list. Note this is
+  `powerStatList`, not `SkillsTab.lua`'s `sortGemTypeList`, which is a literal
+  nine-entry list and did not change
 - [ ] Gem dropdown fixes: case-insensitive selection sync, re-sort whenever
   the list is rebuilt (`SortCurrentList` / `SyncSelection`)
 - [ ] Socket groups reprocessed after build load so item-granted groups
@@ -740,30 +773,59 @@ radius, driven by a new lookup-table pipeline.
 
 ### Build List
 
-- [ ] Recursive search: the build tree is indexed once into `buildIndex`, and
+`Modules/BuildListHelpers` is a plain module returning its functions, and every
+one of them runs headless as-is: `ScanFolder` walks the tree through our
+`NewFileSearch`, `ReadBuildHeader` reads through `io.open`, and `FilterList` /
+`SortList` / `CanMoveToSubPath` are pure. So this whole section is **called,
+not ported** - nothing here is registered in `ports.toml`. `data/build_list.rs`
+gained `refresh_index` / `filter_index` / `can_move_to_sub_path` / `dest_name`
+as thin wrappers; the index is cached Lua-side per browser (`IndexKey`) so
+keystrokes do no filesystem work, the same split upstream makes.
+
+- [x] Recursive search: the build tree is indexed once into `buildIndex`, and
   filtering searches nested folders, showing each hit with its relative
-  subpath prefix
-- [ ] `class:<name>` search term (placeholder `(e.g. class:assassin myfilename)`)
-- [ ] Build headers read from the first 2KB and pattern-matched instead of
-  parsing the whole file as XML
-- [ ] Guard against copying or moving a folder into itself, in both the
-  drag-drop and the copy/move paths
-- [ ] Duplicate-name resolution fixed to produce `name[1].xml` rather than a
-  bare `name[1]`; rename/move failures surface an error popup
-- [ ] Selection tracked by full file name (`SelByFullFileName`) rather than
-  bare file name, so nested results select correctly
+  subpath prefix. Rows below the folder on screen are prefixed via
+  `relative_prefix`; clicking a nested folder navigates to where it actually
+  is, not below the current directory
+- [x] `class:<name>` search term (placeholder `(e.g. class:assassin myfilename)`).
+  Upstream's placeholder is used verbatim in both search boxes
+- [x] Build headers read from the first 2KB and pattern-matched instead of
+  parsing the whole file as XML. Free with `ScanFolder`, which calls
+  `ReadBuildHeader` itself. Our Rust `parse_build_header` still backs
+  `scan_builds` and the hover preview, which reads full stats anyway
+- [~] Guard against copying or moving a folder into itself, in both the
+  drag-drop and the copy/move paths. `can_move_to_sub_path` calls upstream's
+  `CanMoveToSubPath` and now gates the "Move to" action, where it rejects a
+  move that goes nowhere. The folder half is **latent**: our build list has
+  neither folder moves nor drag-and-drop, so there is currently no path that
+  could recurse into itself. The guard is wired in ahead of either landing
+- [x] Duplicate-name resolution fixed to produce `name[1].xml` rather than a
+  bare `name[1]`; rename/move failures surface an error popup. Moves now call
+  upstream's `GetDestName`, which appends `[2]`, `[3]`, ... ahead of the
+  extension, so a collision renames instead of failing. Failures already
+  surfaced through `Popup::Error`. Note upstream starts at `[2]`, not the
+  `[1]` this line says
+- ~~Selection tracked by full file name (`SelByFullFileName`)~~ - not
+  applicable. Upstream's list keeps a selected row that a nested search result
+  could mis-target; ours has no selection state at all, since clicking a build
+  opens it directly. Structurally absent, like the other list-control fixes
+  below
 
 ### Compare Tab
 
-- [ ] Comparison build picker inherits the recursive search, `class:` filter,
-  and full-path selection
+- [x] Comparison build picker inherits the recursive search, `class:` filter,
+  and full-path selection. Same `refresh_index`/`filter_index` pair under its
+  own `IndexKey`, with a search box added to the dialog
 
 ### Calcs Tab
 
-- [ ] New "Pacts" section: Empowered Spells table (uptime, count,
+- [x] New "Pacts" section: Empowered Spells table (uptime, count,
   projectiles, beam chains, cascades) for Pact of Beidat / Ghorr / K'Tash /
-  Lycia. Flows through `CalcSections`, which we read, so this may be free
-  once the data is present
+  Lycia. Free, confirmed: `CalcsTab:NewSection` appends every `CalcSections`
+  entry to `sectionList` unconditionally, and `calcs_helper.lua` iterates that
+  list gating rows on upstream's own `CheckFlag` (which honours the section's
+  `haveOutput = "CreatePactOffensiveCalcSection"`). "Pacts" is present in the
+  live `sectionList`, between Warcries and Dot
 - [ ] Cost sections restructured around per-resource cost/efficiency stat
   groups (mana, life, ES, rage)
 
@@ -794,11 +856,13 @@ radius, driven by a new lookup-table pipeline.
   codes no longer skew highlight positions)
 - [ ] `EditControl` draws a placeholder string when empty
 - [ ] `ListControl` click handlers can veto selection by returning `false`
-- [ ] New engine global `GetDrawColor()` (the only one added this release).
+- [x] New engine global `GetDrawColor()` (the only one added this release).
   Used at `Tooltip.lua:609` in `Tooltip:Draw` to save the draw colour before
   painting a mod-line background. We read `tooltip.lines` rather than calling
-  `Draw`, so it should not be reached, but `src/lua_bridge/stubs.rs` needs it
-  to avoid a nil-call if any path ever does.
+  `Draw`, so it should not be reached, but a missing global would be a hard
+  error rather than a no-op. Registered in `src/lua_bridge/stubs.rs` returning
+  opaque white, `SetDrawColor`'s default; covered by
+  `test_get_draw_color_stub_present`.
 
 ### Free through the Lua VM (no Rust work)
 
@@ -817,11 +881,12 @@ revert, and Cane of Kulemak Catarina veiled mods.
 - Talisman enchants and item quality on traded items; trader explicit-parsing fix
 - Pseudo-stat and word-order-insensitive stat search in `TradeQueryGenerator`
 
-### Registered ports needing re-sync
+### Registered ports needing re-sync - done at the v2.67.2 pin
 
 Verified by extracting each `ports.toml` anchor at both pins. These seven
-anchored upstream functions changed and will fail `cargo test --test
-ports_sync` after the pin moves:
+anchored upstream functions changed and failed `cargo test --test ports_sync`
+when the pin moved. **All seven were re-synced during the bump; the test is
+green at v2.67.2.** The table is kept as the record of what changed and why:
 
 | Port | Upstream file |
 |------|---------------|
@@ -839,6 +904,11 @@ bandit/pantheon preservation, and `char-import-items-shaping` for
 `charData.guardian`; `add-modifier-popup` for the rare-like unique
 `supportsCustomModifiers` filter and a nil guard on `listMod` (the Add
 Implicit crash fix). No anchor went missing.
+
+Re-syncing a port body is not the same as shipping the feature it feeds.
+`charData.guardian` now travels with the imported equipment
+(`src/data/char_import.rs`), but nothing consumes it yet, so the Animate
+Guardian item set and the bandit/pantheon preservation above stay open.
 
 ---
 

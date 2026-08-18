@@ -800,20 +800,40 @@ impl ConfigPanel {
                     label_color,
                     note,
                     |ui| {
-                        let response =
-                            ui.add(egui::TextEdit::singleline(value).desired_width(80.0));
-                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            let lua_val = if let Ok(n) = value.parse::<f64>() {
-                                LuaValue::Number(n)
-                            } else {
-                                LuaValue::Number(0.0)
-                            };
-                            if let Err(e) = config::set_config_value(bridge.lua(), var, lua_val) {
-                                log::error!("Failed to set config {var}: {e}");
-                            } else {
-                                *changed = true;
+                        // "-"/"+" buttons stay beside the field at all times
+                        // (not just while editing) so a run of clicks works
+                        // without the row's layout jumping between clicks.
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            let response =
+                                ui.add(egui::TextEdit::singleline(value).desired_width(50.0));
+                            let mut commit = response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let current = value.parse::<f64>().unwrap_or(0.0);
+                            let (minus, plus) = super::theme::step_buttons(ui);
+                            if minus {
+                                *value = format_config_count(current - 1.0);
+                                commit = true;
                             }
-                        }
+                            if plus {
+                                *value = format_config_count(current + 1.0);
+                                commit = true;
+                            }
+                            if commit {
+                                let lua_val = if let Ok(n) = value.parse::<f64>() {
+                                    LuaValue::Number(n)
+                                } else {
+                                    LuaValue::Number(0.0)
+                                };
+                                if let Err(e) =
+                                    config::set_config_value(bridge.lua(), var, lua_val)
+                                {
+                                    log::error!("Failed to set config {var}: {e}");
+                                } else {
+                                    *changed = true;
+                                }
+                            }
+                        });
                     },
                 );
             }
@@ -1007,6 +1027,16 @@ fn labeled_row<R>(
         (None, None) => None,
     };
     super::theme::right_aligned_row(ui, label_width, job, combined.as_deref(), add_control)
+}
+
+/// Format a config Count value: as an integer when it is a whole number
+/// (the common case), else with its fractional part.
+fn format_config_count(n: f64) -> String {
+    if n.fract() == 0.0 {
+        format!("{n:.0}")
+    } else {
+        format!("{n}")
+    }
 }
 
 fn config_set_label(set: &ConfigSetInfo) -> String {
