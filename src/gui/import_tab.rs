@@ -442,6 +442,18 @@ impl ImportPanel {
                     &self.leagues,
                     char_import::last_league(bridge.lua()).as_deref(),
                 );
+                // Preselect the character this build was last imported from,
+                // if it's a match among the (now league-filtered) list.
+                let names: Vec<String> = self
+                    .filtered_characters()
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect();
+                match char_import::matching_character_index(bridge.lua(), &names) {
+                    Ok(Some(index)) => self.char_index = index,
+                    Ok(None) => {}
+                    Err(e) => log::error!("Failed to match remembered character: {e}"),
+                }
             }
             Err(e) => {
                 self.char_status = Some((format!("{e}"), true));
@@ -466,6 +478,11 @@ impl ImportPanel {
             )
             .map_err(|e| anyhow::anyhow!("Import failed: {e}"))
         });
+        if result.is_ok()
+            && let Err(e) = char_import::set_last_character(bridge.lua(), &character.name)
+        {
+            log::error!("Failed to remember imported character: {e}");
+        }
         self.finish_import(result)
     }
 
@@ -487,6 +504,11 @@ impl ImportPanel {
             )
             .map_err(|e| anyhow::anyhow!("Import failed: {e}"))
         });
+        if result.is_ok()
+            && let Err(e) = char_import::set_last_character(bridge.lua(), &character.name)
+        {
+            log::error!("Failed to remember imported character: {e}");
+        }
         self.finish_import(result)
     }
 

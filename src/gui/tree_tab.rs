@@ -686,12 +686,17 @@ impl TreePanel {
                     match node_power::power_step(bridge.lua()) {
                         Ok((done, progress)) => {
                             self.power.progress = progress;
+                            // Upstream reads each node's `power` field live
+                            // every frame while the builder coroutine fills
+                            // it in one node at a time, so the heatmap lights
+                            // up node by node as the calc progresses instead
+                            // of jumping in all at once at the end.
+                            match node_power::heatmap_colors(bridge.lua()) {
+                                Ok(colors) => self.power.colors = colors,
+                                Err(e) => log::error!("Failed to read heatmap: {e}"),
+                            }
                             if done {
                                 self.power.building = false;
-                                match node_power::heatmap_colors(bridge.lua()) {
-                                    Ok(colors) => self.power.colors = colors,
-                                    Err(e) => log::error!("Failed to read heatmap: {e}"),
-                                }
                                 if self.power.report_open {
                                     refresh_power_report(&mut self.power, bridge);
                                 }

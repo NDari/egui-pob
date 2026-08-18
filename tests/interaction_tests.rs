@@ -1399,6 +1399,26 @@ fn test_char_import_plumbing() {
         .eval()
         .expect("failed to read level");
     assert_eq!(level, 55, "items import should update the level");
+
+    // Remembering the imported character: set_last_character stores an
+    // upstream common.sha1 hash of the name, and matching_character_index
+    // finds it back among a candidate list (league-filtered, in dropdown
+    // order) regardless of position.
+    char_import::set_last_character(lua, "TestChar").expect("failed to remember character");
+    let hash = char_import::last_character_hash(lua).expect("hash should now be set");
+    assert!(!hash.is_empty());
+    let names = vec!["AltChar".to_string(), "TestChar".to_string()];
+    assert_eq!(
+        char_import::matching_character_index(lua, &names).expect("match lookup failed"),
+        Some(1),
+        "should find TestChar at its list position"
+    );
+    let no_match = vec!["AltChar".to_string()];
+    assert_eq!(
+        char_import::matching_character_index(lua, &no_match).expect("match lookup failed"),
+        None,
+        "TestChar isn't in this list"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -544,3 +544,60 @@ pub fn set_last_league_if_unset(lua: &Lua, league: &str) -> Result<(), mlua::Err
     )
     .call(league)
 }
+
+/// The build's remembered last-imported character (upstream
+/// `importTab.lastCharacterHash`, persisted in the build XML by upstream's
+/// saver). Upstream stores a `common.sha1` hash of the character's name
+/// rather than the plaintext name, so matching it against a candidate list
+/// has to go through upstream's own hash function - see
+/// [`matching_character_index`].
+pub fn last_character_hash(lua: &Lua) -> Option<String> {
+    lua.load("return mainObject_ref.main.modes['BUILD'].importTab.lastCharacterHash")
+        .eval::<Option<String>>()
+        .ok()
+        .flatten()
+}
+
+/// Remember the character a tree/items import was just taken from (upstream
+/// `saveDetails`, called from both "Import passive tree" and "Import items"
+/// button handlers before the download starts; we call it after a
+/// successful import instead, so a failed import doesn't overwrite it).
+pub fn set_last_character(lua: &Lua, name: &str) -> Result<(), mlua::Error> {
+    lua.load(
+        r#"
+        local name = ...
+        mainObject_ref.main.modes['BUILD'].importTab.lastCharacterHash = common.sha1(name)
+    "#,
+    )
+    .call(name)
+}
+
+/// Find which of `names` (in list order) matches the build's remembered
+/// last-imported character. Returns `None` if nothing is remembered or none
+/// of `names` match.
+pub fn matching_character_index(
+    lua: &Lua,
+    names: &[String],
+) -> Result<Option<usize>, mlua::Error> {
+    let names_table = lua.create_table()?;
+    for (i, name) in names.iter().enumerate() {
+        names_table.set(i + 1, name.as_str())?;
+    }
+    let index: Option<i64> = lua
+        .load(
+            r#"
+            local names, hash = ...
+            if not hash then
+                return nil
+            end
+            for i, name in ipairs(names) do
+                if common.sha1(name) == hash then
+                    return i
+                end
+            end
+            return nil
+        "#,
+        )
+        .call((names_table, last_character_hash(lua)))?;
+    Ok(index.map(|i| (i - 1) as usize))
+}
