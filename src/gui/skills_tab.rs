@@ -45,6 +45,22 @@ struct GemSuggest {
     sort_by_dps: bool,
 }
 
+/// State for replacing a gem in place: click a gem's name to open a search
+/// field over it (upstream's gem name `GemSelectControl`), fuzzy-search, and
+/// select a match to swap it in. Only one slot can be edited at a time.
+#[derive(Default)]
+struct GemReplaceState {
+    /// (group index, gem index) of the slot currently being edited.
+    editing: Option<(usize, usize)>,
+    text: String,
+    error: Option<String>,
+    /// Set the frame editing starts, so the field can claim focus once.
+    focus_pending: bool,
+    /// Separate from the "add gem" row's suggestion state so replacing one
+    /// gem doesn't clobber an in-progress add in another group.
+    suggest: GemSuggest,
+}
+
 /// Drag payload: a socket group being reordered.
 struct GroupDragPayload {
     from: usize,
@@ -71,6 +87,8 @@ enum SkillAction {
     SetGroupCount(usize, i64),
     SetGem(usize, usize, GemProperty),
     AddGem(usize, String),
+    /// Replace an existing gem in place by fuzzy name (group, gem, name).
+    ReplaceGem(usize, usize, String),
     RemoveGem(usize, usize),
     /// Move a socket group to a new list position (from, to).
     MoveGroup(usize, usize),
@@ -106,6 +124,8 @@ pub struct SkillsPanel {
     confirm_delete_all: bool,
     /// Gem autocomplete state.
     suggest: GemSuggest,
+    /// In-place gem replacement state (click a gem name to search).
+    replace: GemReplaceState,
     /// Skill sets in order + the active set id.
     sets: Vec<SkillSetInfo>,
     active_set: i64,
@@ -160,6 +180,7 @@ impl SkillsPanel {
                     confirm_delete: None,
                     confirm_delete_all: false,
                     suggest: GemSuggest::default(),
+                    replace: GemReplaceState::default(),
                     sets,
                     active_set,
                     manage_sets_open: false,
@@ -185,6 +206,7 @@ impl SkillsPanel {
                     confirm_delete: None,
                     confirm_delete_all: false,
                     suggest: GemSuggest::default(),
+                    replace: GemReplaceState::default(),
                     sets,
                     active_set,
                     manage_sets_open: false,
@@ -563,6 +585,7 @@ impl SkillsPanel {
                     &mut self.hovered_gem,
                     &imbued_slots,
                     &mut self.imbued_options,
+                    &mut self.replace,
                 );
             });
 
@@ -800,6 +823,21 @@ impl SkillsPanel {
                     }
                     Err(e) => Err(e),
                 },
+                SkillAction::ReplaceGem(group, gem, ref name) => {
+                    match skills::replace_gem(lua, group, gem, name) {
+                        Ok(None) => {
+                            self.replace.editing = None;
+                            self.replace.text.clear();
+                            self.replace.error = None;
+                            Ok(())
+                        }
+                        Ok(Some(err_msg)) => {
+                            self.replace.error = Some(err_msg);
+                            continue;
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
                 SkillAction::RemoveGem(group, gem) => skills::remove_gem(lua, group, gem),
                 SkillAction::MoveGroup(from, to) => skills::move_socket_group(lua, from, to),
                 SkillAction::MoveGem(group, from, to) => skills::move_gem(lua, group, from, to),
@@ -869,6 +907,7 @@ fn show_socket_group(
     hovered_gem: &mut Option<(usize, usize)>,
     imbued_slots: &HashMap<String, usize>,
     imbued_options: &mut Option<(usize, Vec<GemChoice>)>,
+    replace: &mut GemReplaceState,
 ) {
     ui.horizontal(|ui| {
         let mut enabled = group.enabled;
@@ -1038,7 +1077,16 @@ fn show_socket_group(
     let group_index = group.index;
     for (i, gem) in group.gems.iter_mut().enumerate() {
         let gem_index = i + 1; // Lua is 1-based
+        // Set inside the row below when this gem's name is being edited, so
+        // the search/commit/cancel handling after the row can see its
+        // response without changing what the row closure returns.
+        let mut editing_field_resp: Option<egui::Response> = None;
+        // Distance from the row's left edge to the name column, so the
+        // global-effect toggle row below can indent to line up under the
+        // gem's name rather than the row's start.
+        let mut name_indent: f32 = 0.0;
         let row_resp = ui.horizontal(|ui| {
+            let row_left = ui.cursor().left();
             // Drag handle to reorder gems within the group
             ui.dnd_drag_source(
                 egui::Id::new(("gem_drag", group_index, gem_index)),
@@ -1073,28 +1121,60 @@ fn show_socket_group(
                 egui::vec2(GEM_NAME_WIDTH, ui.spacing().interact_size.y),
                 egui::Sense::hover(),
             );
-            let name_resp = ui
-                .new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(name_rect)
-                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                )
-                .add(egui::Label::new(egui::RichText::new(&gem.name).color(color)).truncate());
-            // Upstream gem tooltip (GemTooltip.lua) on hover; F1 on
-            // the hovered gem opens its wiki page
-            if name_resp.hovered() {
-                *hovered_gem = Some((group_index, gem_index));
-                let lines = gem_tooltip_cache
-                    .entry((group_index, gem_index))
-                    .or_insert_with(|| {
-                        skills::gem_tooltip_lines(bridge.lua(), group_index, gem_index)
-                            .unwrap_or_else(|e| {
-                                log::error!("Gem tooltip failed: {e}");
-                                Vec::new()
-                            })
-                    });
-                if !lines.is_empty() {
-                    name_resp.on_hover_ui(|ui| show_tooltip_lines(ui, lines));
+            name_indent = name_rect.left() - row_left;
+            let mut name_child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(name_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            let is_editing = replace.editing == Some((group_index, gem_index));
+            if is_editing {
+                // Click the gem's name to search for a replacement (upstream's
+                // gem name control): type to fuzzy-match, pick from the
+                // dropdown below the row, and it swaps the gem in place.
+                let resp = name_child.add(
+                    egui::TextEdit::singleline(&mut replace.text)
+                        .desired_width(GEM_NAME_WIDTH)
+                        .hint_text(gem.name.as_str()),
+                );
+                if replace.focus_pending {
+                    resp.request_focus();
+                    replace.focus_pending = false;
+                }
+                editing_field_resp = Some(resp);
+            } else {
+                // Sized to the full name column, not just the rendered
+                // glyphs, so the whole column is clickable up to the level
+                // box - not just the text itself.
+                let name_resp = name_child.add_sized(
+                    name_rect.size(),
+                    egui::Label::new(egui::RichText::new(&gem.name).color(color))
+                        .truncate()
+                        .sense(egui::Sense::click()),
+                );
+                if name_resp.clicked() {
+                    replace.editing = Some((group_index, gem_index));
+                    replace.text.clear();
+                    replace.error = None;
+                    replace.focus_pending = true;
+                    replace.suggest.query_key = None;
+                }
+                // Upstream gem tooltip (GemTooltip.lua) on hover; F1 on
+                // the hovered gem opens its wiki page
+                if name_resp.hovered() {
+                    *hovered_gem = Some((group_index, gem_index));
+                    let lines = gem_tooltip_cache
+                        .entry((group_index, gem_index))
+                        .or_insert_with(|| {
+                            skills::gem_tooltip_lines(bridge.lua(), group_index, gem_index)
+                                .unwrap_or_else(|e| {
+                                    log::error!("Gem tooltip failed: {e}");
+                                    Vec::new()
+                                })
+                        });
+                    if !lines.is_empty() {
+                        name_resp.on_hover_ui(|ui| show_tooltip_lines(ui, lines));
+                    }
                 }
             }
 
@@ -1115,44 +1195,13 @@ fn show_socket_group(
             }
 
             // Skill copy count (totems, mirages, item-triggered copies)
-            if gem.has_count {
-                if stepped_drag_value(ui, &mut gem.count, 1, 99, |d| d.prefix("x ")) {
-                    actions.push(SkillAction::SetGem(
-                        group_index,
-                        gem_index,
-                        GemProperty::Count(gem.count),
-                    ));
-                }
-            }
-
-            // Vaal-gem global effect toggles (upstream enableGlobal1/2)
-            if let Some(label) = &gem.global1_label {
-                let mut on = gem.enable_global1;
-                if ui
-                    .checkbox(&mut on, label.as_str())
-                    .on_hover_text("Enable this granted skill's global effects (auras, buffs)")
-                    .changed()
-                {
-                    actions.push(SkillAction::SetGem(
-                        group_index,
-                        gem_index,
-                        GemProperty::EnableGlobal1(on),
-                    ));
-                }
-            }
-            if let Some(label) = &gem.global2_label {
-                let mut on = gem.enable_global2;
-                if ui
-                    .checkbox(&mut on, label.as_str())
-                    .on_hover_text("Enable this granted skill's global effects (auras, buffs)")
-                    .changed()
-                {
-                    actions.push(SkillAction::SetGem(
-                        group_index,
-                        gem_index,
-                        GemProperty::EnableGlobal2(on),
-                    ));
-                }
+            if gem.has_count && stepped_drag_value(ui, &mut gem.count, 1, 99, |d| d.prefix("x "))
+            {
+                actions.push(SkillAction::SetGem(
+                    group_index,
+                    gem_index,
+                    GemProperty::Count(gem.count),
+                ));
             }
 
             if ui
@@ -1163,6 +1212,152 @@ fn show_socket_group(
                 actions.push(SkillAction::RemoveGem(group_index, gem_index));
             }
         });
+
+        // Vaal-gem global effect toggles (upstream enableGlobal1/2), on
+        // their own row under the gem rather than crowding the name/level/
+        // quality row to the right.
+        if gem.global1_label.is_some() || gem.global2_label.is_some() {
+            ui.horizontal(|ui| {
+                ui.add_space(name_indent);
+                if let Some(label) = &gem.global1_label {
+                    let mut on = gem.enable_global1;
+                    if ui
+                        .checkbox(&mut on, label.as_str())
+                        .on_hover_text(
+                            "Enable this granted skill's global effects (auras, buffs)",
+                        )
+                        .changed()
+                    {
+                        actions.push(SkillAction::SetGem(
+                            group_index,
+                            gem_index,
+                            GemProperty::EnableGlobal1(on),
+                        ));
+                    }
+                }
+                if let Some(label) = &gem.global2_label {
+                    let mut on = gem.enable_global2;
+                    if ui
+                        .checkbox(&mut on, label.as_str())
+                        .on_hover_text(
+                            "Enable this granted skill's global effects (auras, buffs)",
+                        )
+                        .changed()
+                    {
+                        actions.push(SkillAction::SetGem(
+                            group_index,
+                            gem_index,
+                            GemProperty::EnableGlobal2(on),
+                        ));
+                    }
+                }
+            });
+        }
+
+        // In-place gem replacement: search field + fuzzy dropdown, shown
+        // under the row while this gem's name is being edited. Mirrors the
+        // "Add Gem" row's autocomplete below.
+        if let Some(field_resp) = editing_field_resp {
+            let submitted =
+                field_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if submitted && !replace.text.trim().is_empty() {
+                actions.push(SkillAction::ReplaceGem(
+                    group_index,
+                    gem_index,
+                    replace.text.trim().to_string(),
+                ));
+            }
+            let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape))
+                || (field_resp.lost_focus() && !submitted && !replace.suggest.hovered);
+            if cancelled {
+                replace.editing = None;
+                replace.text.clear();
+                replace.error = None;
+            }
+            if let Some(err) = &replace.error {
+                ui.colored_label(super::theme::Theme::ERROR, err);
+            }
+
+            let show_list = replace.editing == Some((group_index, gem_index))
+                && !replace.text.trim().is_empty()
+                && (field_resp.has_focus() || replace.suggest.hovered);
+            if show_list {
+                let key = (group_index, replace.text.clone(), replace.suggest.sort_by_dps);
+                if replace.suggest.query_key.as_ref() != Some(&key) || replace.suggest.pending {
+                    match gems::search_gems(
+                        bridge.lua(),
+                        group_index,
+                        replace.text.trim(),
+                        replace.suggest.sort_by_dps,
+                        12,
+                        false,
+                    ) {
+                        Ok(results) => {
+                            replace.suggest.results = results.choices;
+                            replace.suggest.pending = results.pending;
+                            replace.suggest.progress = results.progress;
+                            if results.pending {
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Gem search failed: {e}");
+                            replace.suggest.results = Vec::new();
+                            replace.suggest.pending = false;
+                        }
+                    }
+                    replace.suggest.query_key = Some(key);
+                }
+
+                let frame_resp = egui::Frame::group(ui.style())
+                    .inner_margin(4.0)
+                    .show(ui, |ui| {
+                        if replace.suggest.pending {
+                            ui.colored_label(
+                                super::theme::Theme::TEXT_DIM,
+                                format!("sorting by DPS... {}%", replace.suggest.progress),
+                            );
+                        }
+                        if replace.suggest.results.is_empty() {
+                            ui.colored_label(super::theme::Theme::TEXT_DIM, "no matches");
+                        }
+                        for choice in &replace.suggest.results {
+                            ui.horizontal(|ui| {
+                                let color = match choice.attribute.as_str() {
+                                    "str" => egui::Color32::from_rgb(224, 80, 48),
+                                    "dex" => egui::Color32::from_rgb(112, 255, 112),
+                                    "int" => egui::Color32::from_rgb(112, 112, 255),
+                                    _ => super::theme::Theme::TEXT_DEFAULT,
+                                };
+                                let tick = if choice.can_support { "✔ " } else { "    " };
+                                let resp = ui.selectable_label(
+                                    false,
+                                    egui::RichText::new(format!("{tick}{}", choice.name))
+                                        .color(color),
+                                );
+                                if replace.suggest.sort_by_dps && choice.dps > 0.0 {
+                                    ui.label(super::theme::pob_layout_job(
+                                        &format!("{}{:.0}", choice.dps_color, choice.dps),
+                                        12.0,
+                                        super::theme::Theme::TEXT_MUTED,
+                                    ));
+                                }
+                                if resp.clicked() {
+                                    actions.push(SkillAction::ReplaceGem(
+                                        group_index,
+                                        gem_index,
+                                        choice.name.clone(),
+                                    ));
+                                }
+                            });
+                        }
+                    });
+                replace.suggest.hovered = frame_resp.response.contains_pointer();
+            } else {
+                replace.suggest.hovered = false;
+            }
+        }
+
         // Drop target: another gem of the same group dropped on this
         // row moves to this position
         if let Some(payload) = row_resp.response.dnd_hover_payload::<GemDragPayload>()

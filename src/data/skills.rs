@@ -662,6 +662,56 @@ pub fn add_gem(
     .call((group_index, name_spec))
 }
 
+/// Replace an existing gem's name in place (upstream's gem name
+/// `GemSelectControl`, which lets you retarget a socketed gem without
+/// deleting and re-adding it). The name is fuzzily resolved the same way as
+/// [`add_gem`]. Keeps the gem's quality/enabled/count; level resets to the
+/// new gem's natural default, matching upstream. Returns Some(error) and
+/// leaves the gem unchanged if the name is unrecognised or ambiguous.
+pub fn replace_gem(
+    lua: &Lua,
+    group_index: usize,
+    gem_index: usize,
+    name_spec: &str,
+) -> Result<Option<String>, mlua::Error> {
+    lua.load(
+        r#"
+        local groupIndex, gemIndex, nameSpec = ...
+        local build = mainObject_ref.main.modes['BUILD']
+        local skillsTab = build.skillsTab
+        local group = skillsTab.socketGroupList[groupIndex]
+        if not group then
+            return "No such socket group"
+        end
+        local gem = group.gemList[gemIndex]
+        if not gem then
+            return "No such gem"
+        end
+        local savedNameSpec, savedGemData, savedGemId = gem.nameSpec, gem.gemData, gem.gemId
+        gem.nameSpec = nameSpec
+        gem.gemData = nil
+        gem.gemId = nil
+        gem.errMsg = nil
+        skillsTab:ProcessSocketGroup(group)
+        if gem.errMsg then
+            local err = gem.errMsg
+            gem.nameSpec, gem.gemData, gem.gemId, gem.errMsg = savedNameSpec, savedGemData, savedGemId, nil
+            skillsTab:ProcessSocketGroup(group)
+            return err
+        end
+        if gem.gemData then
+            gem.level = skillsTab:ProcessGemLevel(gem.gemData)
+            skillsTab:ProcessSocketGroup(group)
+        end
+        skillsTab:AddUndoState()
+        build.buildFlag = true
+        _runCallback('OnFrame')
+        return nil
+    "#,
+    )
+    .call((group_index, gem_index, name_spec))
+}
+
 /// Remove a gem from a socket group.
 pub fn remove_gem(lua: &Lua, group_index: usize, gem_index: usize) -> Result<(), mlua::Error> {
     lua.load(format!(
